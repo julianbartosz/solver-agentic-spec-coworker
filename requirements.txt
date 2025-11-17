@@ -1,3 +1,8 @@
 langchain>=0.1.0
 langgraph>=0.0.20
 langchain-core>=0.1.0
+openai
+anthropic
+python-dotenv
+pytest
+pyyaml
