@@ -115,5 +115,59 @@ def create_spec_discovery_graph() -> StateGraph:
     return workflow.compile()
 
 
+# Factory function for LangGraph configuration
+def build_graph() -> StateGraph:
+    """
+    Factory function to build the spec discovery graph.
+
+    This function is referenced in langgraph.json and used by the LangGraph
+    runtime to instantiate the workflow.
+
+    Returns:
+        Compiled StateGraph ready for execution
+    """
+    return create_spec_discovery_graph()
+
+
 # Create the compiled graph instance
 spec_discovery_graph = create_spec_discovery_graph()
+
+
+# Command-line interface for testing
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    # Add parent directory to path to allow imports
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from solver_coworker.config import get_settings
+
+    settings = get_settings()
+
+    # Example initial state
+    initial_state: SpecState = {
+        "spec_content": (
+            "GET /api/users - Returns list of users\n"
+            "POST /api/users - Create a new user"
+        ),
+        "analysis": "",
+        "schema": "",
+        "validation_result": "",
+        "errors": [],
+    }
+
+    print("Running spec discovery graph with example data...")
+    print(f"API specs directory: {settings.api_specs_dir}")
+    print("\nInitial state:")
+    print(f"  Spec content: {initial_state['spec_content'][:50]}...")
+    print("\nExecuting workflow...")
+
+    result = spec_discovery_graph.invoke(initial_state)
+
+    print("\nWorkflow completed!")
+    print(f"  Analysis: {result['analysis']}")
+    print(f"  Schema: {result['schema']}")
+    print(f"  Validation: {result['validation_result']}")
+    if result['errors']:
+        print(f"  Errors: {result['errors']}")
