@@ -13,7 +13,17 @@ Agentic co-worker to auto-discover data/API requirements from source specs using
 - **Modular Architecture**:
   - `solver_coworker.graphs`: LangGraph workflow definitions
   - `solver_coworker.agents`: LangChain agent implementations
+    - `ingestion_agent`: Load API specs from local files
+    - `analysis_agent`: Extract endpoints and schemas using LLM
+    - `schema_agent`: Map to silver/gold schema concepts
+    - `validation_agent`: Validate against APIs and quality rules
   - `solver_coworker.tools`: Agent tools and utilities
+    - `spec_loader`: Read specs from various formats (JSON, YAML, Markdown)
+    - `vector_store`: RAG capabilities for spec querying
+    - `graph_store`: Knowledge graph for entity relationships
+    - `api_runner`: Execute HTTP requests from discovered specs
+  - `solver_coworker.config`: Configuration management
+  - `solver_coworker.logging`: Logging utilities
 
 ## Requirements
 
@@ -33,6 +43,18 @@ For development:
 pip install -e ".[dev]"
 ```
 
+## Configuration
+
+Copy `.env.example` to `.env` and fill in your API keys:
+
+```bash
+cp .env.example .env
+```
+
+Required environment variables:
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `ANTHROPIC_API_KEY`: Your Anthropic API key
+
 ## Usage
 
 ```python
@@ -48,6 +70,34 @@ result = spec_discovery_graph.invoke({
 })
 
 print(result['validation_result'])
+```
+
+### Running from Command Line
+
+You can also run the workflow directly:
+
+```bash
+python -m solver_coworker.graphs.spec_discovery_graph
+```
+
+### Project Structure
+
+```
+solver-agentic-spec-coworker/
+├── docs/
+│   ├── design/           # Design documents (placeholders)
+│   └── decisions/        # Architecture Decision Records
+├── data/
+│   ├── raw/api_specs/    # Input API specifications
+│   ├── processed/        # Processed data
+│   └── models/           # Trained models
+├── solver_coworker/
+│   ├── agents/           # Agent implementations
+│   ├── graphs/           # LangGraph workflow definitions
+│   ├── tools/            # Utility tools
+│   ├── config.py         # Configuration management
+│   └── logging.py        # Logging utilities
+└── tests/                # Test suite
 ```
 
 ## Development
