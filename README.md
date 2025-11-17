@@ -129,4 +129,239 @@ GitHub Actions workflow runs tests on Python 3.11 and 3.12:
 
 ## License
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
+## Implementation Checklist
+
+### 1. Local Environment
+
+* [ ] Install Python 3.11+
+* [ ] Create virtualenv and install core deps:
+
+  * `langchain`, `langgraph`, `pydantic`, `requests`
+  * `psycopg2` or `asyncpg`
+  * `pgvector` client or chosen vector store client
+* [ ] Start Postgres in Docker with pgvector extension
+
+---
+
+### 2. Database Schemas
+
+**Silver schema (`spec_silver`)**
+
+* [ ] Tables:
+
+  * `source_systems`
+  * `spec_documents`, `spec_sections`
+  * `endpoints`, `endpoint_parameters`
+  * `schemas`, `fields`
+  * `entities`, `entity_fields`, `entity_relationships`
+  * `endpoint_entities`
+  * `lineage_spec_links`
+* [ ] Indexes:
+
+  * `endpoints(path, http_method)`
+  * `entities(name, source_system_id)`
+
+**Gold schema (`requirements_gold`)**
+
+* [ ] Tables:
+
+  * `modeled_tables`, `modeled_columns`
+  * `load_strategies`
+  * `data_quality_rules`, `data_quality_results`
+  * `data_contracts`
+
+**Graph + vector**
+
+* [ ] Graph storage:
+
+  * `graph_nodes`, `graph_edges` or views over Silver tables
+* [ ] Vector storage:
+
+  * pgvector table for embeddings with metadata columns
+  * Index on `(source_system_id, spec_document_id, spec_section_id)`
+
+---
+
+### 3. Core Domain Models (Python)
+
+* [ ] Typed dicts or Pydantic models for:
+
+  * `SourceSystemRef`, `SpecDocumentRef`
+  * `EndpointDraft`, `FieldDraft`
+  * `EntityDraft`, `RelationshipDraft`
+  * `ModeledTableDraft`, `ModeledColumnDraft`
+  * `LoadStrategyDraft`, `DataQualityRuleDraft`, `DataContractDraft`
+* [ ] `WorkflowState` TypedDict with sections:
+
+  * Context: `source_ref`, `spec_ref`
+  * Spec content: `doc_chunks`
+  * Silver drafts: `endpoint_drafts`, `entity_drafts`, `relationship_drafts`, `field_drafts`, `graph_nodes`, `graph_edges`
+  * Gold drafts: `modeled_table_drafts`, `modeled_column_drafts`, `load_strategy_drafts`, `dq_rule_drafts`, `contract_drafts`
+  * Control: `plan`, `completed_steps`, `errors`, `persisted_*`, `report_markdown`
+
+Use LangGraph reducers for list fields.
+
+---
+
+### 4. LangGraph Workflow
+
+**Nodes to implement**
+
+* [ ] `plan_run`
+* [ ] `ingest_spec`
+* [ ] `detect_and_parse_spec`
+* [ ] `extract_endpoints_and_schemas`
+* [ ] `extract_entities_and_relationships`
+* [ ] `build_graph`
+* [ ] `design_gold_model`
+* [ ] `design_load_strategies`
+* [ ] `design_quality_and_contracts`
+* [ ] `generate_code` (optional)
+* [ ] `persist_results`
+* [ ] `build_report`
+
+**Graph wiring**
+
+* [ ] Build `StateGraph[WorkflowState]`
+
+* [ ] Add nodes and linear edges:
+
+  `plan_run → ingest_spec → detect_and_parse_spec → extract_endpoints_and_schemas → extract_entities_and_relationships → build_graph → design_gold_model → design_load_strategies → design_quality_and_contracts → generate_code → persist_results → build_report`
+
+* [ ] Entry node: `plan_run`
+
+* [ ] Finish node: `build_report`
+
+* [ ] Conditional edge after `detect_and_parse_spec` to route unsupported media types to an error node
+
+---
+
+### 5. Tooling and RAG
+
+**Spec ingestion**
+
+* [ ] HTTP fetcher for URLs
+* [ ] File loader for local paths
+* [ ] OpenAPI parser (JSON/YAML)
+* [ ] HTML parser
+* [ ] PDF loader and text extractor
+* [ ] Chunker that populates `spec_sections` + `doc_chunks`
+
+**Vector retrieval**
+
+* [ ] Embedding function (e.g., OpenAI or Azure embeddings)
+* [ ] Index builder that writes embeddings and metadata to pgvector
+* [ ] Retriever that:
+
+  * Filters by metadata (source, section_type, entity, endpoint)
+  * Runs similarity search in the filtered set
+
+**GraphRAG**
+
+* [ ] `build_graph` that maps Silver drafts to `graph_nodes` and `graph_edges`
+* [ ] Helper functions:
+
+  * Get local neighborhood for an entity or endpoint
+  * Map neighborhood back to related text chunks for prompts
+
+---
+
+### 6. Public Interfaces
+
+**Python API**
+
+* [ ] Implement:
+
+  ```python
+  def discover_requirements(
+      spec_ref: SpecDocumentRef,
+      source_ref: Optional[SourceSystemRef] = None,
+      options: Optional[DiscoveryOptions] = None,
+  ) -> DiscoveryResult:
+      ...
+  ```
+
+* [ ] Return:
+
+  * IDs for source, spec, Silver/Gold commits
+  * Path or ID for the report
+
+**CLI**
+
+* [ ] Thin wrapper command, for example:
+
+  ```bash
+  ai-co-worker discover \
+    --spec-url "https://api.stripe.com/openapi.json" \
+    --source-code "stripe" \
+    --out-dir "./artifacts/stripe"
+  ```
+
+* [ ] Write:
+
+  * Report (Markdown or HTML)
+  * Exported YAML/JSON contracts
+  * Generated code stubs if present
+
+---
+
+### 7. Testing
+
+**Unit tests**
+
+* [ ] OpenAPI parsing helpers
+* [ ] Type normalization and JSON path flattening
+* [ ] Mapping entities → modeled tables
+* [ ] Mapping fields → modeled columns
+
+**Integration tests**
+
+* [ ] Node-level tests for `ingest_spec`, `extract_endpoints_and_schemas`, `design_gold_model` with small fixtures and a test Postgres DB
+
+**End-to-end tests**
+
+* [ ] Prepare at least ten public API specs (Stripe, Twilio, GitHub, Slack, Shopify, Notion, HubSpot, SendGrid, OpenAI, plus one larger spec)
+* [ ] For each:
+
+  * Run `discover_requirements` against test Postgres
+  * Check key entities, endpoints, and tables exist and have reasonable grain and keys
+
+---
+
+### 8. Milestones (v1)
+
+* [ ] **M1**: Minimal pipeline
+
+  * Ingest one OpenAPI spec → Silver tables + simple report
+
+* [ ] **M2**: Full Silver + basic Gold
+
+  * Entities, relationships, tables, columns, load patterns for three specs
+
+* [ ] **M3**: GraphRAG + evaluation
+
+  * Graph construction
+  * RAG + GraphRAG in design nodes
+  * Evaluation across the ten-spec corpus
+
+* [ ] **M4**: Codegen + refinement
+
+  * Code generation node
+  * Prompt and heuristic tuning based on test results and review
 MIT
