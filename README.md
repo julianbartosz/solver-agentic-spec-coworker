@@ -1,367 +1,439 @@
-# solver-agentic-spec-coworker
+1. Plan
 
-Agentic co-worker to auto-discover data/API requirements from source specs using LangChain + LangGraph.
+1) Outline README structure.
+2) Fill in sections with concrete guidance tied to your design.
+3) Add “how to change things safely” and quick FAQ.
 
-## Features
-
-- **LangGraph Workflow**: Implements a `spec_discovery_graph` with the following stages:
-  - **Ingest**: Read and parse API specifications
-  - **Analyze**: Analyze specifications to identify requirements
-  - **Schema**: Extract and generate schema from analysis
-  - **Validation**: Validate the generated schema and analysis
-
-- **Modular Architecture**:
-  - `solver_coworker.graphs`: LangGraph workflow definitions
-  - `solver_coworker.agents`: LangChain agent implementations
-    - `ingestion_agent`: Load API specs from local files
-    - `analysis_agent`: Extract endpoints and schemas using LLM
-    - `schema_agent`: Map to silver/gold schema concepts
-    - `validation_agent`: Validate against APIs and quality rules
-  - `solver_coworker.tools`: Agent tools and utilities
-    - `spec_loader`: Read specs from various formats (JSON, YAML, Markdown)
-    - `vector_store`: RAG capabilities for spec querying
-    - `graph_store`: Knowledge graph for entity relationships
-    - `api_runner`: Execute HTTP requests from discovered specs
-  - `solver_coworker.config`: Configuration management
-  - `solver_coworker.logging`: Logging utilities
-
-## Requirements
-
-- Python 3.11 or higher
-- LangChain >= 0.1.0
-- LangGraph >= 0.0.20
-
-## Installation
-
-```bash
-pip install -e .
-```
-
-For development:
-
-```bash
-pip install -e ".[dev]"
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` and fill in your API keys:
-
-```bash
-cp .env.example .env
-```
-
-Required environment variables:
-- `OPENAI_API_KEY`: Your OpenAI API key
-- `ANTHROPIC_API_KEY`: Your Anthropic API key
-
-## Usage
-
-```python
-from solver_coworker import spec_discovery_graph
-
-# Process an API specification
-result = spec_discovery_graph.invoke({
-    'spec_content': 'GET /api/users - Returns list of users',
-    'analysis': '',
-    'schema': '',
-    'validation_result': '',
-    'errors': []
-})
-
-print(result['validation_result'])
-```
-
-### Running from Command Line
-
-You can also run the workflow directly:
-
-```bash
-python -m solver_coworker.graphs.spec_discovery_graph
-```
-
-### Project Structure
-
-```
-solver-agentic-spec-coworker/
-├── docs/
-│   ├── design/           # Design documents (placeholders)
-│   └── decisions/        # Architecture Decision Records
-├── data/
-│   ├── raw/api_specs/    # Input API specifications
-│   ├── processed/        # Processed data
-│   └── models/           # Trained models
-├── solver_coworker/
-│   ├── agents/           # Agent implementations
-│   ├── graphs/           # LangGraph workflow definitions
-│   ├── tools/            # Utility tools
-│   ├── config.py         # Configuration management
-│   └── logging.py        # Logging utilities
-└── tests/                # Test suite
-```
-
-## Development
-
-### Running Tests
-
-```bash
-pytest
-```
-
-### Linting
-
-```bash
-ruff check solver_coworker tests
-```
-
-### Coverage
-
-```bash
-pytest --cov=solver_coworker --cov-report=term-missing
-```
-
-## CI/CD
-
-GitHub Actions workflow runs tests on Python 3.11 and 3.12:
-- Linting with ruff
-- Tests with pytest
-- Coverage reporting
-
-## License
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+**Current step: 2 — filling in sections.**
 
 ---
 
-## Implementation Checklist
+# Prompt & Context Engineering README
 
-### 1. Local Environment
+This doc explains how prompts, models, and context are structured for the **Agentic API Integration Designer & Code Generator**.
 
-* [ ] Install Python 3.11+
-* [ ] Create virtualenv and install core deps:
+It’s aimed at engineers who need to:
 
-  * `langchain`, `langgraph`, `pydantic`, `requests`
-  * `psycopg2` or `asyncpg`
-  * `pgvector` client or chosen vector store client
-* [ ] Start Postgres in Docker with pgvector extension
+* Understand how each LangGraph node uses LLMs and RAG.
+* Safely change prompts, models, or retrieval settings.
+* Debug bad outputs with LangSmith traces.
 
 ---
 
-### 2. Database Schemas
+## 1. Big Picture
 
-**Silver schema (`spec_silver`)**
+We treat LLM behavior as **configurable infrastructure**:
 
-* [ ] Tables:
+* **Prompt families**, not one-off strings:
 
-  * `source_systems`
-  * `spec_documents`, `spec_sections`
-  * `endpoints`, `endpoint_parameters`
-  * `schemas`, `fields`
-  * `entities`, `entity_fields`, `entity_relationships`
-  * `endpoint_entities`
-  * `lineage_spec_links`
-* [ ] Indexes:
+  * Planning / reasoning
+  * Extraction (Silver)
+  * Code & test generation
+  * Validation & reporting
 
-  * `endpoints(path, http_method)`
-  * `entities(name, source_system_id)`
+* **Context is constrained**:
 
-**Gold schema (`requirements_gold`)**
+  * Explicit top-k per node
+  * Bounded graph radius
+  * Strict token budgets
 
-* [ ] Tables:
+* **All knobs live in YAML**:
 
-  * `modeled_tables`, `modeled_columns`
-  * `load_strategies`
-  * `data_quality_rules`, `data_quality_results`
-  * `data_contracts`
+  * Models, temperatures, max tokens
+  * # of planning samples, codegen candidates
+  * Retrieval & parallelism settings
 
-**Graph + vector**
+* **Everything is observable**:
 
-* [ ] Graph storage:
-
-  * `graph_nodes`, `graph_edges` or views over Silver tables
-* [ ] Vector storage:
-
-  * pgvector table for embeddings with metadata columns
-  * Index on `(source_system_id, spec_document_id, spec_section_id)`
+  * LangSmith traces tagged with model, role, and config values
+  * RAG metrics (chunks retrieved, presence of key endpoints/entities) per node
 
 ---
 
-### 3. Core Domain Models (Python)
+## 2. Config Files & Layout
 
-* [ ] Typed dicts or Pydantic models for:
+### 2.1 Model & embedding config
 
-  * `SourceSystemRef`, `SpecDocumentRef`
-  * `EndpointDraft`, `FieldDraft`
-  * `EntityDraft`, `RelationshipDraft`
-  * `ModeledTableDraft`, `ModeledColumnDraft`
-  * `LoadStrategyDraft`, `DataQualityRuleDraft`, `DataContractDraft`
-* [ ] `WorkflowState` TypedDict with sections:
+**File:** `config/models.yaml`
 
-  * Context: `source_ref`, `spec_ref`
-  * Spec content: `doc_chunks`
-  * Silver drafts: `endpoint_drafts`, `entity_drafts`, `relationship_drafts`, `field_drafts`, `graph_nodes`, `graph_edges`
-  * Gold drafts: `modeled_table_drafts`, `modeled_column_drafts`, `load_strategy_drafts`, `dq_rule_drafts`, `contract_drafts`
-  * Control: `plan`, `completed_steps`, `errors`, `persisted_*`, `report_markdown`
+```yaml
+llm:
+  planning:
+    model: gpt-4.1
+    temperature: 0.2
+    max_tokens: 2048
+    num_samples: 2
+    max_parallel_samples: 2
 
-Use LangGraph reducers for list fields.
+  extraction:
+    model: gpt-4o-mini
+    temperature: 0.0
+    max_tokens: 1024
 
----
+  codegen:
+    model: gpt-4.1
+    temperature: 0.15
+    max_tokens: 4096
+    num_candidates: 2
+    max_parallel_modules: 3
 
-### 4. LangGraph Workflow
+embeddings:
+  model: text-embedding-3-small
+  dimensions: 1536
+  max_parallel_embeddings: 4
+```
 
-**Nodes to implement**
+**Rules:**
 
-* [ ] `plan_run`
-* [ ] `ingest_spec`
-* [ ] `detect_and_parse_spec`
-* [ ] `extract_endpoints_and_schemas`
-* [ ] `extract_entities_and_relationships`
-* [ ] `build_graph`
-* [ ] `design_gold_model`
-* [ ] `design_load_strategies`
-* [ ] `design_quality_and_contracts`
-* [ ] `generate_code` (optional)
-* [ ] `persist_results`
-* [ ] `build_report`
+* `embeddings.dimensions` **must** match:
 
-**Graph wiring**
+  * The embedding model.
+  * `VECTOR(1536)` in `spec_silver.spec_chunks.embedding`.
+* LangGraph nodes **read** from this config; don’t hard-code models/temps in code.
+* LangSmith traces should tag:
 
-* [ ] Build `StateGraph[WorkflowState]`
+  * `llm.model`, `llm.role` (`planning`, `extraction`, `codegen`)
+  * `embeddings.model`, `embeddings.dimensions`
 
-* [ ] Add nodes and linear edges:
+### 2.2 Prompt archetypes (per node family)
 
-  `plan_run → ingest_spec → detect_and_parse_spec → extract_endpoints_and_schemas → extract_entities_and_relationships → build_graph → design_gold_model → design_load_strategies → design_quality_and_contracts → generate_code → persist_results → build_report`
+(Names may vary slightly; pattern should be clear.)
 
-* [ ] Entry node: `plan_run`
+Examples:
 
-* [ ] Finish node: `build_report`
+* `config/prompts/planning.yaml`
+* `config/prompts/extraction.yaml`
+* `config/prompts/codegen.yaml`
+* `config/prompts/validation.yaml`
 
-* [ ] Conditional edge after `detect_and_parse_spec` to route unsupported media types to an error node
+Each file defines:
 
----
+* System message(s)
+* Output schemas / JSON shapes
+* Retrieval policy hints (what to fetch, how much)
+* Node-specific overrides, if needed
 
-### 5. Tooling and RAG
-
-**Spec ingestion**
-
-* [ ] HTTP fetcher for URLs
-* [ ] File loader for local paths
-* [ ] OpenAPI parser (JSON/YAML)
-* [ ] HTML parser
-* [ ] PDF loader and text extractor
-* [ ] Chunker that populates `spec_sections` + `doc_chunks`
-
-**Vector retrieval**
-
-* [ ] Embedding function (e.g., OpenAI or Azure embeddings)
-* [ ] Index builder that writes embeddings and metadata to pgvector
-* [ ] Retriever that:
-
-  * Filters by metadata (source, section_type, entity, endpoint)
-  * Runs similarity search in the filtered set
-
-**GraphRAG**
-
-* [ ] `build_graph` that maps Silver drafts to `graph_nodes` and `graph_edges`
-* [ ] Helper functions:
-
-  * Get local neighborhood for an entity or endpoint
-  * Map neighborhood back to related text chunks for prompts
+Nodes load their “archetype” by name rather than embedding prompt strings directly in code.
 
 ---
 
-### 6. Public Interfaces
+## 3. Node Categories & Prompt Strategies
 
-**Python API**
+### 3.1 Planning & reasoning nodes
 
-* [ ] Implement:
+Nodes:
 
-  ```python
-  def discover_requirements(
-      spec_ref: SpecDocumentRef,
-      source_ref: Optional[SourceSystemRef] = None,
-      options: Optional[DiscoveryOptions] = None,
-  ) -> DiscoveryResult:
-      ...
-  ```
+* `plan_run`
+* `understand_task`
+* `align_task_with_kg`
+* `plan_integration_flow`
+* `attach_policies_and_patterns`
 
-* [ ] Return:
+**Prompt style:**
 
-  * IDs for source, spec, Silver/Gold commits
-  * Path or ID for the report
+* Chain-of-thought / reasoning oriented:
 
-**CLI**
+  * Reason in steps, then emit a **final, structured object** (plan, graph, constraints).
+* Multiple samples per task:
 
-* [ ] Thin wrapper command, for example:
+  * Config: `planning.num_samples`, `planning.max_parallel_samples`.
+* Optional light tree-of-thought:
 
-  ```bash
-  ai-co-worker discover \
-    --spec-url "https://api.stripe.com/openapi.json" \
-    --source-code "stripe" \
-    --out-dir "./artifacts/stripe"
-  ```
+  * Config: `planning.max_branches`.
+  * Used to branch a small number of candidate flows, then prune.
 
-* [ ] Write:
+**Input context:**
 
-  * Report (Markdown or HTML)
-  * Exported YAML/JSON contracts
-  * Generated code stubs if present
+* Task description, provider code.
+* Silver drafts (entities, endpoints, events).
+* KG snippets (workflow templates, steps, step–endpoint bindings).
+* Strict token budget and small top-k from vector/graph retrieval.
 
----
+**Output shape examples:**
 
-### 7. Testing
+* `plan_run`: `plan.use_repo`, `plan.provider_code`, `plan.primary_spec_ref`
+* `understand_task`: `IntegrationTask` draft (task slug, entities, constraints)
+* `plan_integration_flow`: `IntegrationFlowNode`s + `IntegrationFlowEdge`s
 
-**Unit tests**
-
-* [ ] OpenAPI parsing helpers
-* [ ] Type normalization and JSON path flattening
-* [ ] Mapping entities → modeled tables
-* [ ] Mapping fields → modeled columns
-
-**Integration tests**
-
-* [ ] Node-level tests for `ingest_spec`, `extract_endpoints_and_schemas`, `design_gold_model` with small fixtures and a test Postgres DB
-
-**End-to-end tests**
-
-* [ ] Prepare at least ten public API specs (Stripe, Twilio, GitHub, Slack, Shopify, Notion, HubSpot, SendGrid, OpenAI, plus one larger spec)
-* [ ] For each:
-
-  * Run `discover_requirements` against test Postgres
-  * Check key entities, endpoints, and tables exist and have reasonable grain and keys
+> When editing: keep **output JSON/dict schemas stable**; other nodes rely on these.
 
 ---
 
-### 8. Milestones (v1)
+### 3.2 Extraction nodes (Silver)
 
-* [ ] **M1**: Minimal pipeline
+Nodes:
 
-  * Ingest one OpenAPI spec → Silver tables + simple report
+* `ingest_spec` helpers
+* `detect_and_parse_spec`
+* `build_silver_api_model`
 
-* [ ] **M2**: Full Silver + basic Gold
+**Goal:** Map specs → Silver layer:
 
-  * Entities, relationships, tables, columns, load patterns for three specs
+* `schemas`, `fields`
+* `entities`, `relationships`
+* `events`
+* `endpoints`, `endpoint_parameters`
 
-* [ ] **M3**: GraphRAG + evaluation
+**Prompt style:**
 
-  * Graph construction
-  * RAG + GraphRAG in design nodes
-  * Evaluation across the ten-spec corpus
+* Strict, schema-bound JSON responses.
+* No prose; only structured data.
+* Low-temperature, small model:
 
-* [ ] **M4**: Codegen + refinement
+  * `llm.extraction.model = gpt-4o-mini`
+  * `temperature = 0.0`
 
-  * Code generation node
-  * Prompt and heuristic tuning based on test results and review
-MIT
+**Context rules:**
+
+* Retrieval only from:
+
+  * Endpoint/schema/parameter/event sections.
+* Exclude long examples and narratives where possible.
+* top-k small (e.g., 5–10) for spec chunks.
+
+**Important:**
+Extraction prompts should treat the Silver schema as **the source of truth**. Any change to `domain.models` or DB schema → update extraction prompts and tests.
+
+---
+
+### 3.3 Code & test generation node
+
+Node:
+
+* `generate_code_and_tests`
+
+**Inputs:**
+
+* `IntegrationTask`
+* Flow graph (nodes + edges)
+* Endpoints + key schema fields
+* Policies (auth, retries, pagination, logging, rate limits, idempotency)
+* Repo context:
+
+  * `RepoProfile` (directories, router/settings markers)
+  * `repo_markdown_context` (Markdown export via `MockedGithubRepoRetriever`)
+
+**Prompt style:**
+
+* Context-rich but **highly prescriptive**.
+* Describes:
+
+  * Required runtime stack:
+
+    * `httpx` via a shared `IntegrationHttpClient`
+    * Shared exception hierarchy (`IntegrationError`, `TransientIntegrationError`, `AuthIntegrationError`)
+    * Standard Python logging (module-level loggers, no global config)
+  * Required test stack:
+
+    * `pytest`
+    * Shared fixtures / httpx mocks
+  * Repository layout:
+
+    * Where to put clients / workflows / tests
+    * How to hook routers and settings with the integration markers
+
+**Sampling strategy:**
+
+* Multiple candidates per module (`codegen.num_candidates`).
+* Parallelism per module (`codegen.max_parallel_modules`).
+* Simple evaluator (prompt or static checks) to choose:
+
+  * Syntax-correct
+  * Stack-compliant
+  * Matches expected file structure and names
+
+**Hard “do / don’t” embedded in prompts:**
+
+* **Do** use `IntegrationHttpClient` wrapper, not `requests`.
+* **Do** raise shared exception types.
+* **Do** generate pytest-based, offline tests.
+* **Don’t** define new HTTP client stacks per integration.
+* **Don’t** configure logging globally.
+
+---
+
+### 3.4 Validation & reporting nodes
+
+Nodes:
+
+* `validate_integration_design`
+* `build_report`
+
+**Prompt style:**
+
+* Compact, checklist-like prompts.
+* Only ask for:
+
+  * Validation findings in structured form (fields like `severity`, `message`, `location`).
+  * A bounded human-readable summary for reports.
+
+**Context:**
+
+* All Gold drafts (task, flow, bindings, policies, code artifacts).
+* Optional repo changes summary.
+
+**Design intent:**
+
+* Prompts stay simple → easier to reason about & cheaper.
+* Validation logic is mostly explicit and deterministic, with LLM providing:
+
+  * Explanations
+  * Some fuzzy checks (e.g., “Is this flow missing an obvious step given the task description?”)
+
+---
+
+## 4. RAG & GraphRAG Strategy
+
+### 4.1 Context sources
+
+* **Unstructured**:
+
+  * Spec text chunks (`spec_silver.spec_chunks`)
+  * Repo Markdown context (from `MockedGithubRepoRetriever`)
+* **Structured (Silver)**:
+
+  * Endpoints, parameters
+  * Schemas, fields
+  * Entities, relationships
+  * Events
+* **Knowledge Graph (KG)**:
+
+  * Workflow templates (`kg_workflow_templates`)
+  * Workflow steps (`kg_workflow_steps`)
+  * Step–endpoint bindings (`kg_step_bindings`)
+* **Gold**:
+
+  * Existing workflows/policies for pattern reuse
+
+### 4.2 Retrieval controls
+
+Per node, we define:
+
+* **top-k**: how many chunks we’re allowed to retrieve.
+* **graph radius**: how far we can walk from:
+
+  * Entity
+  * Endpoint
+  * WorkflowTemplate
+* **token budget**: max prompt size; excess context is trimmed via:
+
+  * Removing duplicates
+  * Dropping low-similarity content
+  * Preferring schemas/fields over narratives
+
+Examples:
+
+* `build_silver_api_model`:
+
+  * Filter to spec sections that look like OpenAPI structures.
+* `understand_task` / `align_task_with_kg`:
+
+  * Focus on overview pages, KG templates, and example flows.
+* `attach_policies_and_patterns`:
+
+  * Only pull rate limit/auth/pagination/logging content.
+
+---
+
+## 5. Parallelism & Cost Controls
+
+### 5.1 Planning
+
+* Run several plan samples in parallel:
+
+  * Config: `planning.num_samples`, `planning.max_parallel_samples`.
+* Optional tree-of-thought branching:
+
+  * Config: `planning.max_branches`.
+* Selector prompt picks a single plan for the run.
+
+### 5.2 Code generation
+
+* Generate multiple modules concurrently:
+
+  * `codegen.max_parallel_modules`.
+* For some modules, generate multiple candidates concurrently:
+
+  * `codegen.num_candidates`.
+
+### 5.3 Embeddings
+
+* Chunk specs and embed in parallel:
+
+  * `embeddings.max_parallel_embeddings`.
+
+All parallelism decisions are tagged into LangSmith so we can evaluate:
+
+* Total cost per run
+* Node-level latency
+* Impact on quality
+
+---
+
+## 6. How to Change Prompts or Models Safely
+
+1. **Decide which family you are changing**
+
+   * Planning? Extraction? Codegen? Validation?
+   * Don’t mix concerns in a single PR if you can avoid it.
+
+2. **Update YAML, not code strings**
+
+   * For models, temps, and token limits: edit `config/models.yaml`.
+   * For content/templates: edit the right `config/prompts/*.yaml`.
+
+3. **Keep output schemas stable**
+
+   * If you must change the shape of JSON outputs:
+
+     * Update `domain.models` or `graph/state.py` if necessary.
+     * Update the relevant tests.
+     * Update any downstream node that consumes that output.
+
+4. **Run reference tasks**
+
+   * Run the full workflow against a known set of providers/tasks.
+   * Check:
+
+     * Run status (SUCCESS vs PARTIAL/FAILED).
+     * Key counts (endpoints, entities, flow nodes).
+     * That router + settings changes look reasonable for the mock repo.
+
+5. **Inspect LangSmith traces**
+
+   * Confirm the right models are used for the right roles.
+   * Compare token usage and latency.
+   * Verify that retrieval context includes the expected endpoints/entities.
+
+---
+
+## 7. Quick FAQ for Engineers
+
+**Q: Where do I change which model is used for codegen?**
+A: `config/models.yaml` under `llm.codegen.model`. Don’t hard-code in node code.
+
+**Q: How do I tighten or loosen context size for a node?**
+A: Adjust that node’s retrieval policy (top-k, graph radius, token budget) in its prompt archetype or retrieval config. Keep budgets per-node, not global.
+
+**Q: I added a new field to the Silver schema. What do I update?**
+A:
+
+1. `spec_silver` DDL + migrations.
+2. `domain.models` for the corresponding dataclass.
+3. Extraction prompts for `build_silver_api_model`.
+4. Any code that maps OpenAPI → Silver objects.
+5. Tests for extraction and persistence.
+
+**Q: I want better code style in generated modules. Where do I start?**
+A:
+
+* Update codegen prompts in `config/prompts/codegen.yaml`:
+
+  * Add examples.
+  * Clarify patterns (e.g., naming, error handling).
+* Run reference tasks and inspect diff quality in the mock repo.
+* Avoid fighting runtime stack constraints; adjust those only if the stack itself changes.
+
+---
+
+If you want, I can follow up with a tiny, concrete example file for one node’s prompt config (e.g., `plan_integration_flow`) to show the exact structure we expect in `config/prompts/*.yaml`.
