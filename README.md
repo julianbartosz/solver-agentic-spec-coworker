@@ -1,13 +1,3 @@
-1. Plan
-
-1) Outline README structure.
-2) Fill in sections with concrete guidance tied to your design.
-3) Add “how to change things safely” and quick FAQ.
-
-**Current step: 2 — filling in sections.**
-
----
-
 # Prompt & Context Engineering README
 
 This doc explains how prompts, models, and context are structured for the **Agentic API Integration Designer & Code Generator**.
@@ -435,5 +425,3 @@ A:
 * Avoid fighting runtime stack constraints; adjust those only if the stack itself changes.
 
 ---
-
-If you want, I can follow up with a tiny, concrete example file for one node’s prompt config (e.g., `plan_integration_flow`) to show the exact structure we expect in `config/prompts/*.yaml`.
