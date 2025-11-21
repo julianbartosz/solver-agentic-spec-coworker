@@ -1,0 +1,38 @@
+{
+  "name": "solver-agentic-spec-coworker",
+  "version": "1.0.0",
+  "description": "Agentic co-worker to auto-discover data/API requirements from source specs using LangChain + LangGraph.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "memory:update-context":
+      "node --loader ts-node/esm scripts/prompt-memory.ts update-context",
+    "memory:update-progress":
+      "node --loader ts-node/esm scripts/prompt-memory.ts update-progress",
+    "memory:log-decision":
+      "node --loader ts-node/esm scripts/prompt-memory.ts log-decision"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/julianbartosz/solver-agentic-spec-coworker.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/julianbartosz/solver-agentic-spec-coworker/issues"
+  },
+  "homepage": "https://github.com/julianbartosz/solver-agentic-spec-coworker#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
