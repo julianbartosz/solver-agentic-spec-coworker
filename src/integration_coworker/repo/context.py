@@ -4,7 +4,7 @@ Phase 2: Minimal implementation.
 """
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, cast
 from integration_coworker.repo.models import RepoSnapshot, MockFile
 
 
