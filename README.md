@@ -2,6 +2,88 @@
 
 Agentic co-worker to auto-discover data/API requirements from source specs using LangChain + LangGraph.
 
+## Phase 2 Demo (Current Milestone)
+
+The Phase 2 vertical slice demonstrates a complete end-to-end workflow for the **mock_payments** provider with the **"Create checkout session"** task.
+
+### Running the Demo
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --dry-run
+```
+
+**Optional: With repository integration:**
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --repo-root /path/to/your/fastapi-repo \
+  --repo-profile subatomic_mock
+```
+
+### What to Expect
+
+After running the demo, you will see:
+
+- **Comprehensive Markdown Report** including:
+  - Spec ingestion details (1 document, 5 chunks)
+  - Silver model extraction (2 endpoints, schemas, fields)
+  - Integration workflow (4 nodes: validate → call → transform → return)
+  - Policy summary (5 policies: AUTH, RETRY, LOGGING, IDEMPOTENCY, RATE_LIMIT)
+  - Generated code artifacts (3 files: client, flow, test)
+
+- **Code Artifacts Generated**:
+  - `integrations/clients/mock_payments.py` - MockPaymentsClient class
+  - `integrations/flows/mock_payments_checkout.py` - Checkout flow orchestration
+  - `tests/integrations/test_mock_payments_checkout.py` - pytest tests
+
+- **Repository Changes**:
+  - In `--dry-run` mode: Summary of what would be created/updated
+  - Without `--dry-run`: Actual files written to repo with proper directory structure
+
+- **Exit Status**:
+  - `0` on success (all nodes completed, no critical errors)
+  - Non-zero on failure (spec not found, parsing errors, validation failures)
+
+### JSON Output Mode
+
+For automation and CI integration:
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --dry-run \
+  --json-output
+```
+
+This outputs a valid JSON `IntegrationResult` to stdout with all debug logs suppressed or sent to stderr.
+
+### Testing the Vertical Slice
+
+Run the complete test suite:
+
+```bash
+PYTHONPATH=src pytest -v
+```
+
+All 9 tests should pass, covering:
+- End-to-end dry-run workflow
+- Repository integration with file writing
+- Provider inference
+- Silver model extraction
+- Workflow creation
+- Policy attachment
+- Error handling
+
+See `docs/PHASE2_NOTES.md` for detailed implementation notes.
+
+---
+
 ## Features
 
 - **LangGraph Workflow**: Implements a `spec_discovery_graph` with the following stages:
@@ -78,26 +160,6 @@ You can also run the workflow directly:
 
 ```bash
 python -m solver_coworker.graphs.spec_discovery_graph
-```
-
-### Project Structure
-
-```
-solver-agentic-spec-coworker/
-├── docs/
-│   ├── design/           # Design documents (placeholders)
-│   └── decisions/        # Architecture Decision Records
-├── data/
-│   ├── raw/api_specs/    # Input API specifications
-│   ├── processed/        # Processed data
-│   └── models/           # Trained models
-├── solver_coworker/
-│   ├── agents/           # Agent implementations
-│   ├── graphs/           # LangGraph workflow definitions
-│   ├── tools/            # Utility tools
-│   ├── config.py         # Configuration management
-│   └── logging.py        # Logging utilities
-└── tests/                # Test suite
 ```
 
 ## Development
