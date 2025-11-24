@@ -1,101 +1,118 @@
 from integration_coworker.graph.state import WorkflowState
-from integration_coworker.domain.models import IntegrationTask, IntegrationFlowNode, IntegrationFlowEdge
+from integration_coworker.domain.models import IntegrationFlowNode, IntegrationFlowEdge
+
+
+# Temporary in-memory KG stand-in for M3
+# TODO: Replace with actual kg.workflow_templates DB queries in future phases
+WORKFLOW_TEMPLATES = {
+    ("stripe", "create_checkout_session"): {
+        "template_id": "stripe_checkout_v1",
+        "name": "Stripe Checkout Session Creation",
+        "description": "Standard flow for creating a Stripe checkout session",
+        "steps": [
+            {"key": "start", "type": "start", "label": "Start"},
+            {"key": "validate_input", "type": "validation", "label": "Validate Input", 
+             "description": "Validate amount, currency, and URLs"},
+            {"key": "call_create_session", "type": "api_call", "label": "Call Create Session",
+             "description": "POST to /v1/checkout/sessions"},
+            {"key": "transform_response", "type": "transform", "label": "Transform Response",
+             "description": "Extract session_id and checkout_url"},
+            {"key": "end", "type": "end", "label": "Return Result"},
+        ],
+    },
+    ("mock_payments", "create_checkout_session"): {
+        "template_id": "mock_checkout_v1",
+        "name": "Mock Payments Checkout Session",
+        "description": "Standard checkout flow for mock payment provider",
+        "steps": [
+            {"key": "start", "type": "start", "label": "Start"},
+            {"key": "validate_input", "type": "validation", "label": "Validate Input"},
+            {"key": "call_create_session", "type": "api_call", "label": "API Call"},
+            {"key": "transform_response", "type": "transform", "label": "Transform"},
+            {"key": "end", "type": "end", "label": "End"},
+        ],
+    },
+}
+
 
 def align_task_with_kg(state: WorkflowState) -> WorkflowState:
     """
-    Reads: workflow_template, provider_code, task_description, plan["task_brief"]
-    Writes: integration_task, workflow_nodes, workflow_edges
+    Reads: integration_task, provider_code, endpoints
+    Writes: plan["candidate_templates"], workflow_nodes, workflow_edges
+    
+    Contract per Appendix C.3.7:
+    - Queries KG for matching workflow templates (in-memory for M3)
+    - Populates plan["candidate_templates"] (may be empty, not an error)
+    - Builds initial workflow nodes and edges from templates
     """
-    if not state.workflow_template:
-        state.errors.append("No workflow_template from understand_task")
+    if not state.integration_task:
+        state.errors.append("No integration_task from understand_task")
         state.completed_steps.append("align_task_with_kg")
         return state
     
-    # Get task brief from plan
-    task_brief = state.plan.get("task_brief", {})
+    # Query in-memory KG for matching templates
+    provider = state.provider_code or "unknown"
+    task_slug = state.integration_task.task_slug
     
-    # Create IntegrationTask
-    state.integration_task = IntegrationTask(
-        id=None,
-        task_slug=f"{state.provider_code}_create_checkout_session",
-        description=state.task_description,
-        provider_code=state.provider_code,
-        source_system_id=None,
-        target_spec_document_id=None,
-        input_entities=[],
-        output_entities=[],
-        constraints=task_brief,
-    )
+    # Try exact match first
+    template_key = (provider, task_slug)
+    if template_key in WORKFLOW_TEMPLATES:
+        template = WORKFLOW_TEMPLATES[template_key]
+        state.plan["candidate_templates"] = [template]
+    else:
+        # Try partial matches (e.g., checkout-related tasks)
+        matches = []
+        for (p, t), tmpl in WORKFLOW_TEMPLATES.items():
+            if p == provider and any(word in t for word in task_slug.split("_")):
+                matches.append(tmpl)
+        
+        state.plan["candidate_templates"] = matches if matches else []
     
-    # Define workflow nodes
-    nodes = [
-        IntegrationFlowNode(
+    # Build workflow nodes and edges from first candidate template (or fallback)
+    if state.plan["candidate_templates"]:
+        template = state.plan["candidate_templates"][0]
+        steps = template["steps"]
+    else:
+        # Fallback: generic 4-step flow
+        steps = [
+            {"key": "start", "type": "start", "label": "Start"},
+            {"key": "validate_input", "type": "validation", "label": "Validate Input"},
+            {"key": "call_api", "type": "api_call", "label": "API Call"},
+            {"key": "end", "type": "end", "label": "End"},
+        ]
+    
+    # Create nodes
+    nodes = []
+    for i, step in enumerate(steps):
+        node = IntegrationFlowNode(
             id=None,
             task_id=None,
-            node_key="validate_input",
-            node_type="validation",
+            node_key=step["key"],
+            node_type=step["type"],
             endpoint_id=None,
             entity_id=None,
-            position=0,
-            config={"label": "Validate Input", "description": "Validate amount, currency, and URLs"},
-        ),
-        IntegrationFlowNode(
-            id=None,
-            task_id=None,
-            node_key="call_create_session",
-            node_type="api_call",
-            endpoint_id=None,
-            entity_id=None,
-            position=1,
-            config={"label": "Call Create Session", "description": "POST to /v1/checkout/sessions"},
-        ),
-        IntegrationFlowNode(
-            id=None,
-            task_id=None,
-            node_key="transform_response",
-            node_type="transform",
-            endpoint_id=None,
-            entity_id=None,
-            position=2,
-            config={"label": "Transform Response", "description": "Extract session_id and checkout_url"},
-        ),
-        IntegrationFlowNode(
-            id=None,
-            task_id=None,
-            node_key="return_result",
-            node_type="output",
-            endpoint_id=None,
-            entity_id=None,
-            position=3,
-            config={"label": "Return Result", "description": "Return structured result"},
-        ),
-    ]
+            position=i,
+            config={
+                "label": step.get("label", step["key"]),
+                "description": step.get("description", ""),
+            },
+        )
+        nodes.append(node)
+    
     state.workflow_nodes = nodes
     
-    # Define edges (linear flow)
-    edges = [
-        IntegrationFlowEdge(
+    # Create edges (linear flow between consecutive steps)
+    edges = []
+    for i in range(len(steps) - 1):
+        edge = IntegrationFlowEdge(
             id=None,
             task_id=None,
-            from_node_key="validate_input",
-            to_node_key="call_create_session",
+            from_node_key=steps[i]["key"],
+            to_node_key=steps[i + 1]["key"],
             condition=None,
-        ),
-        IntegrationFlowEdge(
-            id=None,
-            task_id=None,
-            from_node_key="call_create_session",
-            to_node_key="transform_response",
-            condition=None,
-        ),
-        IntegrationFlowEdge(
-            id=None,
-            task_id=None,
-            from_node_key="transform_response",
-            to_node_key="return_result",
-            condition=None,
-        ),
-    ]
+        )
+        edges.append(edge)
+    
     state.workflow_edges = edges
     
     state.completed_steps.append("align_task_with_kg")

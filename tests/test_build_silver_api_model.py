@@ -189,3 +189,72 @@ def test_build_silver_api_model_no_errors(mock_payments_spec):
     
     # Verify the step was completed
     assert "build_silver_api_model" in result_state.completed_steps
+
+
+def test_build_silver_api_model_links_schemas_to_endpoints(mock_payments_spec):
+    """
+    P1.3: Test that build_silver_api_model links request/response schemas to endpoints.
+    
+    Verifies that temporary schema name attributes are set for use by persist_results.
+    """
+    # Create initial state with parsed spec
+    import yaml
+    with open(mock_payments_spec, 'r') as f:
+        spec_content = f.read()
+        spec_dict = yaml.safe_load(spec_content)
+    
+    state = WorkflowState(
+        source_refs=[str(mock_payments_spec)],
+        spec_refs=[str(mock_payments_spec)],
+        task_description="Create checkout session",
+        spec_documents=[
+            SpecDocument(
+                id=None,
+                source_system_id=None,
+                version="1.0.0",
+                uri=str(mock_payments_spec),
+                content_type="application/yaml",
+                sha256="test_hash",
+                content=spec_content
+            )
+        ],
+        openapi_spec=spec_dict
+    )
+    
+    # Run the node
+    result_state = build_silver_api_model(state)
+    
+    # Find POST /v1/checkout/sessions endpoint
+    post_endpoint = None
+    for ep in result_state.endpoints:
+        if ep.method == "POST" and ep.path == "/v1/checkout/sessions":
+            post_endpoint = ep
+            break
+    
+    assert post_endpoint is not None, "Should find POST /v1/checkout/sessions endpoint"
+    
+    # Verify temporary schema name attributes are set
+    assert hasattr(post_endpoint, '_request_schema_name'), \
+        "Should have _request_schema_name attribute"
+    assert post_endpoint._request_schema_name == "CreateCheckoutSessionRequest", \
+        "Should link CreateCheckoutSessionRequest as request schema"
+    
+    assert hasattr(post_endpoint, '_response_schema_name'), \
+        "Should have _response_schema_name attribute"
+    assert post_endpoint._response_schema_name == "CheckoutSession", \
+        "Should link CheckoutSession as response schema"
+    
+    # Find GET /v1/checkout/sessions/{id} endpoint
+    get_endpoint = None
+    for ep in result_state.endpoints:
+        if ep.method == "GET" and "{id}" in ep.path:
+            get_endpoint = ep
+            break
+    
+    assert get_endpoint is not None, "Should find GET endpoint"
+    
+    # GET endpoint should have response schema but no request schema
+    assert hasattr(get_endpoint, '_response_schema_name'), \
+        "GET endpoint should have _response_schema_name"
+    assert get_endpoint._response_schema_name == "CheckoutSession", \
+        "GET should also return CheckoutSession"

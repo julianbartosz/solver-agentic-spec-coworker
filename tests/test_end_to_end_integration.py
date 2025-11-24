@@ -43,7 +43,8 @@ def test_end_to_end_dry_run(mock_payments_spec):
     # Verify result structure
     assert result.run_id is not None
     assert result.task is not None
-    assert result.task.task_slug == "mock_payments_create_checkout_session"
+    # Task slug is normalized: lowercase, underscores only (per understand_task node)
+    assert result.task.task_slug == "create_checkout_session"
     assert result.task.provider_code == "mock_payments"
     
     # Verify code artifacts were generated
@@ -75,9 +76,9 @@ def test_end_to_end_with_repo_integration(mock_payments_spec, temp_repo):
     assert result.run_id is not None
     assert result.task is not None
     
-    # Verify repo_changes
+    # M4: Repo integration now writes real files
     assert result.repo_changes is not None
-    assert len(result.repo_changes.changes) == 3
+    assert len(result.repo_changes.changes) == 3  # client, flow, test
     
     # Verify files were actually created
     created_files = result.repo_changes.files_created()
@@ -94,7 +95,7 @@ def test_end_to_end_with_repo_integration(mock_payments_spec, temp_repo):
     assert len(client_files) == 1
     client_path = temp_repo / client_files[0].rel_path
     client_content = client_path.read_text()
-    assert "MockPaymentsClient" in client_content or "MockpaymentsClient" in client_content or "Mock_PaymentsClient" in client_content
+    assert "MockPaymentsClient" in client_content or "Mockpayments" in client_content
     assert "create_checkout_session" in client_content
     assert "IntegrationHttpClient" in client_content
 
