@@ -9,6 +9,7 @@ from integration_coworker.repo.models import RepoProfile
 # Mock profile for testing
 SUBATOMIC_MOCK_PROFILE = RepoProfile(
     name="subatomic-mock",
+    archetype="fastapi_service",  # P2.1: High-level classification
     framework="mock",
     language="python",
     integrations_root="integrations",

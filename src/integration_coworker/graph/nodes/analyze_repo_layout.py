@@ -19,6 +19,9 @@ def analyze_repo_layout(state: WorkflowState) -> WorkflowState:
     profile = state.repo_profile
     layout_hints = profile.layout_hints or {}
     
+    # P2.1: Prefer archetype over framework for future branching logic
+    archetype = profile.archetype or profile.framework
+    
     # Map artifacts to concrete paths using profile
     changes = []
     

@@ -32,6 +32,21 @@ WORKFLOW_TEMPLATES = {
             {"key": "end", "type": "end", "label": "End"},
         ],
     },
+    ("mock_payments", "get_checkout_session"): {
+        "template_id": "mock_get_session_v1",
+        "name": "Mock Payments Get Checkout Session",
+        "description": "Retrieve existing checkout session by ID from mock provider",
+        "steps": [
+            {"key": "start", "type": "start", "label": "Start"},
+            {"key": "validate_input", "type": "validation", "label": "Validate Session ID", 
+             "description": "Ensure session_id is provided and valid format"},
+            {"key": "call_get_session", "type": "api_call", "label": "GET Session",
+             "description": "GET /checkout/sessions/{session_id}"},
+            {"key": "transform_response", "type": "transform", "label": "Transform Response",
+             "description": "Extract and normalize session details"},
+            {"key": "end", "type": "end", "label": "Return Session"},
+        ],
+    },
 }
 
 
