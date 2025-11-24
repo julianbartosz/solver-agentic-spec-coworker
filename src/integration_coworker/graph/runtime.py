@@ -42,7 +42,7 @@ def build_graph():
     workflow.add_node("build_report", build_report.build_report)
     workflow.add_node("handle_error", handle_error.handle_error)
 
-    # Define edges
+    # Define edges (up to policies attachment)
     workflow.set_entry_point("plan_run")
     workflow.add_edge("plan_run", "ingest_spec")
     workflow.add_edge("ingest_spec", "detect_and_parse_spec")
@@ -52,11 +52,39 @@ def build_graph():
     workflow.add_edge("understand_task", "align_task_with_kg")
     workflow.add_edge("align_task_with_kg", "plan_integration_flow")
     workflow.add_edge("plan_integration_flow", "attach_policies_and_patterns")
-    workflow.add_edge("attach_policies_and_patterns", "attach_repo_context")
-    workflow.add_edge("attach_repo_context", "generate_code_and_tests")
-    workflow.add_edge("generate_code_and_tests", "analyze_repo_layout")
+    
+    # Conditional routing based on plan["use_repo"]
+    def should_run_repo_nodes(state: WorkflowState) -> str:
+        """Route to repo nodes if plan["use_repo"] is True, else skip to codegen."""
+        if state.plan.get("use_repo", False):
+            return "with_repo"
+        return "without_repo"
+    
+    # Code generation always happens first
+    workflow.add_edge("attach_policies_and_patterns", "generate_code_and_tests")
+    
+    # Conditional routing AFTER code generation for repo integration
+    def should_run_repo_nodes(state: WorkflowState) -> str:
+        """Route to repo nodes if plan["use_repo"] is True, else skip to validation."""
+        if state.plan.get("use_repo", False):
+            return "with_repo"
+        return "without_repo"
+    
+    workflow.add_conditional_edges(
+        "generate_code_and_tests",
+        should_run_repo_nodes,
+        {
+            "with_repo": "attach_repo_context",
+            "without_repo": "validate_integration_design",
+        }
+    )
+    
+    # Repo flow (when enabled) - now happens AFTER code generation
+    workflow.add_edge("attach_repo_context", "analyze_repo_layout")
     workflow.add_edge("analyze_repo_layout", "apply_repo_integration_changes")
     workflow.add_edge("apply_repo_integration_changes", "validate_integration_design")
+    
+    # Common path after validation
     workflow.add_edge("validate_integration_design", "persist_results")
     workflow.add_edge("persist_results", "build_report")
     workflow.add_edge("build_report", END)

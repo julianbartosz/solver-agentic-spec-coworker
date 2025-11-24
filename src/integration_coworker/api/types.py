@@ -36,9 +36,27 @@ class IntegrationResult:
     
     Per Appendix C, this is the return type of design_and_generate_integration().
     Matches the spec exactly - NOT the success/messages variant I initially created.
+    
+    M4 additions:
+    - persisted_ids: Dict tracking database IDs and persistence status
+    - endpoints, schemas, entities: Silver model artifacts
+    - workflow_nodes, workflow_edges, endpoint_bindings: Gold model artifacts
     """
     run_id: str
     task: Optional['IntegrationTask']  # Forward reference, resolved at runtime
     code_artifacts: List['CodeArtifact'] = field(default_factory=list)
     repo_changes: Optional['RepoChangeSet'] = None
     report_markdown: str = ""
+    
+    # M4: Persistence tracking
+    persisted_ids: Optional[dict] = None
+    
+    # M4: Silver artifacts
+    endpoints: List = field(default_factory=list)
+    schemas: List = field(default_factory=list)
+    entities: List = field(default_factory=list)
+    
+    # M4: Gold artifacts
+    workflow_nodes: List = field(default_factory=list)
+    workflow_edges: List = field(default_factory=list)
+    endpoint_bindings: List = field(default_factory=list)

@@ -54,4 +54,12 @@ def design_and_generate_integration(
         code_artifacts=final_state.code_artifacts,
         repo_changes=final_state.repo_changes,
         report_markdown=final_state.report_markdown or "",
+        # M4: Include persistence and Silver/Gold artifacts
+        persisted_ids=final_state.persisted_ids,
+        endpoints=final_state.endpoints,
+        schemas=final_state.schemas,
+        entities=final_state.entities,
+        workflow_nodes=final_state.workflow_nodes,
+        workflow_edges=final_state.workflow_edges,
+        endpoint_bindings=final_state.endpoint_bindings,
     )
