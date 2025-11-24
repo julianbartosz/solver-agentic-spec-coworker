@@ -16,6 +16,7 @@ class RepoProfile:
     This helps the system understand where to place generated code.
     """
     name: str  # e.g., "next-js-app-router", "django-rest"
+    archetype: Optional[str] = None  # P2.1: High-level classification (e.g., "fastapi_service", "nextjs_app")
     framework: Optional[str] = None  # e.g., "nextjs", "django", "fastapi"
     language: str = "python"
     integrations_root: str = "integrations"  # Where to place integration code

@@ -191,6 +191,54 @@ def test_build_silver_api_model_no_errors(mock_payments_spec):
     assert "build_silver_api_model" in result_state.completed_steps
 
 
+def test_build_silver_api_model_entity_relationships_no_errors(mock_payments_spec):
+    """
+    P2.2: Test that EntityRelationship construction doesn't cause errors.
+    
+    Verifies that relationships use correct field names (source/target_entity_id).
+    """
+    # Create initial state with parsed spec
+    import yaml
+    with open(mock_payments_spec, 'r') as f:
+        spec_content = f.read()
+        spec_dict = yaml.safe_load(spec_content)
+    
+    state = WorkflowState(
+        source_refs=[str(mock_payments_spec)],
+        spec_refs=[str(mock_payments_spec)],
+        task_description="Create checkout session",
+        spec_documents=[
+            SpecDocument(
+                id=None,
+                source_system_id=None,
+                version="1.0.0",
+                uri=str(mock_payments_spec),
+                content_type="application/yaml",
+                sha256="test_hash",
+                content=spec_content
+            )
+        ],
+        openapi_spec=spec_dict
+    )
+    
+    # Run the node
+    result_state = build_silver_api_model(state)
+    
+    # Should complete without errors
+    assert len(result_state.errors) == 0, f"Should not error on relationships: {result_state.errors}"
+    
+    # If relationships are created, verify they have correct field structure
+    if len(result_state.relationships) > 0:
+        rel = result_state.relationships[0]
+        # Verify has the correct fields (not from_entity/to_entity)
+        assert hasattr(rel, 'source_entity_id'), "Should have source_entity_id field"
+        assert hasattr(rel, 'target_entity_id'), "Should have target_entity_id field"
+        assert hasattr(rel, 'relationship_type'), "Should have relationship_type field"
+        # IDs can be None for M4
+        assert rel.source_entity_id is None or isinstance(rel.source_entity_id, int)
+        assert rel.target_entity_id is None or isinstance(rel.target_entity_id, int)
+
+
 def test_build_silver_api_model_links_schemas_to_endpoints(mock_payments_spec):
     """
     P1.3: Test that build_silver_api_model links request/response schemas to endpoints.

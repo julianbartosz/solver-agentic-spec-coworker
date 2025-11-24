@@ -157,13 +157,13 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
                 ref = field_def.get("$ref", "")
                 if ref.startswith("#/components/schemas/"):
                     target_schema = ref.split("/")[-1]
+                    # P2.2: Use correct field names (source/target_entity_id not from/to_entity)
+                    # Set to None for now - ID backfill would happen post-persistence
                     relationship = EntityRelationship(
                         id=None,
-                        source_system_id=None,
-                        from_entity=schema.name,
-                        to_entity=target_schema,
+                        source_entity_id=None,  # Would be backfilled after entity persistence
+                        target_entity_id=None,  # Would be backfilled after entity persistence
                         relationship_type="references",
-                        cardinality="one-to-one",
                     )
                     state.relationships.append(relationship)
         
