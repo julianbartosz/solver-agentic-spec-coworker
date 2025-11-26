@@ -1,0 +1,26 @@
+version: '3.8'
+
+# Docker Compose configuration for Integration Co-Worker development
+# See docs/db_setup.md for full setup instructions
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: integration-coworker-db
+    environment:
+      POSTGRES_USER: integration
+      POSTGRES_PASSWORD: integration
+      POSTGRES_DB: integration_coworker
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integration -d integration_coworker"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

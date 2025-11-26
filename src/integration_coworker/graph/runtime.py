@@ -19,8 +19,21 @@ from integration_coworker.graph.nodes import (
     build_report,
     handle_error,
 )
+from integration_coworker.graph.nodes import (
+    persist_silver_checkpoint,
+    persist_gold_checkpoint,
+    persist_run_outcome,
+)
 
 def build_graph():
+    """
+    Build the LangGraph workflow.
+    
+    Per design doc Section 5.4, the graph has three checkpoint nodes:
+    - persist_silver_checkpoint: After build_silver_api_model + embed_spec_chunks
+    - persist_gold_checkpoint: After generate_code_and_tests
+    - persist_run_outcome: After build_report (final status and metrics)
+    """
     workflow = StateGraph(WorkflowState)
 
     # Add nodes
@@ -29,41 +42,56 @@ def build_graph():
     workflow.add_node("detect_and_parse_spec", detect_and_parse_spec.detect_and_parse_spec)
     workflow.add_node("build_silver_api_model", build_silver_api_model.build_silver_api_model)
     workflow.add_node("embed_spec_chunks", embed_spec_chunks.embed_spec_chunks)
+    
+    # Silver checkpoint - per design doc Section 5.4
+    workflow.add_node("persist_silver_checkpoint", persist_silver_checkpoint.persist_silver_checkpoint)
+    
     workflow.add_node("understand_task", understand_task.understand_task)
     workflow.add_node("align_task_with_kg", align_task_with_kg.align_task_with_kg)
     workflow.add_node("plan_integration_flow", plan_integration_flow.plan_integration_flow)
     workflow.add_node("attach_policies_and_patterns", attach_policies_and_patterns.attach_policies_and_patterns)
     workflow.add_node("attach_repo_context", attach_repo_context.attach_repo_context)
     workflow.add_node("generate_code_and_tests", generate_code_and_tests.generate_code_and_tests)
+    
+    # Gold checkpoint - per design doc Section 5.4
+    workflow.add_node("persist_gold_checkpoint", persist_gold_checkpoint.persist_gold_checkpoint)
+    
     workflow.add_node("analyze_repo_layout", analyze_repo_layout.analyze_repo_layout)
     workflow.add_node("apply_repo_integration_changes", apply_repo_integration_changes.apply_repo_integration_changes)
     workflow.add_node("validate_integration_design", validate_integration_design.validate_integration_design)
+    
+    # Legacy persist_results kept for backward compatibility (delegates to checkpoints if needed)
     workflow.add_node("persist_results", persist_results.persist_results)
+    
     workflow.add_node("build_report", build_report.build_report)
+    
+    # Run outcome checkpoint - per design doc Section 5.4
+    workflow.add_node("persist_run_outcome", persist_run_outcome.persist_run_outcome)
+    
     workflow.add_node("handle_error", handle_error.handle_error)
 
-    # Define edges (up to policies attachment)
+    # Define edges
     workflow.set_entry_point("plan_run")
     workflow.add_edge("plan_run", "ingest_spec")
     workflow.add_edge("ingest_spec", "detect_and_parse_spec")
     workflow.add_edge("detect_and_parse_spec", "build_silver_api_model")
     workflow.add_edge("build_silver_api_model", "embed_spec_chunks")
-    workflow.add_edge("embed_spec_chunks", "understand_task")
+    
+    # Silver checkpoint after embedding (per design doc Section 5.4)
+    workflow.add_edge("embed_spec_chunks", "persist_silver_checkpoint")
+    workflow.add_edge("persist_silver_checkpoint", "understand_task")
+    
     workflow.add_edge("understand_task", "align_task_with_kg")
     workflow.add_edge("align_task_with_kg", "plan_integration_flow")
     workflow.add_edge("plan_integration_flow", "attach_policies_and_patterns")
     
-    # Conditional routing based on plan["use_repo"]
-    def should_run_repo_nodes(state: WorkflowState) -> str:
-        """Route to repo nodes if plan["use_repo"] is True, else skip to codegen."""
-        if state.plan.get("use_repo", False):
-            return "with_repo"
-        return "without_repo"
-    
-    # Code generation always happens first
+    # Code generation
     workflow.add_edge("attach_policies_and_patterns", "generate_code_and_tests")
     
-    # Conditional routing AFTER code generation for repo integration
+    # Gold checkpoint after code generation (per design doc Section 5.4)
+    workflow.add_edge("generate_code_and_tests", "persist_gold_checkpoint")
+    
+    # Conditional routing AFTER gold checkpoint for repo integration
     def should_run_repo_nodes(state: WorkflowState) -> str:
         """Route to repo nodes if plan["use_repo"] is True, else skip to validation."""
         if state.plan.get("use_repo", False):
@@ -71,7 +99,7 @@ def build_graph():
         return "without_repo"
     
     workflow.add_conditional_edges(
-        "generate_code_and_tests",
+        "persist_gold_checkpoint",
         should_run_repo_nodes,
         {
             "with_repo": "attach_repo_context",
@@ -79,17 +107,33 @@ def build_graph():
         }
     )
     
-    # Repo flow (when enabled) - now happens AFTER code generation
+    # Repo flow (when enabled) - happens AFTER gold checkpoint
     workflow.add_edge("attach_repo_context", "analyze_repo_layout")
     workflow.add_edge("analyze_repo_layout", "apply_repo_integration_changes")
     workflow.add_edge("apply_repo_integration_changes", "validate_integration_design")
     
     # Common path after validation
-    workflow.add_edge("validate_integration_design", "persist_results")
-    workflow.add_edge("persist_results", "build_report")
-    workflow.add_edge("build_report", END)
-
-    # TODO: Add conditional edges to handle_error based on state.errors
+    def check_for_errors_after_validation(state: WorkflowState) -> str:
+        """Check if errors occurred during validation."""
+        if state.errors and not state.plan.get("failed", False):
+            return "has_errors"
+        return "no_errors"
+    
+    workflow.add_conditional_edges(
+        "validate_integration_design",
+        check_for_errors_after_validation,
+        {
+            "has_errors": "handle_error",
+            "no_errors": "build_report",
+        }
+    )
+    
+    # After handle_error, still build report
+    workflow.add_edge("handle_error", "build_report")
+    
+    # Run outcome checkpoint after build_report (per design doc Section 5.4)
+    workflow.add_edge("build_report", "persist_run_outcome")
+    workflow.add_edge("persist_run_outcome", END)
 
     return workflow.compile()
 

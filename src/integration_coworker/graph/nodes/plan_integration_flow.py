@@ -1,5 +1,44 @@
+"""
+plan_integration_flow node - Validate and finalize workflow structure, create endpoint bindings.
+
+Uses LLM when available to enhance endpoint binding mappings.
+"""
+import logging
+from typing import Dict, Any, List
+
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import EndpointBinding
+from integration_coworker.llm import call_llm_json
+
+logger = logging.getLogger(__name__)
+
+
+def _build_binding_prompt(state: WorkflowState, api_node, endpoint) -> str:
+    """Build prompt for generating request/response mappings."""
+    endpoint_info = f"{endpoint.method} {endpoint.path}"
+    if endpoint.summary:
+        endpoint_info += f" - {endpoint.summary}"
+    
+    return f"""Generate request and response mappings for an API call node.
+
+TASK: {state.task_description}
+ENDPOINT: {endpoint_info}
+OPERATION_ID: {endpoint.operation_id or "N/A"}
+
+Return JSON with:
+{{
+    "request_mapping": {{
+        "description": "how input maps to request",
+        "path_params": {{}},
+        "query_params": {{}},
+        "body": {{}}
+    }},
+    "response_mapping": {{
+        "description": "how response maps to output",
+        "extract_fields": []
+    }}
+}}
+"""
 
 
 def plan_integration_flow(state: WorkflowState) -> WorkflowState:
@@ -10,7 +49,7 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
     Contract per Appendix C.3.8:
     - Validates flow structure (start/end nodes, connectivity, positions)
     - Creates EndpointBinding scaffolds for each api_call node
-    - Uses candidate templates if available
+    - Uses LLM to enhance binding mappings when available
     """
     if not state.workflow_nodes:
         state.errors.append("No workflow_nodes from align_task_with_kg")
@@ -95,15 +134,35 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
                         matched_endpoint = endpoint
                         break
         
+        # Generate mapping with LLM if we have an endpoint
+        request_mapping = {}
+        response_mapping = {}
+        
+        if matched_endpoint:
+            try:
+                prompt = _build_binding_prompt(state, api_node, matched_endpoint)
+                llm_response = call_llm_json(prompt, task_type="plan_integration_flow")
+                
+                if llm_response and not llm_response.get("error"):
+                    request_mapping = llm_response.get("request_mapping", {})
+                    response_mapping = llm_response.get("response_mapping", {})
+                    logger.info(f"LLM generated mappings for {api_node.node_key}")
+            except Exception as e:
+                logger.warning(f"LLM mapping generation failed, using empty scaffolds: {e}")
+        
         # Create binding (endpoint_id may be None if not matched yet)
         binding = EndpointBinding(
             id=None,
             task_id=None,
             flow_node_key=api_node.node_key,
             endpoint_id=matched_endpoint.id if matched_endpoint else None,
-            request_mapping={},  # Empty scaffold per spec
-            response_mapping={},  # Empty scaffold per spec
+            request_mapping=request_mapping,
+            response_mapping=response_mapping,
         )
+        # Store reference to matched endpoint for code generation
+        # (endpoint_id may be None until persistence)
+        if matched_endpoint:
+            binding._matched_endpoint = matched_endpoint
         state.endpoint_bindings.append(binding)
     
     state.completed_steps.append("plan_integration_flow")

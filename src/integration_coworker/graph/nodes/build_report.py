@@ -1,9 +1,38 @@
+"""
+build_report node - Generate a human-readable markdown report.
+
+Uses structured template, with optional LLM enhancement for executive summary.
+"""
+import logging
 from integration_coworker.graph.state import WorkflowState
+from integration_coworker.llm import call_llm
+
+logger = logging.getLogger(__name__)
+
+
+def _build_summary_prompt(structured_report: str, state: WorkflowState) -> str:
+    """Build prompt for LLM to generate executive summary."""
+    return f"""Generate a brief executive summary (2-3 sentences) for this integration report.
+
+TASK: {state.task_description or "API integration"}
+PROVIDER: {state.provider_code or "unknown"}
+
+KEY METRICS:
+- Endpoints discovered: {len(state.endpoints)}
+- Workflow nodes: {len(state.workflow_nodes)}
+- Code artifacts generated: {len(state.code_artifacts)}
+- Errors: {len(state.errors)}
+
+Generate a concise summary highlighting what was accomplished and any important notes.
+"""
+
 
 def build_report(state: WorkflowState) -> WorkflowState:
     """
     Reads: All state fields
     Writes: report_markdown
+    
+    Generates structured report, with optional LLM-enhanced executive summary.
     """
     lines = []
     
@@ -15,6 +44,21 @@ def build_report(state: WorkflowState) -> WorkflowState:
     lines.append(f"**Provider**: `{state.provider_code or 'unknown'}`")
     lines.append(f"**Task**: {state.task_description or 'N/A'}")
     lines.append("")
+    
+    # Try to generate LLM executive summary
+    try:
+        structured_report = _build_structured_metrics(state)
+        summary_prompt = _build_summary_prompt(structured_report, state)
+        summary = call_llm(summary_prompt, task_type="report")
+        
+        # Check if we got a real summary (not mock placeholder)
+        if summary and len(summary) > 20 and not summary.startswith("Mock response"):
+            lines.append("## Executive Summary")
+            lines.append(summary.strip())
+            lines.append("")
+            logger.info("Generated LLM executive summary")
+    except Exception as e:
+        logger.debug(f"Skipping LLM summary: {e}")
     
     # Spec ingestion
     lines.append("## Spec Ingestion")
@@ -44,8 +88,8 @@ def build_report(state: WorkflowState) -> WorkflowState:
     if state.workflow_nodes:
         lines.append("### Workflow Steps:")
         for node in state.workflow_nodes:
-            label = node.config.get("label", node.node_key)
-            description = node.config.get("description", "")
+            label = node.config.get("label", node.node_key) if node.config else node.node_key
+            description = node.config.get("description", "") if node.config else ""
             lines.append(f"  {node.position + 1}. **{label}** ({node.node_type}): {description}")
     lines.append(f"- Workflow edges: {len(state.workflow_edges)}")
     lines.append(f"- Endpoint bindings: {len(state.endpoint_bindings)}")
@@ -113,3 +157,15 @@ def build_report(state: WorkflowState) -> WorkflowState:
     state.report_markdown = "\n".join(lines)
     state.completed_steps.append("build_report")
     return state
+
+
+def _build_structured_metrics(state: WorkflowState) -> str:
+    """Build a structured metrics string for LLM context."""
+    return f"""
+Endpoints: {len(state.endpoints)}
+Schemas: {len(state.schemas)}
+Entities: {len(state.entities)}
+Workflow Nodes: {len(state.workflow_nodes)}
+Code Artifacts: {len(state.code_artifacts)}
+Errors: {len(state.errors)}
+"""

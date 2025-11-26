@@ -41,6 +41,11 @@ class IntegrationResult:
     - persisted_ids: Dict tracking database IDs and persistence status
     - endpoints, schemas, entities: Silver model artifacts
     - workflow_nodes, workflow_edges, endpoint_bindings: Gold model artifacts
+    
+    Phase 4 additions:
+    - spec_documents, doc_chunks, plan: For multi-spec tracking
+    - errors, completed_steps: For diagnostics
+    - provider_code: Inferred provider
     """
     run_id: str
     task: Optional['IntegrationTask']  # Forward reference, resolved at runtime
@@ -60,3 +65,11 @@ class IntegrationResult:
     workflow_nodes: List = field(default_factory=list)
     workflow_edges: List = field(default_factory=list)
     endpoint_bindings: List = field(default_factory=list)
+    
+    # Phase 4: Multi-spec and diagnostics
+    spec_documents: List = field(default_factory=list)
+    doc_chunks: List = field(default_factory=list)
+    plan: Optional[dict] = None
+    errors: List[str] = field(default_factory=list)
+    completed_steps: List[str] = field(default_factory=list)
+    provider_code: Optional[str] = None

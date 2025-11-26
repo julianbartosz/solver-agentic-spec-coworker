@@ -1,12 +1,46 @@
-import os
+"""
+generate_code_and_tests node - Generate client, flow, and test code.
+
+Uses templates for structure, with optional LLM refinement for function bodies.
+"""
+import logging
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import CodeArtifact
-from integration_coworker.config import get_llm_config
+from integration_coworker.llm import call_llm
+
+logger = logging.getLogger(__name__)
+
+
+def _build_code_refinement_prompt(template_code: str, state: WorkflowState, artifact_type: str) -> str:
+    """Build prompt for LLM code refinement."""
+    task_desc = state.task_description or "API integration"
+    provider = state.provider_code or "unknown"
+    
+    return f"""Refine this {artifact_type} code template for a {provider} API integration.
+
+TASK: {task_desc}
+
+TEMPLATE CODE:
+```python
+{template_code}
+```
+
+Improve the code by:
+1. Adding better docstrings and comments
+2. Improving error handling
+3. Adding type hints where missing
+4. Making the code more idiomatic
+
+Return ONLY the refined Python code, no explanations.
+"""
+
 
 def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
     """
     Reads: endpoints, endpoint_bindings, policies, integration_task, workflow_nodes, repo_profile
     Writes: code_artifacts
+    
+    Generates code using templates, optionally refined by LLM.
     """
     if not state.endpoint_bindings:
         state.errors.append("No endpoint_bindings to generate code from")
@@ -16,12 +50,11 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
     provider_code = state.provider_code or "unknown"
     task_slug = state.integration_task.task_slug if state.integration_task else "integration"
     
-    # For Phase 2: generate code using templates (not LLM, for predictability)
-    # Real implementation would use LLM with prompts
-    
     try:
         # Generate CLIENT code
-        client_code = _generate_client_code(state, provider_code)
+        client_template = _generate_client_code(state, provider_code)
+        client_code = _refine_with_llm(client_template, state, "client")
+        
         client_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -34,7 +67,9 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
         state.code_artifacts.append(client_artifact)
         
         # Generate FLOW code
-        flow_code = _generate_flow_code(state, provider_code, task_slug)
+        flow_template = _generate_flow_code(state, provider_code, task_slug)
+        flow_code = _refine_with_llm(flow_template, state, "flow")
+        
         flow_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -47,7 +82,9 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
         state.code_artifacts.append(flow_artifact)
         
         # Generate TEST code
-        test_code = _generate_test_code(state, provider_code)
+        test_template = _generate_test_code(state, provider_code)
+        test_code = _refine_with_llm(test_template, state, "test")
+        
         test_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -66,6 +103,41 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def _refine_with_llm(template_code: str, state: WorkflowState, artifact_type: str) -> str:
+    """Optionally refine template code with LLM."""
+    try:
+        prompt = _build_code_refinement_prompt(template_code, state, artifact_type)
+        refined = call_llm(prompt, task_type="codegen")
+        
+        # Validate refined code is genuinely improved (not just a mock response)
+        # Mock responses are short generic functions - template should be used instead
+        if refined:
+            # Remove markdown code blocks if present
+            clean_refined = refined
+            if clean_refined.startswith("```"):
+                lines = clean_refined.split("\n")
+                clean_refined = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            
+            # Check if it's a mock/placeholder response
+            is_mock = (
+                "mock_function" in clean_refined or 
+                "Mock response" in refined or
+                len(clean_refined) < 100  # Too short to be useful refinement
+            )
+            
+            if not is_mock and ("def " in clean_refined or "class " in clean_refined):
+                logger.info(f"LLM refined {artifact_type} code")
+                return clean_refined
+        
+        # LLM returned mock or invalid, use template
+        logger.info(f"Using template code for {artifact_type} (LLM returned mock/placeholder)")
+        return template_code
+            
+    except Exception as e:
+        logger.warning(f"LLM refinement failed for {artifact_type}, using template: {e}")
+        return template_code
+
+
 def _generate_client_code(state: WorkflowState, provider_code: str) -> str:
     """Generate client module code."""
     # Find the main endpoint
@@ -73,12 +145,29 @@ def _generate_client_code(state: WorkflowState, provider_code: str) -> str:
     if not binding:
         return "# No endpoint binding found"
     
-    # Find endpoint by ID
+    # Find endpoint - first try by ID, then by looking for POST endpoints
     endpoint = None
-    for ep in state.endpoints:
-        if ep.id == binding.endpoint_id:
-            endpoint = ep
-            break
+    
+    # Try by ID if available
+    if binding.endpoint_id is not None:
+        for ep in state.endpoints:
+            if ep.id == binding.endpoint_id:
+                endpoint = ep
+                break
+    
+    # Fallback: look for stored endpoint reference (set by plan_integration_flow)
+    if not endpoint and hasattr(binding, '_matched_endpoint'):
+        endpoint = binding._matched_endpoint
+    
+    # Fallback: find a suitable POST endpoint (typically the main API endpoint)
+    if not endpoint and state.endpoints:
+        for ep in state.endpoints:
+            if ep.method == "POST":
+                endpoint = ep
+                break
+        # If no POST, use first endpoint
+        if not endpoint:
+            endpoint = state.endpoints[0]
     
     if not endpoint:
         return "# No endpoint found for binding"
