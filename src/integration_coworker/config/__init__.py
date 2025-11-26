@@ -72,10 +72,18 @@ class LLMConfig:
     # Use mock LLM for tests
     use_mock: bool = field(default_factory=lambda: os.getenv("USE_MOCK_LLM", "").lower() == "true")
     
+    # Embedding model (used by KG and embeddings)
+    _embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
+    
     @property
     def is_configured(self) -> bool:
         """Check if LLM is properly configured for real calls."""
         return bool(self.api_key) and not self.use_mock
+    
+    @property
+    def embedding_model(self) -> str:
+        """Get the embedding model name (for KG and embedding nodes)."""
+        return self._embedding_model
 
 
 @dataclass  

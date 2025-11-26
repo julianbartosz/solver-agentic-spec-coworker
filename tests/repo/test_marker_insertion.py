@@ -97,10 +97,25 @@ def test_generate_router_block():
     """Test router block generation."""
     block = generate_router_block("stripe", "create_checkout_session")
     
-    assert "from integrations.flows import create_checkout_session" in block
+    # Check new format uses proper module path
+    assert "integrations.flows" in block
     assert "router.include_router" in block
     assert "/integrations/stripe/create_checkout_session" in block
     assert "stripe" in block
+
+
+def test_generate_router_block_with_custom_module():
+    """Test router block generation with custom module path."""
+    block = generate_router_block(
+        "stripe",
+        "create_checkout_session",
+        flows_module="src.integrations.flows",
+        flow_module_name="stripe_create_checkout_session",
+    )
+    
+    assert "from src.integrations.flows.stripe_create_checkout_session import" in block
+    assert "router.include_router" in block
+    assert "/integrations/stripe/create_checkout_session" in block
 
 
 def test_generate_settings_block_with_url():

@@ -25,6 +25,7 @@ from .client import (
     get_llm_client,
     call_llm,
     call_llm_json,
+    is_mock_llm_mode,
     MockLLMClient,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "get_llm_client", 
     "call_llm",
     "call_llm_json",
+    "is_mock_llm_mode",
     "MockLLMClient",
 ]

@@ -505,10 +505,86 @@ def _init_sqlite_schema() -> None:
         )
     """)
     
+    # =========================================================================
+    # kg (Knowledge Graph) tables for GraphRAG
+    # =========================================================================
+    
+    # KG nodes (core graph nodes)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_type TEXT NOT NULL,
+            provider_code TEXT,
+            key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            properties TEXT DEFAULT '{}',
+            embedding TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            confidence_score REAL DEFAULT 1.0,
+            usage_count INTEGER DEFAULT 0,
+            last_used_at TEXT,
+            source_run_id TEXT,
+            UNIQUE(node_type, key)
+        )
+    """)
+    
+    # KG edges (relationships between nodes)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_node_id INTEGER NOT NULL,
+            dst_node_id INTEGER NOT NULL,
+            relation_type TEXT NOT NULL,
+            weight REAL DEFAULT 1.0,
+            properties TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            source_run_id TEXT,
+            FOREIGN KEY (src_node_id) REFERENCES kg_nodes(id),
+            FOREIGN KEY (dst_node_id) REFERENCES kg_nodes(id),
+            UNIQUE(src_node_id, dst_node_id, relation_type)
+        )
+    """)
+    
+    # KG workflow steps
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_workflow_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_node_id INTEGER NOT NULL,
+            step_key TEXT NOT NULL,
+            step_type TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            label TEXT,
+            description TEXT,
+            config TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (template_node_id) REFERENCES kg_nodes(id),
+            UNIQUE(template_node_id, step_key)
+        )
+    """)
+    
+    # KG step bindings
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_step_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_id INTEGER NOT NULL,
+            endpoint_node_id INTEGER,
+            endpoint_path TEXT,
+            endpoint_method TEXT,
+            request_mapping TEXT DEFAULT '{}',
+            response_mapping TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (step_id) REFERENCES kg_workflow_steps(id),
+            FOREIGN KEY (endpoint_node_id) REFERENCES kg_nodes(id),
+            UNIQUE(step_id, endpoint_node_id)
+        )
+    """)
+    
     conn.commit()
     conn.close()
     
-    logger.info("SQLite schema initialized successfully")
+    logger.info("SQLite schema initialized successfully (including kg tables)")
 
 
 def clear_test_data() -> None:
@@ -536,6 +612,12 @@ def clear_test_data() -> None:
         with pg_get_connection() as conn:
             with conn.cursor() as cur:
                 # Delete in reverse dependency order
+                # KG tables first
+                cur.execute("DELETE FROM kg.step_bindings")
+                cur.execute("DELETE FROM kg.workflow_steps")
+                cur.execute("DELETE FROM kg.edges")
+                cur.execute("DELETE FROM kg.nodes")
+                # Then repo_meta
                 cur.execute("DELETE FROM repo_meta.files")
                 cur.execute("DELETE FROM repo_meta.integrations")
                 cur.execute("DELETE FROM integration_gold.rag_eval_metrics")
@@ -566,6 +648,12 @@ def clear_test_data() -> None:
     cur = conn.cursor()
     
     # Delete in reverse dependency order
+    # KG tables first
+    cur.execute("DELETE FROM kg_step_bindings")
+    cur.execute("DELETE FROM kg_workflow_steps")
+    cur.execute("DELETE FROM kg_edges")
+    cur.execute("DELETE FROM kg_nodes")
+    # Then rest
     cur.execute("DELETE FROM repo_files")
     cur.execute("DELETE FROM repo_integrations")
     cur.execute("DELETE FROM rag_eval_metrics")

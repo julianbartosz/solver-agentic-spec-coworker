@@ -5,7 +5,7 @@ These dataclasses mirror the database schema but are used in-memory
 during workflow execution before persistence.
 """
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from enum import Enum
 
 
@@ -245,3 +245,98 @@ class CodeArtifact:
     module_name: str
     rel_path: str  # Relative path in the target repo
     content: str  # The actual code
+
+
+# ============================================================================
+# Knowledge Graph Models (for GraphRAG)
+# ============================================================================
+
+class KGNodeType(str, Enum):
+    """Types of nodes in the knowledge graph."""
+    PROVIDER = "provider"
+    ENTITY = "entity"
+    ENDPOINT = "endpoint"
+    WORKFLOW_TEMPLATE = "workflow_template"
+    TASK = "task"
+
+
+class KGEdgeRelation(str, Enum):
+    """Types of relationships between KG nodes."""
+    USES_ENDPOINT = "uses_endpoint"
+    PRODUCES_ENTITY = "produces_entity"
+    CONSUMES_ENTITY = "consumes_entity"
+    SIMILAR_TO = "similar_to"
+    COMPOSED_OF = "composed_of"
+    PRECEDES = "precedes"
+    BELONGS_TO_PROVIDER = "belongs_to_provider"
+
+
+@dataclass
+class KGNode:
+    """A node in the knowledge graph."""
+    id: Optional[int]
+    node_type: str  # See KGNodeType
+    provider_code: Optional[str]
+    key: str  # Unique key like "stripe.create_checkout_session"
+    name: str
+    description: Optional[str] = None
+    properties: Optional[Dict[str, Any]] = None  # Flexible properties (e.g., steps for templates)
+    embedding: Optional[list] = None  # Vector embedding (1536 dim)
+    confidence_score: float = 1.0
+    usage_count: int = 0
+    source_run_id: Optional[str] = None
+
+
+@dataclass
+class KGEdge:
+    """An edge (relationship) between two KG nodes."""
+    id: Optional[int]
+    src_node_id: int
+    dst_node_id: int
+    relation_type: str  # See KGEdgeRelation
+    weight: float = 1.0
+    properties: Optional[Dict[str, Any]] = None
+    source_run_id: Optional[str] = None
+
+
+@dataclass
+class KGWorkflowStep:
+    """A step within a workflow template in the KG."""
+    id: Optional[int]
+    template_id: Optional[str]  # Template key like "template.stripe.create_checkout"
+    step_key: str
+    step_type: str  # 'start', 'validation', 'api_call', 'transform', 'end'
+    position: int
+    label: Optional[str] = None
+    description: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    endpoint_path: Optional[str] = None  # For api_call steps
+
+
+@dataclass
+class KGStepBinding:
+    """Binding from a workflow step to an endpoint."""
+    id: Optional[int]
+    step_id: int
+    endpoint_node_id: Optional[int] = None
+    endpoint_path: Optional[str] = None
+    endpoint_method: Optional[str] = None
+    request_mapping: Optional[Dict[str, Any]] = None
+    response_mapping: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class KGWorkflowTemplate:
+    """
+    A workflow template from the Knowledge Graph.
+    
+    This is the domain model returned by GraphRAG queries.
+    Contains the template metadata and its steps.
+    """
+    template_id: str
+    name: str
+    description: Optional[str] = None
+    provider_code: Optional[str] = None
+    task_type: Optional[str] = None
+    steps: Optional[List["KGWorkflowStep"]] = None
+    metadata: Optional[Dict[str, Any]] = None
