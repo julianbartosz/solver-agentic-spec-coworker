@@ -23,6 +23,7 @@ from integration_coworker.graph.nodes import (
     persist_silver_checkpoint,
     persist_gold_checkpoint,
     persist_run_outcome,
+    persist_kg_learning,
 )
 
 def build_graph():
@@ -91,7 +92,11 @@ def build_graph():
     # Gold checkpoint after code generation (per design doc Section 5.4)
     workflow.add_edge("generate_code_and_tests", "persist_gold_checkpoint")
     
-    # Conditional routing AFTER gold checkpoint for repo integration
+    # KG learning after gold checkpoint - persists workflow templates to KG
+    workflow.add_node("persist_kg_learning", persist_kg_learning.persist_kg_learning)
+    workflow.add_edge("persist_gold_checkpoint", "persist_kg_learning")
+    
+    # Conditional routing AFTER KG learning for repo integration
     def should_run_repo_nodes(state: WorkflowState) -> str:
         """Route to repo nodes if plan["use_repo"] is True, else skip to validation."""
         if state.plan.get("use_repo", False):
@@ -99,7 +104,7 @@ def build_graph():
         return "without_repo"
     
     workflow.add_conditional_edges(
-        "persist_gold_checkpoint",
+        "persist_kg_learning",
         should_run_repo_nodes,
         {
             "with_repo": "attach_repo_context",

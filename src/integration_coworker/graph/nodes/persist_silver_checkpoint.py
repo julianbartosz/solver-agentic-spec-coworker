@@ -15,6 +15,8 @@ Writes to:
 - spec_chunks (with embeddings)
 
 Backfills IDs into state objects for downstream use.
+
+Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
 """
 from datetime import datetime, UTC
 import json
@@ -23,9 +25,15 @@ from typing import Optional
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
+from integration_coworker.persistence.sql_helpers import (
+    upsert_ignore, select_by_columns, get_engine_type, get_row_value
+)
 from integration_coworker.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Schema prefix for Postgres tables
+SILVER_SCHEMA = "spec_silver"
 
 
 def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
@@ -66,13 +74,17 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
         conn = db.get_connection()  # Uses Postgres or SQLite based on config
         cur = conn.cursor()
         
+        # Determine engine type for schema prefixes
+        engine = get_engine_type()
+        schema = SILVER_SCHEMA if engine == "postgres" else None
+        
         # 1. Upsert SourceSystem
         provider_code = state.provider_code or "unknown"
-        cur.execute(
-            "INSERT OR IGNORE INTO source_systems (code, display_name) VALUES (?, ?)",
-            (provider_code, provider_code.replace("_", " ").title())
-        )
-        cur.execute("SELECT id FROM source_systems WHERE code = ?", (provider_code,))
+        sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], schema)
+        cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
+        
+        sql = select_by_columns("source_systems", ["id"], ["code"], schema)
+        cur.execute(sql, (provider_code,))
         source_system_id = cur.fetchone()[0]
         
         # Backfill into state.source_system if exists
@@ -82,14 +94,16 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
         # 2. Insert SpecDocuments
         spec_document_ids = {}
         for spec_doc in state.spec_documents:
-            cur.execute(
-                "INSERT OR IGNORE INTO spec_documents (source_system_id, uri, sha256, content_type) VALUES (?, ?, ?, ?)",
-                (source_system_id, spec_doc.uri, spec_doc.sha256, spec_doc.content_type)
+            sql = upsert_ignore(
+                "spec_documents", 
+                ["source_system_id", "uri", "sha256", "content_type"],
+                ["source_system_id", "sha256"],
+                schema
             )
-            cur.execute(
-                "SELECT id FROM spec_documents WHERE source_system_id = ? AND sha256 = ?",
-                (source_system_id, spec_doc.sha256)
-            )
+            cur.execute(sql, (source_system_id, spec_doc.uri, spec_doc.sha256, spec_doc.content_type))
+            
+            sql = select_by_columns("spec_documents", ["id"], ["source_system_id", "sha256"], schema)
+            cur.execute(sql, (source_system_id, spec_doc.sha256))
             spec_document_id = cur.fetchone()[0]
             spec_doc.id = spec_document_id
             spec_doc.source_system_id = source_system_id
@@ -101,37 +115,34 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
         # 3. Insert SpecSections
         for section in state.spec_sections:
             doc_id = section.spec_document_id or primary_spec_document_id
-            cur.execute(
-                """INSERT OR IGNORE INTO spec_sections 
-                   (spec_document_id, section_type, title, path, start_offset, end_offset, content)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, section.section_type, section.title, section.path,
-                 section.start_offset, section.end_offset, section.content)
+            sql = upsert_ignore(
+                "spec_sections",
+                ["spec_document_id", "section_type", "title", "path", "start_offset", "end_offset", "content"],
+                ["spec_document_id", "section_type", "path"],
+                schema
             )
+            cur.execute(sql, (doc_id, section.section_type, section.title, section.path,
+                 section.start_offset, section.end_offset, section.content))
+            
             # Backfill ID
-            cur.execute(
-                "SELECT id FROM spec_sections WHERE spec_document_id = ? AND section_type = ? AND path = ?",
-                (doc_id, section.section_type, section.path or "")
-            )
+            sql = select_by_columns("spec_sections", ["id"], ["spec_document_id", "section_type", "path"], schema)
+            cur.execute(sql, (doc_id, section.section_type, section.path or ""))
             row = cur.fetchone()
             if row:
                 section.id = row[0]
         
         # 4. Insert Schemas
         schema_ids_by_name = {}
-        for schema in state.schemas:
-            cur.execute(
-                "INSERT OR IGNORE INTO schemas (source_system_id, name, ref) VALUES (?, ?, ?)",
-                (source_system_id, schema.name, schema.ref)
-            )
-            cur.execute(
-                "SELECT id FROM schemas WHERE source_system_id = ? AND name = ?",
-                (source_system_id, schema.name)
-            )
+        for schema_obj in state.schemas:
+            sql = upsert_ignore("schemas", ["source_system_id", "name", "ref"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, schema_obj.name, schema_obj.ref))
+            
+            sql = select_by_columns("schemas", ["id"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, schema_obj.name))
             schema_id = cur.fetchone()[0]
-            schema.id = schema_id
-            schema.source_system_id = source_system_id
-            schema_ids_by_name[schema.name] = schema_id
+            schema_obj.id = schema_id
+            schema_obj.source_system_id = source_system_id
+            schema_ids_by_name[schema_obj.name] = schema_id
         
         # 5. Insert SchemaFields
         for field in state.schema_fields:
@@ -139,14 +150,15 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                 field.schema_id = schema_ids_by_name.get(field.schema_name)
             if field.schema_id:
                 json_path = field.json_path or f"$.{field.name}"
-                cur.execute(
-                    """INSERT OR IGNORE INTO fields 
-                       (schema_id, name, json_path, type, format, required, description)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (field.schema_id, field.name, json_path, 
-                     field.field_type or field.type, field.format,
-                     1 if field.required else 0, field.description)
+                sql = upsert_ignore(
+                    "fields",
+                    ["schema_id", "name", "json_path", "type", "format", "required", "description"],
+                    ["schema_id", "json_path"],
+                    schema
                 )
+                cur.execute(sql, (field.schema_id, field.name, json_path, 
+                     field.field_type or field.type, field.format,
+                     1 if field.required else 0, field.description))
         
         # 6. Insert Endpoints
         for endpoint in state.endpoints:
@@ -155,17 +167,17 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             if hasattr(endpoint, '_source_uri') and endpoint._source_uri:
                 doc_id = spec_document_ids.get(endpoint._source_uri, doc_id)
             
-            cur.execute(
-                """INSERT OR IGNORE INTO endpoints 
-                   (source_system_id, spec_document_id, method, path, operation_id, summary, description)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (source_system_id, doc_id, endpoint.method, endpoint.path,
-                 endpoint.operation_id, endpoint.summary, endpoint.description)
+            sql = upsert_ignore(
+                "endpoints",
+                ["source_system_id", "spec_document_id", "method", "path", "operation_id", "summary", "description"],
+                ["source_system_id", "spec_document_id", "path", "method"],
+                schema
             )
-            cur.execute(
-                "SELECT id FROM endpoints WHERE source_system_id = ? AND spec_document_id = ? AND method = ? AND path = ?",
-                (source_system_id, doc_id, endpoint.method, endpoint.path)
-            )
+            cur.execute(sql, (source_system_id, doc_id, endpoint.method, endpoint.path,
+                 endpoint.operation_id, endpoint.summary, endpoint.description))
+            
+            sql = select_by_columns("endpoints", ["id"], ["source_system_id", "spec_document_id", "method", "path"], schema)
+            cur.execute(sql, (source_system_id, doc_id, endpoint.method, endpoint.path))
             endpoint_id = cur.fetchone()[0]
             endpoint.id = endpoint_id
             endpoint.source_system_id = source_system_id
@@ -177,25 +189,23 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             if param.endpoint_id is None and hasattr(param, 'endpoint_method') and hasattr(param, 'endpoint_path'):
                 param.endpoint_id = endpoint_ids_by_key.get((param.endpoint_method, param.endpoint_path))
             if param.endpoint_id:
-                cur.execute(
-                    """INSERT OR IGNORE INTO endpoint_parameters 
-                       (endpoint_id, name, location, required, schema_ref, description)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (param.endpoint_id, param.name, param.location,
-                     1 if param.required else 0, param.schema_ref, param.description)
+                sql = upsert_ignore(
+                    "endpoint_parameters",
+                    ["endpoint_id", "name", "location", "required", "schema_ref", "description"],
+                    ["endpoint_id", "name", "location"],
+                    schema
                 )
+                cur.execute(sql, (param.endpoint_id, param.name, param.location,
+                     1 if param.required else 0, param.schema_ref, param.description))
         
         # 8. Insert Entities
         entity_ids_by_name = {}
         for entity in state.entities:
-            cur.execute(
-                "INSERT OR IGNORE INTO entities (source_system_id, name, description) VALUES (?, ?, ?)",
-                (source_system_id, entity.name, entity.description)
-            )
-            cur.execute(
-                "SELECT id FROM entities WHERE source_system_id = ? AND name = ?",
-                (source_system_id, entity.name)
-            )
+            sql = upsert_ignore("entities", ["source_system_id", "name", "description"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, entity.name, entity.description))
+            
+            sql = select_by_columns("entities", ["id"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, entity.name))
             entity_id = cur.fetchone()[0]
             entity.id = entity_id
             entity.source_system_id = source_system_id
@@ -204,23 +214,21 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
         # 9. Insert EntityRelationships
         for rel in state.relationships:
             if rel.source_entity_id and rel.target_entity_id:
-                cur.execute(
-                    """INSERT OR IGNORE INTO entity_relationships 
-                       (source_system_id, from_entity_id, to_entity_id, relationship_type)
-                       VALUES (?, ?, ?, ?)""",
-                    (source_system_id, rel.source_entity_id, rel.target_entity_id, rel.relationship_type)
+                sql = upsert_ignore(
+                    "entity_relationships",
+                    ["source_system_id", "from_entity_id", "to_entity_id", "relationship_type"],
+                    ["source_system_id", "from_entity_id", "to_entity_id", "relationship_type"],
+                    schema
                 )
+                cur.execute(sql, (source_system_id, rel.source_entity_id, rel.target_entity_id, rel.relationship_type))
         
         # 10. Insert Events
         for event in state.events:
-            cur.execute(
-                "INSERT OR IGNORE INTO events (source_system_id, name, description) VALUES (?, ?, ?)",
-                (source_system_id, event.name, event.description)
-            )
-            cur.execute(
-                "SELECT id FROM events WHERE source_system_id = ? AND name = ?",
-                (source_system_id, event.name)
-            )
+            sql = upsert_ignore("events", ["source_system_id", "name", "description"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, event.name, event.description))
+            
+            sql = select_by_columns("events", ["id"], ["source_system_id", "name"], schema)
+            cur.execute(sql, (source_system_id, event.name))
             event_id = cur.fetchone()[0]
             event.id = event_id
         
@@ -245,16 +253,16 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             content = getattr(chunk, '_full_content', chunk.content)
             embedding_json = json.dumps(chunk.embedding) if chunk.embedding else None
             
-            cur.execute(
-                """INSERT OR IGNORE INTO spec_chunks 
-                   (spec_document_id, chunk_index, content, embedding)
-                   VALUES (?, ?, ?, ?)""",
-                (doc_id, chunk.chunk_index, content, embedding_json)
+            sql = upsert_ignore(
+                "spec_chunks",
+                ["spec_document_id", "chunk_index", "content", "embedding"],
+                ["spec_document_id", "chunk_index"],
+                schema
             )
-            cur.execute(
-                "SELECT id FROM spec_chunks WHERE spec_document_id = ? AND chunk_index = ?",
-                (doc_id, chunk.chunk_index)
-            )
+            cur.execute(sql, (doc_id, chunk.chunk_index, content, embedding_json))
+            
+            sql = select_by_columns("spec_chunks", ["id"], ["spec_document_id", "chunk_index"], schema)
+            cur.execute(sql, (doc_id, chunk.chunk_index))
             row = cur.fetchone()
             if row:
                 chunk.id = row[0]

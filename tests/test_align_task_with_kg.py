@@ -1,9 +1,21 @@
 """
 Tests for align_task_with_kg node - workflow template matching.
+
+NOTE: These tests use USE_IN_MEMORY_KG_FALLBACK=1 to test against the legacy
+in-memory templates. Production usage should query the real KG.
 """
+import os
+import pytest
+
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.graph.nodes.align_task_with_kg import align_task_with_kg
 from integration_coworker.domain.models import IntegrationTask
+
+
+@pytest.fixture(autouse=True)
+def enable_kg_fallback(monkeypatch):
+    """Enable in-memory KG fallback for all tests in this module."""
+    monkeypatch.setenv("USE_IN_MEMORY_KG_FALLBACK", "1")
 
 
 def test_get_checkout_session_template_match():

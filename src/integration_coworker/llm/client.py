@@ -326,6 +326,23 @@ def reset_client_cache() -> None:
     _client_cache = {}
 
 
+def is_mock_llm_mode() -> bool:
+    """
+    Check if we're running in mock LLM mode.
+    
+    Returns True if:
+    - USE_MOCK_LLM is explicitly set to 'true', OR
+    - OPENAI_API_KEY is not set (implicit fallback to mock)
+    
+    Useful for runtime warnings about mock mode in non-testing contexts.
+    """
+    config = get_llm_config("default")
+    use_mock = config.get("use_mock", False)
+    has_api_key = bool(config.get("api_key"))
+    
+    return use_mock or not has_api_key
+
+
 def call_llm(
     prompt: str,
     task_type: str = "default",

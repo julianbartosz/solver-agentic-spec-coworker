@@ -10,13 +10,13 @@ Per design doc Appendix B, this module provides:
 Environment Variables:
 - DATABASE_URL: Postgres connection string (e.g., postgresql://user:pass@host:5432/db)
 """
+import atexit
 from contextlib import contextmanager
 from typing import Generator, Optional
 import logging
 
 try:
     import psycopg
-    from psycopg.rows import dict_row
     from psycopg_pool import ConnectionPool
     HAS_PSYCOPG = True
 except ImportError:
@@ -32,11 +32,29 @@ logger = logging.getLogger(__name__)
 _pool: Optional["ConnectionPool"] = None
 
 
+def _cleanup_pool():
+    """Cleanup handler to close the pool on exit."""
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
+        _pool = None
+
+
+# Register cleanup handler
+atexit.register(_cleanup_pool)
+
+
 def get_pool() -> "ConnectionPool":
     """
     Get or create the Postgres connection pool.
     
     Uses DATABASE_URL from config.
+    
+    Note: Does NOT use dict_row factory - returns tuple rows for consistency
+    with SQLite's Row factory (which supports both index and column name access).
     """
     global _pool
     
@@ -52,7 +70,8 @@ def get_pool() -> "ConnectionPool":
             settings.database.url,
             min_size=1,
             max_size=10,
-            kwargs={"row_factory": dict_row},
+            timeout=1.0,  # Shorter timeout for faster cleanup
+            # No row_factory - use default tuple rows for consistency with SQLite
         )
     
     return _pool
@@ -409,12 +428,105 @@ CREATE TABLE IF NOT EXISTS repo_meta.files (
 );
 """
 
+# =============================================================================
+# Knowledge Graph (KG) Schema DDL
+# Per design doc: Graph-first retrieval with embeddings for ranking
+# =============================================================================
+
+KG_DDL = """
+-- kg schema: Knowledge Graph for workflow templates and integration patterns
+-- Used by align_task_with_kg for GraphRAG retrieval
+
+CREATE SCHEMA IF NOT EXISTS kg;
+
+-- kg_nodes: Core KG nodes representing entities, tasks, endpoints, templates
+-- Types: 'provider', 'entity', 'endpoint', 'workflow_template', 'task'
+CREATE TABLE IF NOT EXISTS kg.nodes (
+    id               BIGSERIAL PRIMARY KEY,
+    node_type        TEXT NOT NULL,  -- 'provider', 'entity', 'endpoint', 'workflow_template', 'task'
+    provider_code    TEXT,           -- Provider this node belongs to (nullable for cross-provider nodes)
+    key              TEXT NOT NULL,  -- Unique key like "stripe.create_checkout_session"
+    name             TEXT NOT NULL,
+    description      TEXT,
+    properties       JSONB NOT NULL DEFAULT '{}',  -- Flexible properties (e.g., steps for templates)
+    embedding        VECTOR(1536),   -- Optional embedding for semantic search
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Governance fields
+    confidence_score DOUBLE PRECISION DEFAULT 1.0,  -- How reliable is this node (0-1)
+    usage_count      INT DEFAULT 0,                 -- How often this node was used
+    last_used_at     TIMESTAMPTZ,
+    source_run_id    TEXT,                          -- Which run created/updated this node
+    UNIQUE (node_type, key)
+);
+
+-- kg_edges: Relationships between KG nodes
+-- Relation types: 'uses_endpoint', 'produces_entity', 'consumes_entity', 
+--                 'similar_to', 'composed_of', 'precedes'
+CREATE TABLE IF NOT EXISTS kg.edges (
+    id             BIGSERIAL PRIMARY KEY,
+    src_node_id    BIGINT NOT NULL REFERENCES kg.nodes(id) ON DELETE CASCADE,
+    dst_node_id    BIGINT NOT NULL REFERENCES kg.nodes(id) ON DELETE CASCADE,
+    relation_type  TEXT NOT NULL,  -- e.g., 'uses_endpoint', 'produces_entity'
+    weight         DOUBLE PRECISION DEFAULT 1.0,  -- Edge weight for graph traversal
+    properties     JSONB NOT NULL DEFAULT '{}',   -- Additional edge metadata
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source_run_id  TEXT,
+    UNIQUE (src_node_id, dst_node_id, relation_type)
+);
+
+-- Create indexes for efficient GraphRAG queries
+CREATE INDEX IF NOT EXISTS kg_nodes_type_idx ON kg.nodes(node_type);
+CREATE INDEX IF NOT EXISTS kg_nodes_provider_idx ON kg.nodes(provider_code);
+CREATE INDEX IF NOT EXISTS kg_nodes_key_idx ON kg.nodes(key);
+CREATE INDEX IF NOT EXISTS kg_edges_src_idx ON kg.edges(src_node_id);
+CREATE INDEX IF NOT EXISTS kg_edges_dst_idx ON kg.edges(dst_node_id);
+CREATE INDEX IF NOT EXISTS kg_edges_relation_idx ON kg.edges(relation_type);
+
+-- Vector similarity index for semantic search on node embeddings
+CREATE INDEX IF NOT EXISTS kg_nodes_embedding_idx 
+ON kg.nodes 
+USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
+
+-- kg_workflow_steps: Detailed workflow step definitions for templates
+-- Links workflow template nodes to their constituent steps
+CREATE TABLE IF NOT EXISTS kg.workflow_steps (
+    id                   BIGSERIAL PRIMARY KEY,
+    template_node_id     BIGINT NOT NULL REFERENCES kg.nodes(id) ON DELETE CASCADE,
+    step_key             TEXT NOT NULL,
+    step_type            TEXT NOT NULL,  -- 'start', 'validation', 'api_call', 'transform', 'end'
+    position             INT NOT NULL,
+    label                TEXT,
+    description          TEXT,
+    config               JSONB NOT NULL DEFAULT '{}',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (template_node_id, step_key)
+);
+
+-- kg_step_bindings: Bindings from workflow steps to endpoints
+CREATE TABLE IF NOT EXISTS kg.step_bindings (
+    id               BIGSERIAL PRIMARY KEY,
+    step_id          BIGINT NOT NULL REFERENCES kg.workflow_steps(id) ON DELETE CASCADE,
+    endpoint_node_id BIGINT REFERENCES kg.nodes(id) ON DELETE SET NULL,  -- Links to endpoint in KG
+    endpoint_path    TEXT,          -- Fallback if endpoint node not in KG
+    endpoint_method  TEXT,
+    request_mapping  JSONB NOT NULL DEFAULT '{}',
+    response_mapping JSONB NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (step_id, endpoint_node_id)
+);
+
+CREATE INDEX IF NOT EXISTS kg_workflow_steps_template_idx ON kg.workflow_steps(template_node_id);
+CREATE INDEX IF NOT EXISTS kg_step_bindings_step_idx ON kg.step_bindings(step_id);
+"""
+
 
 def init_postgres_schema() -> None:
     """
     Initialize all Postgres schemas and tables.
     
-    Creates spec_silver, integration_gold, and repo_meta schemas with all tables.
+    Creates spec_silver, integration_gold, repo_meta, and kg schemas with all tables.
     Safe to call multiple times (uses CREATE IF NOT EXISTS).
     """
     with get_connection() as conn:
@@ -423,9 +535,10 @@ def init_postgres_schema() -> None:
             cur.execute(SPEC_SILVER_DDL)
             cur.execute(INTEGRATION_GOLD_DDL)
             cur.execute(REPO_META_DDL)
+            cur.execute(KG_DDL)
         conn.commit()
     
-    logger.info("Postgres schema initialized successfully")
+    logger.info("Postgres schema initialized successfully (including kg schema)")
 
 
 def drop_all_schemas() -> None:
@@ -436,12 +549,13 @@ def drop_all_schemas() -> None:
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS kg CASCADE")
             cur.execute("DROP SCHEMA IF EXISTS repo_meta CASCADE")
             cur.execute("DROP SCHEMA IF EXISTS integration_gold CASCADE")
             cur.execute("DROP SCHEMA IF EXISTS spec_silver CASCADE")
         conn.commit()
     
-    logger.warning("All schemas dropped")
+    logger.warning("All schemas dropped (including kg)")
 
 
 def check_connection() -> bool:

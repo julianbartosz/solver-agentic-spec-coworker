@@ -47,7 +47,12 @@ def upsert_block_between_markers(
         return f"{original}\n{start_marker}\n{new_block}\n{end_marker}\n"
 
 
-def generate_router_block(provider_code: str, integration_slug: str) -> str:
+def generate_router_block(
+    provider_code: str,
+    integration_slug: str,
+    flows_module: str = "integrations.flows",
+    flow_module_name: str = None,
+) -> str:
     """
     Generate router registration block for FastAPI.
     
@@ -56,15 +61,21 @@ def generate_router_block(provider_code: str, integration_slug: str) -> str:
     Args:
         provider_code: Provider code (e.g., "stripe", "mock_payments")
         integration_slug: Integration task slug
+        flows_module: Module path for flows (e.g., "integrations.flows")
+        flow_module_name: Specific flow module name (e.g., "mock_payments_create_checkout_session")
     
     Returns:
         Router registration code block
     """
+    # Use flow_module_name if provided, otherwise use integration_slug
+    module_to_import = flow_module_name or integration_slug
+    full_module = f"{flows_module}.{module_to_import}"
+    
     lines = [
-        f"from integrations.flows import {integration_slug}",
+        f"from {full_module} import {integration_slug}_flow as flow_module",
         "",
         "router.include_router(",
-        f"    {integration_slug}.router,",
+        f"    flow_module.router if hasattr(flow_module, 'router') else APIRouter(),",
         f'    prefix="/integrations/{provider_code}/{integration_slug}",',
         f'    tags=["{provider_code}"],',
         ")",

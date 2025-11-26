@@ -2,13 +2,26 @@
 Persist Results Node
 
 M4 P2.2: Single node responsible for all database writes.
-Upserts Silver + Gold records to SQLite and backfills IDs into state objects.
+Upserts Silver + Gold records and backfills IDs into state objects.
+
+Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
+
+Note: This is the legacy persist node, kept for backward compatibility.
+The new design uses checkpoint nodes: persist_silver_checkpoint, 
+persist_gold_checkpoint, and persist_run_outcome.
 """
 from datetime import datetime, UTC
 import json
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
+from integration_coworker.persistence.sql_helpers import (
+    upsert_ignore, select_by_columns, get_engine_type
+)
+
+# Schema prefixes for Postgres tables
+SILVER_SCHEMA = "spec_silver"
+GOLD_SCHEMA = "integration_gold"
 
 
 def persist_results(state: WorkflowState) -> WorkflowState:
@@ -42,20 +55,25 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         state.completed_steps.append("persist_results")
         return state
     
-    # Real SQLite persistence
+    # Real database persistence (Postgres or SQLite)
     try:
         # Initialize schema if needed
         db.init_schema()
         conn = db.get_connection()
         cur = conn.cursor()
         
+        # Determine engine type for schema prefixes
+        engine = get_engine_type()
+        silver_schema = SILVER_SCHEMA if engine == "postgres" else None
+        gold_schema = GOLD_SCHEMA if engine == "postgres" else None
+        
         # 1. Upsert SourceSystem
         provider_code = state.provider_code or "unknown"
-        cur.execute(
-            "INSERT OR IGNORE INTO source_systems (code, display_name) VALUES (?, ?)",
-            (provider_code, provider_code.replace("_", " ").title())
-        )
-        cur.execute("SELECT id FROM source_systems WHERE code = ?", (provider_code,))
+        sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], silver_schema)
+        cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
+        
+        sql = select_by_columns("source_systems", ["id"], ["code"], silver_schema)
+        cur.execute(sql, (provider_code,))
         source_system_id = cur.fetchone()[0]
         
         # Backfill into state.source_system if exists
@@ -67,45 +85,46 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         if state.spec_documents:
             spec_doc = state.spec_documents[0]
             # Per design doc Appendix B.2: spec_documents uses 'uri' column
-            cur.execute(
-                "INSERT OR IGNORE INTO spec_documents (source_system_id, uri, sha256, content_type) VALUES (?, ?, ?, ?)",
-                (source_system_id, spec_doc.uri, spec_doc.sha256, spec_doc.content_type)
+            sql = upsert_ignore(
+                "spec_documents",
+                ["source_system_id", "uri", "sha256", "content_type"],
+                ["source_system_id", "sha256"],
+                silver_schema
             )
-            cur.execute(
-                "SELECT id FROM spec_documents WHERE source_system_id = ? AND sha256 = ?",
-                (source_system_id, spec_doc.sha256)
-            )
+            cur.execute(sql, (source_system_id, spec_doc.uri, spec_doc.sha256, spec_doc.content_type))
+            
+            sql = select_by_columns("spec_documents", ["id"], ["source_system_id", "sha256"], silver_schema)
+            cur.execute(sql, (source_system_id, spec_doc.sha256))
             spec_document_id = cur.fetchone()[0]
             state.spec_documents[0].id = spec_document_id
         
         # 3. Insert Schemas (needed for endpoint FK)
         # Per design doc Appendix B.2: schemas uses source_system_id not spec_document_id
         schema_ids_by_name = {}
-        for schema in state.schemas:
-            cur.execute(
-                "INSERT OR IGNORE INTO schemas (source_system_id, name, ref) VALUES (?, ?, ?)",
-                (source_system_id, schema.name, schema.ref)
-            )
-            cur.execute(
-                "SELECT id FROM schemas WHERE source_system_id = ? AND name = ?",
-                (source_system_id, schema.name)
-            )
+        for schema_obj in state.schemas:
+            sql = upsert_ignore("schemas", ["source_system_id", "name", "ref"], ["source_system_id", "name"], silver_schema)
+            cur.execute(sql, (source_system_id, schema_obj.name, schema_obj.ref))
+            
+            sql = select_by_columns("schemas", ["id"], ["source_system_id", "name"], silver_schema)
+            cur.execute(sql, (source_system_id, schema_obj.name))
             schema_id = cur.fetchone()[0]
-            schema.id = schema_id
-            schema_ids_by_name[schema.name] = schema_id
+            schema_obj.id = schema_id
+            schema_ids_by_name[schema_obj.name] = schema_id
         
         # 4. Insert Endpoints
         # Per design doc Appendix B.2: endpoints has source_system_id + spec_document_id
         endpoint_ids_by_key = {}
         for endpoint in state.endpoints:
-            cur.execute(
-                "INSERT OR IGNORE INTO endpoints (source_system_id, spec_document_id, method, path, operation_id, summary) VALUES (?, ?, ?, ?, ?, ?)",
-                (source_system_id, spec_document_id, endpoint.method, endpoint.path, endpoint.operation_id, endpoint.summary)
+            sql = upsert_ignore(
+                "endpoints",
+                ["source_system_id", "spec_document_id", "method", "path", "operation_id", "summary"],
+                ["source_system_id", "spec_document_id", "path", "method"],
+                silver_schema
             )
-            cur.execute(
-                "SELECT id FROM endpoints WHERE source_system_id = ? AND spec_document_id = ? AND method = ? AND path = ?",
-                (source_system_id, spec_document_id, endpoint.method, endpoint.path)
-            )
+            cur.execute(sql, (source_system_id, spec_document_id, endpoint.method, endpoint.path, endpoint.operation_id, endpoint.summary))
+            
+            sql = select_by_columns("endpoints", ["id"], ["source_system_id", "spec_document_id", "method", "path"], silver_schema)
+            cur.execute(sql, (source_system_id, spec_document_id, endpoint.method, endpoint.path))
             endpoint_id = cur.fetchone()[0]
             endpoint.id = endpoint_id
             # Create lookup key for bindings
@@ -114,14 +133,11 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         
         # 5. Insert Entities
         for entity in state.entities:
-            cur.execute(
-                "INSERT OR IGNORE INTO entities (source_system_id, name, description) VALUES (?, ?, ?)",
-                (source_system_id, entity.name, entity.description)
-            )
-            cur.execute(
-                "SELECT id FROM entities WHERE source_system_id = ? AND name = ?",
-                (source_system_id, entity.name)
-            )
+            sql = upsert_ignore("entities", ["source_system_id", "name", "description"], ["source_system_id", "name"], silver_schema)
+            cur.execute(sql, (source_system_id, entity.name, entity.description))
+            
+            sql = select_by_columns("entities", ["id"], ["source_system_id", "name"], silver_schema)
+            cur.execute(sql, (source_system_id, entity.name))
             entity_id = cur.fetchone()[0]
             entity.id = entity_id
         
@@ -132,14 +148,17 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             task = state.integration_task
             # Use existing task_slug or generate from description if not set
             task_slug = task.task_slug if hasattr(task, 'task_slug') and task.task_slug else task.description.lower().replace(" ", "_")[:50]
-            cur.execute(
-                "INSERT OR IGNORE INTO integration_tasks (provider_code, task_slug, description, source_system_id, target_spec_document_id) VALUES (?, ?, ?, ?, ?)",
-                (provider_code, task_slug, task.description, source_system_id, spec_document_id)
+            
+            sql = upsert_ignore(
+                "integration_tasks",
+                ["provider_code", "task_slug", "description", "source_system_id", "target_spec_document_id"],
+                ["provider_code", "task_slug"],
+                gold_schema
             )
-            cur.execute(
-                "SELECT id FROM integration_tasks WHERE provider_code = ? AND task_slug = ?",
-                (provider_code, task_slug)
-            )
+            cur.execute(sql, (provider_code, task_slug, task.description, source_system_id, spec_document_id))
+            
+            sql = select_by_columns("integration_tasks", ["id"], ["provider_code", "task_slug"], gold_schema)
+            cur.execute(sql, (provider_code, task_slug))
             task_id = cur.fetchone()[0]
             state.integration_task.id = task_id
             # Backfill task_slug if it wasn't set
@@ -150,14 +169,16 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         # Per design doc Appendix B.3: uses config (JSON) instead of label
         for idx, node in enumerate(state.workflow_nodes):
             config_json = json.dumps({"label": node.label}) if node.label else "{}"
-            cur.execute(
-                "INSERT OR IGNORE INTO integration_flow_nodes (task_id, node_key, node_type, position, config) VALUES (?, ?, ?, ?, ?)",
-                (task_id, node.node_key, node.node_type, idx, config_json)
+            sql = upsert_ignore(
+                "integration_flow_nodes",
+                ["task_id", "node_key", "node_type", "position", "config"],
+                ["task_id", "node_key"],
+                gold_schema
             )
-            cur.execute(
-                "SELECT id FROM integration_flow_nodes WHERE task_id = ? AND node_key = ?",
-                (task_id, node.node_key)
-            )
+            cur.execute(sql, (task_id, node.node_key, node.node_type, idx, config_json))
+            
+            sql = select_by_columns("integration_flow_nodes", ["id"], ["task_id", "node_key"], gold_schema)
+            cur.execute(sql, (task_id, node.node_key))
             node_id = cur.fetchone()[0]
             node.id = node_id
         
@@ -165,14 +186,16 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         for edge in state.workflow_edges:
             # Serialize condition to TEXT (not JSON column in schema)
             condition_str = json.dumps(edge.condition) if edge.condition else None
-            cur.execute(
-                "INSERT OR IGNORE INTO integration_flow_edges (task_id, from_node_key, to_node_key, condition) VALUES (?, ?, ?, ?)",
-                (task_id, edge.from_node_key, edge.to_node_key, condition_str)
+            sql = upsert_ignore(
+                "integration_flow_edges",
+                ["task_id", "from_node_key", "to_node_key", "condition"],
+                ["task_id", "from_node_key", "to_node_key"],
+                gold_schema
             )
-            cur.execute(
-                "SELECT id FROM integration_flow_edges WHERE task_id = ? AND from_node_key = ? AND to_node_key = ?",
-                (task_id, edge.from_node_key, edge.to_node_key)
-            )
+            cur.execute(sql, (task_id, edge.from_node_key, edge.to_node_key, condition_str))
+            
+            sql = select_by_columns("integration_flow_edges", ["id"], ["task_id", "from_node_key", "to_node_key"], gold_schema)
+            cur.execute(sql, (task_id, edge.from_node_key, edge.to_node_key))
             edge_id = cur.fetchone()[0]
             edge.id = edge_id
             edge.task_id = task_id
@@ -212,14 +235,16 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 endpoint_id = list(endpoint_ids_by_key.values())[0]
             
             if endpoint_id:
-                cur.execute(
-                    "INSERT OR IGNORE INTO endpoint_bindings (task_id, flow_node_key, endpoint_id, request_mapping, response_mapping) VALUES (?, ?, ?, ?, ?)",
-                    (task_id, binding.flow_node_key, endpoint_id, request_json, response_json)
+                sql = upsert_ignore(
+                    "endpoint_bindings",
+                    ["task_id", "flow_node_key", "endpoint_id", "request_mapping", "response_mapping"],
+                    ["task_id", "flow_node_key", "endpoint_id"],
+                    gold_schema
                 )
-                cur.execute(
-                    "SELECT id, endpoint_id FROM endpoint_bindings WHERE task_id = ? AND flow_node_key = ? AND endpoint_id = ?",
-                    (task_id, binding.flow_node_key, endpoint_id)
-                )
+                cur.execute(sql, (task_id, binding.flow_node_key, endpoint_id, request_json, response_json))
+                
+                sql = select_by_columns("endpoint_bindings", ["id", "endpoint_id"], ["task_id", "flow_node_key", "endpoint_id"], gold_schema)
+                cur.execute(sql, (task_id, binding.flow_node_key, endpoint_id))
                 row = cur.fetchone()
                 if row:
                     binding.id = row[0]
@@ -228,14 +253,16 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         # 10. Insert CodeArtifacts
         # Per design doc Appendix B.3: unique key is (task_id, rel_path, artifact_type)
         for artifact in state.code_artifacts:
-            cur.execute(
-                "INSERT OR IGNORE INTO code_artifacts (task_id, artifact_type, rel_path, language, content) VALUES (?, ?, ?, ?, ?)",
-                (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.content)
+            sql = upsert_ignore(
+                "code_artifacts",
+                ["task_id", "artifact_type", "rel_path", "language", "content"],
+                ["task_id", "rel_path", "artifact_type"],
+                gold_schema
             )
-            cur.execute(
-                "SELECT id FROM code_artifacts WHERE task_id = ? AND rel_path = ? AND artifact_type = ?",
-                (task_id, artifact.rel_path, artifact.artifact_type)
-            )
+            cur.execute(sql, (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.content))
+            
+            sql = select_by_columns("code_artifacts", ["id"], ["task_id", "rel_path", "artifact_type"], gold_schema)
+            cur.execute(sql, (task_id, artifact.rel_path, artifact.artifact_type))
             artifact_id = cur.fetchone()[0]
             artifact.id = artifact_id
             artifact.task_id = task_id
