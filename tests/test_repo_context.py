@@ -12,4 +12,4 @@ def test_repo_profile_has_archetype():
     assert hasattr(SUBATOMIC_MOCK_PROFILE, 'archetype'), "RepoProfile should have archetype field"
     assert SUBATOMIC_MOCK_PROFILE.archetype == "fastapi_service", \
         "Mock profile should have fastapi_service archetype"
-    assert SUBATOMIC_MOCK_PROFILE.name == "subatomic-mock"
+    assert SUBATOMIC_MOCK_PROFILE.name == "subatomic_mock_service"

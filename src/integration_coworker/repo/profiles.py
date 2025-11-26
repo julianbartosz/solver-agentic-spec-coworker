@@ -6,19 +6,30 @@ Profiles define where to place generated code in different project types.
 from integration_coworker.repo.models import RepoProfile
 
 
-# Mock profile for testing
+# Mock profile for testing (per Appendix D spec)
 SUBATOMIC_MOCK_PROFILE = RepoProfile(
-    name="subatomic-mock",
+    name="subatomic_mock_service",
     archetype="fastapi_service",  # P2.1: High-level classification
-    framework="mock",
+    framework="fastapi",
     language="python",
-    integrations_root="integrations",
-    tests_root="tests",
+    integrations_root="src/integrations",
+    tests_root="tests/integrations",
     conventions={
         "client_module_pattern": "clients/{provider}.py",
         "flow_module_pattern": "flows/{provider}_{task}.py",
         "test_module_pattern": "test_{provider}_{task}.py",
-    }
+    },
+    layout_hints={
+        "clients_dir": "src/integrations/clients",
+        "workflows_dir": "src/integrations/flows",
+        "tests_dir": "tests/integrations",
+    },
+    integration_hooks={
+        "router_file": "src/app/router.py",
+        "router_registration_marker": "# <AUTO_INTEGRATION_MARKER>",
+        "settings_file": "src/app/settings.py",
+        "settings_marker": "# <AUTO_INTEGRATION_SETTINGS_MARKER>",
+    },
 )
 
 

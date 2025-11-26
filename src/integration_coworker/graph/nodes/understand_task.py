@@ -1,31 +1,109 @@
+"""
+understand_task node - Extract structured task understanding from natural language.
+
+Uses LLM when available (USE_MOCK_LLM=false + API key), falls back to heuristics
+for mock mode or when LLM response is invalid.
+"""
 import re
+import logging
+from typing import Dict, Any, List
+
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import IntegrationTask
-from integration_coworker.config import get_llm_config
+from integration_coworker.llm import call_llm_json
+
+logger = logging.getLogger(__name__)
 
 
-def understand_task(state: WorkflowState) -> WorkflowState:
+def _build_understand_task_prompt(state: WorkflowState) -> str:
+    """Build a prompt for task understanding."""
+    # Summarize available endpoints
+    endpoint_summaries = []
+    for ep in state.endpoints[:10]:  # Limit to first 10
+        endpoint_summaries.append(f"- {ep.method} {ep.path}: {ep.summary or ep.operation_id or 'No summary'}")
+    
+    # Summarize available entities
+    entity_names = [e.name for e in state.entities[:10]]
+    
+    prompt = f"""Analyze this integration task and extract structured information.
+
+TASK DESCRIPTION:
+{state.task_description}
+
+AVAILABLE API ENDPOINTS:
+{chr(10).join(endpoint_summaries) if endpoint_summaries else "(none found)"}
+
+KNOWN ENTITIES:
+{', '.join(entity_names) if entity_names else "(none found)"}
+
+PROVIDER:
+{state.provider_code or "unknown"}
+
+Return a JSON object with:
+{{
+    "task_slug": "lowercase_snake_case_name",
+    "input_entities": ["list", "of", "input", "entity", "names"],
+    "output_entities": ["list", "of", "output", "entity", "names"],
+    "constraints": {{
+        "idempotency_required": true/false,
+        "requires_webhooks": true/false
+    }},
+    "target_operations": [
+        {{"operation_id": "...", "method": "...", "path": "...", "reason": "why this endpoint"}}
+    ]
+}}
+
+Rules:
+- task_slug should be descriptive (e.g., "create_checkout_session", "get_customer")
+- input_entities are entities needed as input
+- output_entities are entities produced as output
+- Set idempotency_required=true for create/write operations
+- target_operations should list the API endpoints needed to fulfill the task
+"""
+    return prompt
+
+
+def _parse_llm_response(response: Dict[str, Any], state: WorkflowState) -> IntegrationTask:
+    """Parse LLM response into IntegrationTask."""
+    task_slug = response.get("task_slug", "unknown_task")
+    # Normalize task_slug
+    task_slug = re.sub(r'[^a-z0-9_]+', '_', task_slug.lower()).strip('_')
+    
+    input_entities = response.get("input_entities", [])
+    output_entities = response.get("output_entities", [])
+    
+    constraints_raw = response.get("constraints", {})
+    target_operations = response.get("target_operations", [])
+    
+    constraints = {
+        "idempotency_required": constraints_raw.get("idempotency_required", False),
+        "max_latency_ms": constraints_raw.get("max_latency_ms"),
+        "requires_webhooks": constraints_raw.get("requires_webhooks", False),
+        "extra": {"target_operations": target_operations},
+    }
+    
+    return IntegrationTask(
+        id=None,
+        source_system_id=None,
+        task_slug=task_slug,
+        provider_code=state.provider_code or "unknown",
+        description=state.task_description,
+        target_spec_document_id=None,
+        input_entities=input_entities if isinstance(input_entities, list) else [],
+        output_entities=output_entities if isinstance(output_entities, list) else [],
+        constraints=constraints,
+    )
+
+
+def _fallback_heuristic_understanding(state: WorkflowState) -> IntegrationTask:
     """
-    Reads: task_description, provider_code, endpoints, entities
-    Writes: integration_task
+    Fallback heuristic-based task understanding.
     
-    Contract per Appendix C.3.6:
-    - Produces IntegrationTask with normalized task_slug
-    - Derives input_entities / output_entities from known Entity names
-    - Populates constraints dict with idempotency_required, max_latency_ms, requires_webhooks, extra
+    Used when LLM is not available or returns invalid response.
     """
-    if not state.task_description:
-        state.errors.append("No task_description provided")
-        state.completed_steps.append("understand_task")
-        return state
-    
-    config = get_llm_config("extraction")
-    
-    # For M3: use keyword matching for task understanding
     task_lower = state.task_description.lower()
     
-    # 1. Derive task_slug: normalize to [a-z0-9_]+
-    # Extract key action words
+    # Extract action words
     action_words = []
     if "create" in task_lower:
         action_words.append("create")
@@ -36,35 +114,25 @@ def understand_task(state: WorkflowState) -> WorkflowState:
     elif "get" in task_lower or "fetch" in task_lower or "retrieve" in task_lower:
         action_words.append("get")
     
-    # Extract entity/resource words
+    # Extract resource words
     resource_words = []
-    if "checkout" in task_lower:
-        resource_words.append("checkout")
-    if "session" in task_lower:
-        resource_words.append("session")
-    if "payment" in task_lower:
-        resource_words.append("payment")
-    if "customer" in task_lower:
-        resource_words.append("customer")
+    for word in ["checkout", "session", "payment", "customer", "subscription", "invoice"]:
+        if word in task_lower:
+            resource_words.append(word)
     
-    # Combine to form task_slug
+    # Build task_slug
     slug_parts = action_words + resource_words
     if not slug_parts:
-        # Fallback: use first 3 words from task description
         slug_parts = task_lower.split()[:3]
     
     task_slug = "_".join(slug_parts)
-    # Normalize to [a-z0-9_]+
     task_slug = re.sub(r'[^a-z0-9_]+', '_', task_slug.lower()).strip('_')
     
-    # 2. Derive input_entities / output_entities
-    # Match against known entity names (case-insensitive)
+    # Derive entities
     known_entity_names = {e.name.lower(): e.name for e in state.entities}
-    
     input_entities = []
     output_entities = []
     
-    # Heuristic: words in task_description that match entity names
     for word in task_lower.split():
         clean_word = re.sub(r'[^a-z]+', '', word)
         if clean_word in known_entity_names:
@@ -74,32 +142,22 @@ def understand_task(state: WorkflowState) -> WorkflowState:
             else:
                 input_entities.append(canonical_name)
     
-    # Remove duplicates
     input_entities = list(dict.fromkeys(input_entities))
     output_entities = list(dict.fromkeys(output_entities))
     
-    # 3. Populate constraints
+    # Constraints
     constraints = {
-        "idempotency_required": False,
+        "idempotency_required": "create" in task_lower or "post" in task_lower,
         "max_latency_ms": None,
-        "requires_webhooks": False,
+        "requires_webhooks": "webhook" in task_lower or "callback" in task_lower,
         "extra": {},
     }
     
-    # Heuristic detection
-    if "create" in task_lower or "post" in task_lower:
-        constraints["idempotency_required"] = True
-    
-    if "webhook" in task_lower or "callback" in task_lower:
-        constraints["requires_webhooks"] = True
-    
-    # Store target operations for downstream use
+    # Target operations
     target_operations = []
     for endpoint in state.endpoints:
         operation_id = endpoint.operation_id or ""
         path = endpoint.path or ""
-        
-        # Keyword matching
         if any(word in operation_id.lower() or word in path.lower() 
                for word in action_words + resource_words):
             target_operations.append({
@@ -111,8 +169,7 @@ def understand_task(state: WorkflowState) -> WorkflowState:
     
     constraints["extra"]["target_operations"] = target_operations
     
-    # 4. Create IntegrationTask
-    state.integration_task = IntegrationTask(
+    return IntegrationTask(
         id=None,
         source_system_id=None,
         task_slug=task_slug,
@@ -123,6 +180,42 @@ def understand_task(state: WorkflowState) -> WorkflowState:
         output_entities=output_entities,
         constraints=constraints,
     )
+
+
+def understand_task(state: WorkflowState) -> WorkflowState:
+    """
+    Reads: task_description, provider_code, endpoints, entities
+    Writes: integration_task
+    
+    Contract per Appendix C.3.6:
+    - Produces IntegrationTask with normalized task_slug
+    - Derives input_entities / output_entities from known Entity names
+    - Populates constraints dict with idempotency_required, max_latency_ms, requires_webhooks, extra
+    
+    Uses LLM when available, falls back to heuristics otherwise.
+    """
+    if not state.task_description:
+        state.errors.append("No task_description provided")
+        state.completed_steps.append("understand_task")
+        return state
+    
+    try:
+        # Try LLM-based understanding
+        prompt = _build_understand_task_prompt(state)
+        llm_response = call_llm_json(prompt, task_type="understand_task")
+        
+        # Check for valid response (not an error dict from mock or parse failure)
+        if llm_response and not llm_response.get("error") and llm_response.get("task_slug"):
+            logger.info(f"Using LLM response for task understanding: {llm_response.get('task_slug')}")
+            state.integration_task = _parse_llm_response(llm_response, state)
+        else:
+            # LLM returned mock or invalid response, use heuristics
+            logger.info("Using heuristic fallback for task understanding")
+            state.integration_task = _fallback_heuristic_understanding(state)
+            
+    except Exception as e:
+        logger.warning(f"LLM call failed, using heuristics: {e}")
+        state.integration_task = _fallback_heuristic_understanding(state)
     
     state.completed_steps.append("understand_task")
     return state

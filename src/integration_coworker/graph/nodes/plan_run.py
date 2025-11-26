@@ -6,10 +6,12 @@ from integration_coworker.graph.state import WorkflowState
 def plan_run(state: WorkflowState) -> WorkflowState:
     """
     Reads: task_description, spec_refs, provider_code, options
-    Writes: run_id, plan["use_repo"], plan["provider_code"], plan["primary_spec_ref"], plan["steps"]
+    Writes: run_id, plan["use_repo"], plan["provider_code"], plan["primary_spec_ref"], 
+            plan["supporting_spec_refs"], plan["steps"]
     
     Contract per Appendix C.3.1:
-    - Enforces v1 constraint: exactly one spec_ref
+    - Supports multiple spec_refs (Phase 4 / M5)
+    - spec_refs[0] is primary, spec_refs[1:] are supporting
     - Honors options.override_provider_code
     - Sets plan["use_repo"] only if repo_root is set AND repo_integration_enabled
     - Generates run_id for tracking
@@ -18,13 +20,17 @@ def plan_run(state: WorkflowState) -> WorkflowState:
     if not state.run_id:
         state.run_id = str(uuid.uuid4())
     
-    # 1. Enforce v1 spec_refs constraint
-    if not state.spec_refs or len(state.spec_refs) != 1:
-        error_msg = f"v1 requires exactly one spec_ref, got {len(state.spec_refs)}"
+    # 1. Validate spec_refs (require at least one)
+    if not state.spec_refs or len(state.spec_refs) < 1:
+        error_msg = "At least one spec_ref is required"
         state.errors.append(error_msg)
         state.plan["failed"] = True
         state.completed_steps.append("plan_run")
         raise ValueError(error_msg)
+    
+    # Per design doc Appendix C.1.1: first spec_ref is primary, rest are supporting
+    primary_ref = state.spec_refs[0]
+    supporting_refs = state.spec_refs[1:] if len(state.spec_refs) > 1 else []
     
     # 2. Honor override_provider_code from options
     if state.options and state.options.override_provider_code:
@@ -32,14 +38,15 @@ def plan_run(state: WorkflowState) -> WorkflowState:
         normalized = re.sub(r'[^a-z0-9]+', '_', state.options.override_provider_code.lower())
         state.provider_code = normalized.strip('_')
     elif not state.provider_code:
-        # Infer from spec_ref if not already set
-        primary_ref = state.spec_refs[0]
+        # Infer from primary spec_ref if not already set
         if "stripe" in primary_ref.lower():
             state.provider_code = "stripe"
         elif "mock_payments" in primary_ref.lower():
             state.provider_code = "mock_payments"
         elif "github" in primary_ref.lower():
             state.provider_code = "github"
+        elif "petstore" in primary_ref.lower():
+            state.provider_code = "petstore"
         else:
             # Extract from hostname or path
             if "://" in primary_ref:
@@ -55,13 +62,16 @@ def plan_run(state: WorkflowState) -> WorkflowState:
     repo_integration_enabled = getattr(state.options, "repo_integration_enabled", True) if state.options else True
     state.plan = {
         "provider_code": state.provider_code,
-        "primary_spec_ref": state.spec_refs[0],
+        "primary_spec_ref": primary_ref,
+        "supporting_spec_refs": supporting_refs,  # Per design doc Appendix C.1.1
+        "spec_count": len(state.spec_refs),  # For multi-spec tracking
         "use_repo": bool(state.repo_root) and bool(repo_integration_enabled),
         "steps": [
             "ingest_spec",
             "detect_and_parse_spec",
             "build_silver_api_model",
             "embed_spec_chunks",
+            "persist_silver_checkpoint",  # Per design doc Section 5.4
             "understand_task",
             "align_task_with_kg",
             "plan_integration_flow",
@@ -80,11 +90,14 @@ def plan_run(state: WorkflowState) -> WorkflowState:
     # Code generation happens after policies (and repo context if enabled)
     state.plan["steps"].append("generate_code_and_tests")
     
-    # Always validate, persist, and report
+    # Gold checkpoint after code generation (per design doc Section 5.4)
+    state.plan["steps"].append("persist_gold_checkpoint")
+    
+    # Always validate and report
     state.plan["steps"].extend([
         "validate_integration_design",
-        "persist_results",
         "build_report",
+        "persist_run_outcome",  # Per design doc Section 5.4
     ])
     
     state.completed_steps.append("plan_run")

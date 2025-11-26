@@ -70,24 +70,20 @@ def test_m3_planning_workflow_mock_payments():
 
 
 def test_m3_spec_refs_validation():
-    """Test that plan_run enforces v1 constraint: exactly one spec_ref."""
+    """Test that plan_run enforces at least one spec_ref is required."""
     options = IntegrationOptions(repo_integration_enabled=False, dry_run=True)
     
-    # Test with no spec_refs
-    with pytest.raises(ValueError, match="v1 requires exactly one spec_ref"):
+    # Test with no spec_refs - should raise ValueError
+    with pytest.raises(ValueError, match="At least one spec_ref is required"):
         design_and_generate_integration(
             spec_refs=[],
             task_description="test",
             options=options,
         )
     
-    # Test with multiple spec_refs
-    with pytest.raises(ValueError, match="v1 requires exactly one spec_ref"):
-        design_and_generate_integration(
-            spec_refs=["spec1.yaml", "spec2.yaml"],
-            task_description="test",
-            options=options,
-        )
+    # Multiple spec_refs is now allowed (Phase 4 multi-spec support)
+    # This should NOT raise - instead will fail later on missing files,
+    # which is expected behavior for this validation test
     
     print("✅ Spec refs validation test passed")
 

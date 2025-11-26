@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from integration_coworker.domain.models import (
     SourceSystem,
     SpecDocument,
+    SpecSection,
     Endpoint,
     EndpointParameter,
     Schema,
@@ -40,6 +41,7 @@ class WorkflowState:
 
     # Bronze-level spec content
     spec_documents: List[SpecDocument] = field(default_factory=list)
+    spec_sections: List[SpecSection] = field(default_factory=list)  # Per design doc Appendix C.2
     doc_chunks: List[str] = field(default_factory=list)
     openapi_spec: Optional[Dict[str, Any]] = None
 

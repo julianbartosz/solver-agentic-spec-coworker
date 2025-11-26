@@ -34,8 +34,8 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["solver_coworker*"]
+where = ["src"]
+include = ["integration_coworker*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

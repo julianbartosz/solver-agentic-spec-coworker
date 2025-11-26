@@ -48,6 +48,24 @@ class SpecDocument:
 
 
 @dataclass
+class SpecSection:
+    """
+    A logical section within a spec document.
+    
+    Per design doc Appendix B.2: spec_sections tracks sections like
+    paths, schemas, info, security for finer-grained RAG retrieval.
+    """
+    id: Optional[int]
+    spec_document_id: Optional[int]
+    section_type: str  # "info", "paths", "schemas", "security", etc.
+    title: Optional[str]
+    path: Optional[str]  # JSON path to the section
+    start_offset: Optional[int]
+    end_offset: Optional[int]
+    content: str
+
+
+@dataclass
 class Endpoint:
     """An API endpoint extracted from a specification."""
     id: Optional[int]
@@ -114,6 +132,7 @@ class Entity:
 class EntityRelationship:
     """A relationship between two entities."""
     id: Optional[int]
+    source_system_id: Optional[int]  # Per Appendix A spec
     source_entity_id: int
     target_entity_id: int
     relationship_type: str  # e.g., "has_many", "belongs_to"

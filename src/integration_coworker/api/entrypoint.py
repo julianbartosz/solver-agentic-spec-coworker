@@ -62,4 +62,11 @@ def design_and_generate_integration(
         workflow_nodes=final_state.workflow_nodes,
         workflow_edges=final_state.workflow_edges,
         endpoint_bindings=final_state.endpoint_bindings,
+        # Phase 4: Multi-spec and diagnostics
+        spec_documents=final_state.spec_documents,
+        doc_chunks=final_state.doc_chunks,
+        plan=final_state.plan,
+        errors=final_state.errors,
+        completed_steps=final_state.completed_steps,
+        provider_code=final_state.provider_code,
     )

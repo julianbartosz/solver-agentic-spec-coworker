@@ -77,8 +77,9 @@ def test_end_to_end_with_repo_integration(mock_payments_spec, temp_repo):
     assert result.task is not None
     
     # M4: Repo integration now writes real files
+    # Should include: client, flow, test, router update, settings update = 5 files
     assert result.repo_changes is not None
-    assert len(result.repo_changes.changes) == 3  # client, flow, test
+    assert len(result.repo_changes.changes) == 5  # client, flow, test, router, settings
     
     # Verify files were actually created
     created_files = result.repo_changes.files_created()

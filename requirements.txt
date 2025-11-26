@@ -6,3 +6,14 @@ anthropic
 python-dotenv
 pytest
 pyyaml
+
+# Postgres + pgvector support (per design doc Section 4.3)
+psycopg[binary]>=3.1.0
+psycopg_pool>=3.1.0
+pgvector>=0.2.0
+
+# HTTP client for spec fetching
+httpx>=0.24.0
+
+# CLI
+typer>=0.9.0
