@@ -3,6 +3,8 @@ understand_task node - Extract structured task understanding from natural langua
 
 Uses LLM when available (USE_MOCK_LLM=false + API key), falls back to heuristics
 for mock mode or when LLM response is invalid.
+
+Uses TOON (Token-Oriented Object Notation) for token-efficient LLM prompts.
 """
 import re
 import logging
@@ -10,13 +12,18 @@ from typing import Dict, Any, List
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import IntegrationTask
-from integration_coworker.llm import call_llm_json
+from integration_coworker.llm import call_llm
+from integration_coworker.llm.toon import from_toon
 
 logger = logging.getLogger(__name__)
 
 
 def _build_understand_task_prompt(state: WorkflowState) -> str:
-    """Build a prompt for task understanding."""
+    """
+    Build a TOON-formatted prompt for task understanding.
+    
+    Uses Token-Oriented Object Notation for ~30-40% token savings vs JSON.
+    """
     # Summarize available endpoints
     endpoint_summaries = []
     for ep in state.endpoints[:10]:  # Limit to first 10
@@ -39,40 +46,45 @@ KNOWN ENTITIES:
 PROVIDER:
 {state.provider_code or "unknown"}
 
-Return a JSON object with:
-{{
-    "task_slug": "lowercase_snake_case_name",
-    "input_entities": ["list", "of", "input", "entity", "names"],
-    "output_entities": ["list", "of", "output", "entity", "names"],
-    "constraints": {{
-        "idempotency_required": true/false,
-        "requires_webhooks": true/false
-    }},
-    "target_operations": [
-        {{"operation_id": "...", "method": "...", "path": "...", "reason": "why this endpoint"}}
-    ]
-}}
+Respond in TOON format (key=value notation, one per line):
+
+task_slug=lowercase_snake_case_name
+input_entities=[entity1,entity2]
+output_entities=[entity1,entity2]
+constraints.idempotency_required=true or false
+constraints.requires_webhooks=true or false
+target_operations=[{{operation_id:str,method:str,path:str,reason:str}}]
 
 Rules:
-- task_slug should be descriptive (e.g., "create_checkout_session", "get_customer")
+- task_slug should be descriptive (e.g. create_checkout_session, get_customer)
 - input_entities are entities needed as input
 - output_entities are entities produced as output
 - Set idempotency_required=true for create/write operations
-- target_operations should list the API endpoints needed to fulfill the task
+- target_operations lists API endpoints needed for the task
+- Use exact TOON format, no JSON, no markdown
 """
     return prompt
 
 
 def _parse_llm_response(response: Dict[str, Any], state: WorkflowState) -> IntegrationTask:
-    """Parse LLM response into IntegrationTask."""
+    """
+    Parse LLM response (from TOON) into IntegrationTask.
+    
+    Handles both TOON-parsed dicts and legacy JSON dicts for compatibility.
+    """
     task_slug = response.get("task_slug", "unknown_task")
     # Normalize task_slug
-    task_slug = re.sub(r'[^a-z0-9_]+', '_', task_slug.lower()).strip('_')
+    if isinstance(task_slug, str):
+        task_slug = re.sub(r'[^a-z0-9_]+', '_', task_slug.lower()).strip('_')
     
     input_entities = response.get("input_entities", [])
     output_entities = response.get("output_entities", [])
     
+    # Handle constraints - may be nested dict from TOON parsing
     constraints_raw = response.get("constraints", {})
+    if not isinstance(constraints_raw, dict):
+        constraints_raw = {}
+    
     target_operations = response.get("target_operations", [])
     
     constraints = {
@@ -81,6 +93,12 @@ def _parse_llm_response(response: Dict[str, Any], state: WorkflowState) -> Integ
         "requires_webhooks": constraints_raw.get("requires_webhooks", False),
         "extra": {"target_operations": target_operations},
     }
+    
+    # Ensure entities are lists
+    if isinstance(input_entities, str):
+        input_entities = [e.strip() for e in input_entities.split(",") if e.strip()]
+    if isinstance(output_entities, str):
+        output_entities = [e.strip() for e in output_entities.split(",") if e.strip()]
     
     return IntegrationTask(
         id=None,
@@ -192,7 +210,7 @@ def understand_task(state: WorkflowState) -> WorkflowState:
     - Derives input_entities / output_entities from known Entity names
     - Populates constraints dict with idempotency_required, max_latency_ms, requires_webhooks, extra
     
-    Uses LLM when available, falls back to heuristics otherwise.
+    Uses LLM with TOON format when available, falls back to heuristics otherwise.
     """
     if not state.task_description:
         state.errors.append("No task_description provided")
@@ -200,16 +218,26 @@ def understand_task(state: WorkflowState) -> WorkflowState:
         return state
     
     try:
-        # Try LLM-based understanding
+        # Try LLM-based understanding with TOON format
         prompt = _build_understand_task_prompt(state)
-        llm_response = call_llm_json(prompt, task_type="understand_task")
+        llm_response_text = call_llm(prompt, task_type="understand_task")
         
-        # Check for valid response (not an error dict from mock or parse failure)
-        if llm_response and not llm_response.get("error") and llm_response.get("task_slug"):
-            logger.info(f"Using LLM response for task understanding: {llm_response.get('task_slug')}")
-            state.integration_task = _parse_llm_response(llm_response, state)
+        # Parse TOON response
+        if llm_response_text and not llm_response_text.startswith("Mock response"):
+            try:
+                llm_response = from_toon(llm_response_text)
+                
+                if llm_response.get("task_slug"):
+                    logger.info(f"Using LLM TOON response for task understanding: {llm_response.get('task_slug')}")
+                    state.integration_task = _parse_llm_response(llm_response, state)
+                else:
+                    logger.info("TOON response missing task_slug, using heuristics")
+                    state.integration_task = _fallback_heuristic_understanding(state)
+            except Exception as parse_error:
+                logger.warning(f"Failed to parse TOON response: {parse_error}")
+                state.integration_task = _fallback_heuristic_understanding(state)
         else:
-            # LLM returned mock or invalid response, use heuristics
+            # LLM returned mock or empty response, use heuristics
             logger.info("Using heuristic fallback for task understanding")
             state.integration_task = _fallback_heuristic_understanding(state)
             

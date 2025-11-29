@@ -25,6 +25,7 @@ from integration_coworker.graph.nodes import (
     persist_run_outcome,
     persist_kg_learning,
 )
+from integration_coworker.llm.client import set_run_context, clear_run_context
 
 def build_graph():
     """
@@ -143,6 +144,25 @@ def build_graph():
     return workflow.compile()
 
 def run_workflow(state: WorkflowState) -> WorkflowState:
+    """
+    Execute the workflow graph with LangSmith tracing context.
+    
+    Sets up run context for LLM client tracing, ensuring all LLM calls
+    within this run are correlated with the same run_id and provider_code.
+    """
     app = build_graph()
-    final_state_dict = app.invoke(state)
-    return WorkflowState(**final_state_dict)
+    
+    # Set run context for LangSmith tracing
+    # Use existing run_id from state or generate a new one
+    run_id = state.run_id or state.plan.get("run_id", "")
+    provider_code = state.provider_code
+    
+    if run_id:
+        set_run_context(run_id, provider_code)
+    
+    try:
+        final_state_dict = app.invoke(state)
+        return WorkflowState(**final_state_dict)
+    finally:
+        # Clean up run context
+        clear_run_context()

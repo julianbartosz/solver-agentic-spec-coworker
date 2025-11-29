@@ -4,8 +4,8 @@ embed_spec_chunks node — generates embeddings for spec chunks.
 Implements: Design Doc §3.5 Embed Spec Chunks
 Touches: spec_chunk_embeddings (Silver layer)
 
-Uses OpenAI embeddings API when OPENAI_API_KEY is set,
-falls back to deterministic fake embeddings for tests.
+Uses LangChain's OpenAIEmbeddings for automatic LangSmith tracing.
+Falls back to deterministic fake embeddings for tests.
 
 Supports token-aware batching for large specs.
 """
@@ -16,6 +16,7 @@ from typing import Optional, List, Tuple
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import SpecChunkEmbedding
 from integration_coworker.config import get_embedding_config, get_settings
+from integration_coworker.llm.client import get_run_context
 
 logger = logging.getLogger(__name__)
 
@@ -25,31 +26,37 @@ MAX_TOKENS_PER_REQUEST = 250000  # Stay under 300K limit with safety margin
 MAX_INPUT_CHARS = 8000  # Max chars per individual input
 CHARS_PER_TOKEN = 4  # Rough estimate: 1 token ≈ 4 characters
 
-# Optional: OpenAI client for real embeddings
+# Optional: LangChain OpenAI embeddings for LangSmith tracing
 try:
-    from openai import OpenAI
-    HAS_OPENAI = True
+    from langchain_openai import OpenAIEmbeddings
+    HAS_LANGCHAIN_OPENAI = True
 except ImportError:
-    HAS_OPENAI = False
-    OpenAI = None
+    HAS_LANGCHAIN_OPENAI = False
+    OpenAIEmbeddings = None
 
 
-def _get_embedding_client() -> Optional["OpenAI"]:
-    """Get OpenAI client if available and configured."""
-    if not HAS_OPENAI:
+def _get_embedding_client():
+    """Get LangChain OpenAIEmbeddings client if available and configured."""
+    if not HAS_LANGCHAIN_OPENAI:
         return None
     
     settings = get_settings()
     if not settings.llm.api_key or settings.llm.use_mock:
         return None
     
+    config = get_embedding_config()
+    model = config.get("model", "text-embedding-3-small")
+    
     try:
-        kwargs = {"api_key": settings.llm.api_key}
+        kwargs = {
+            "api_key": settings.llm.api_key,
+            "model": model,
+        }
         if settings.llm.base_url:
             kwargs["base_url"] = settings.llm.base_url
-        return OpenAI(**kwargs)
+        return OpenAIEmbeddings(**kwargs)
     except Exception as e:
-        logger.warning(f"Failed to create OpenAI client: {e}")
+        logger.warning(f"Failed to create OpenAIEmbeddings client: {e}")
         return None
 
 
@@ -103,9 +110,11 @@ def _create_token_aware_batches(texts: List[str]) -> List[List[Tuple[int, str]]]
     return batches
 
 
-def _batch_embed(client: "OpenAI", texts: List[str], model: str) -> List[Optional[List[float]]]:
+def _batch_embed(client, texts: List[str]) -> List[Optional[List[float]]]:
     """
-    Embed texts in token-aware batches using OpenAI API.
+    Embed texts in token-aware batches using LangChain OpenAIEmbeddings.
+    
+    Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
     
     Returns list of embedding vectors in same order as input texts.
     None values indicate failed embeddings.
@@ -117,7 +126,10 @@ def _batch_embed(client: "OpenAI", texts: List[str], model: str) -> List[Optiona
     batches = _create_token_aware_batches(texts)
     total_batches = len(batches)
     
-    logger.info(f"Embedding {len(texts)} chunks in {total_batches} batches")
+    # Get run context for logging
+    run_id, provider_code = get_run_context()
+    
+    logger.info(f"Embedding {len(texts)} chunks in {total_batches} batches (run_id={run_id})")
     
     for batch_num, batch in enumerate(batches):
         # Extract just the texts for the API call
@@ -125,18 +137,13 @@ def _batch_embed(client: "OpenAI", texts: List[str], model: str) -> List[Optiona
         batch_indices = [idx for idx, _ in batch]
         
         try:
-            response = client.embeddings.create(
-                input=batch_texts,
-                model=model,
-            )
-            
-            # Sort by index to ensure order is preserved
-            sorted_data = sorted(response.data, key=lambda x: x.index)
+            # LangChain's embed_documents automatically handles LangSmith tracing
+            embeddings = client.embed_documents(batch_texts)
             
             # Map embeddings back to original indices
-            for i, item in enumerate(sorted_data):
+            for i, embedding in enumerate(embeddings):
                 original_idx = batch_indices[i]
-                all_embeddings[original_idx] = item.embedding
+                all_embeddings[original_idx] = embedding
             
             if (batch_num + 1) % 10 == 0 or batch_num == total_batches - 1:
                 embedded_count = sum(1 for e in all_embeddings if e is not None)
@@ -187,10 +194,10 @@ def embed_spec_chunks(state: WorkflowState) -> WorkflowState:
     total_chunks = len(state.doc_chunks)
     
     if use_real:
-        logger.info(f"Using real OpenAI embeddings with model {model} for {total_chunks} chunks")
+        logger.info(f"Using LangChain OpenAIEmbeddings with model {model} for {total_chunks} chunks")
         
-        # Use batched embedding for efficiency
-        embeddings = _batch_embed(client, state.doc_chunks, model)
+        # Use batched embedding for efficiency (auto-traced in LangSmith)
+        embeddings = _batch_embed(client, state.doc_chunks)
         
         for idx, chunk in enumerate(state.doc_chunks):
             chunk_uri = chunk_to_uri.get(idx)

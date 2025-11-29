@@ -1,0 +1,296 @@
+openapi: 3.0.3
+info:
+  title: Stripe Payment Intents API
+  description: |
+    Simplified Stripe Payment Intents API for demo purposes.
+    Based on Stripe's actual API structure.
+  version: "2024-01-01"
+  contact:
+    name: Stripe Developer Support
+    url: https://stripe.com/docs
+
+servers:
+  - url: https://api.stripe.com
+    description: Stripe API
+
+paths:
+  /v1/payment_intents:
+    post:
+      operationId: createPaymentIntent
+      summary: Create a PaymentIntent
+      description: |
+        Creates a PaymentIntent object. After the PaymentIntent is created, 
+        attach a payment method and confirm to continue the payment.
+      tags:
+        - PaymentIntents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentIntentRequest'
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+
+  /v1/payment_intents/{id}:
+    get:
+      operationId: getPaymentIntent
+      summary: Retrieve a PaymentIntent
+      description: Retrieves the details of a PaymentIntent that has previously been created.
+      tags:
+        - PaymentIntents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The ID of the PaymentIntent to retrieve
+          schema:
+            type: string
+            example: pi_3MtwBwLkdIwHu7ix28a3tqPa
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '404':
+          description: PaymentIntent not found
+
+  /v1/payment_intents/{id}/confirm:
+    post:
+      operationId: confirmPaymentIntent
+      summary: Confirm a PaymentIntent
+      description: |
+        Confirm that your customer intends to pay with current or provided payment method. 
+        Upon confirmation, the PaymentIntent will attempt to initiate a payment.
+      tags:
+        - PaymentIntents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The ID of the PaymentIntent to confirm
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmPaymentIntentRequest'
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '400':
+          description: Payment failed
+
+  /v1/payment_intents/{id}/cancel:
+    post:
+      operationId: cancelPaymentIntent
+      summary: Cancel a PaymentIntent
+      description: |
+        A PaymentIntent can be canceled when it's in one of these statuses: 
+        requires_payment_method, requires_capture, requires_confirmation, requires_action.
+      tags:
+        - PaymentIntents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The ID of the PaymentIntent to cancel
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelPaymentIntentRequest'
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Stripe API key as Bearer token
+
+  schemas:
+    CreatePaymentIntentRequest:
+      type: object
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: integer
+          description: Amount intended to be collected in smallest currency unit (e.g., cents)
+          example: 2000
+        currency:
+          type: string
+          description: Three-letter ISO currency code
+          example: usd
+        payment_method_types:
+          type: array
+          items:
+            type: string
+          description: List of payment method types to use
+          example: ["card"]
+        description:
+          type: string
+          description: An arbitrary string attached to the object
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Key-value pairs for storing additional information
+        customer:
+          type: string
+          description: ID of the Customer this PaymentIntent belongs to
+        receipt_email:
+          type: string
+          format: email
+          description: Email address to send the receipt to
+        statement_descriptor:
+          type: string
+          maxLength: 22
+          description: Text that appears on the customer's statement
+        capture_method:
+          type: string
+          enum: [automatic, manual]
+          description: Controls when the funds will be captured
+          default: automatic
+        confirm:
+          type: boolean
+          description: Set to true to attempt to confirm immediately
+          default: false
+
+    ConfirmPaymentIntentRequest:
+      type: object
+      properties:
+        payment_method:
+          type: string
+          description: ID of the payment method to attach
+        return_url:
+          type: string
+          format: uri
+          description: URL to redirect after authentication
+        receipt_email:
+          type: string
+          format: email
+          description: Email address for the receipt
+
+    CancelPaymentIntentRequest:
+      type: object
+      properties:
+        cancellation_reason:
+          type: string
+          enum: [duplicate, fraudulent, requested_by_customer, abandoned]
+          description: Reason for cancelling the PaymentIntent
+
+    PaymentIntent:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the PaymentIntent
+          example: pi_3MtwBwLkdIwHu7ix28a3tqPa
+        object:
+          type: string
+          enum: [payment_intent]
+          description: String representing the object type
+        amount:
+          type: integer
+          description: Amount intended to be collected
+        amount_received:
+          type: integer
+          description: Amount that was actually collected
+        currency:
+          type: string
+          description: Three-letter ISO currency code
+        status:
+          type: string
+          enum:
+            - requires_payment_method
+            - requires_confirmation
+            - requires_action
+            - processing
+            - requires_capture
+            - canceled
+            - succeeded
+          description: Status of this PaymentIntent
+        client_secret:
+          type: string
+          description: Client secret for client-side confirmation
+        payment_method:
+          type: string
+          nullable: true
+          description: ID of the payment method used
+        customer:
+          type: string
+          nullable: true
+          description: ID of the Customer
+        description:
+          type: string
+          nullable: true
+          description: Description of the payment
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Key-value metadata
+        created:
+          type: integer
+          description: Unix timestamp of creation
+        livemode:
+          type: boolean
+          description: Whether this is a live mode object
+        receipt_email:
+          type: string
+          nullable: true
+          description: Email for the receipt
+        statement_descriptor:
+          type: string
+          nullable: true
+          description: Statement descriptor
+        capture_method:
+          type: string
+          enum: [automatic, manual]
+          description: Capture method
+        cancellation_reason:
+          type: string
+          nullable: true
+          description: Reason for cancellation if canceled
+        canceled_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp when canceled
+
+security:
+  - bearerAuth: []
