@@ -7,13 +7,19 @@ from integration_coworker.persistence import db
 
 
 @pytest.fixture(scope="function", autouse=True)
-def reset_db():
+def reset_db(request):
     """
     Reset database before each test to ensure clean state.
     
-    This fixture runs automatically before every test function.
+    This fixture runs automatically before every test function,
+    unless the test is marked with @pytest.mark.no_db.
     Prevents database locking by ensuring clean setup/teardown.
     """
+    # Skip database setup for tests marked with no_db
+    if "no_db" in [marker.name for marker in request.node.iter_markers()]:
+        yield
+        return
+    
     # Close any lingering connections
     try:
         conn = db.get_connection()

@@ -362,5 +362,243 @@ def main(
     )
 
 
+@app.command("kg-dump")
+def kg_dump(
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Filter by provider code"),
+    node_type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by node type (provider, workflow_template, endpoint, entity, task)"),
+    show_edges: bool = typer.Option(False, "--edges", "-e", help="Also show edges between nodes"),
+    show_steps: bool = typer.Option(False, "--steps", help="Also show workflow steps for templates"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Maximum number of nodes to show"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Dump Knowledge Graph contents for debugging and demo.
+    
+    Shows nodes, edges, and workflow templates stored in the KG.
+    Useful for verifying that persist_kg_learning is populating the graph.
+    
+    Examples:
+        # Show all nodes for a provider
+        integration-coworker kg-dump --provider mock_payments
+        
+        # Show only workflow templates
+        integration-coworker kg-dump --type workflow_template
+        
+        # Show templates with their steps
+        integration-coworker kg-dump --type workflow_template --steps
+        
+        # Show nodes and edges
+        integration-coworker kg-dump --provider mock_payments --edges
+    """
+    from integration_coworker.persistence.db import get_connection, get_engine_type
+    
+    reset_settings()
+    engine = get_engine_type()
+    
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # Build query for nodes
+        where_clauses = []
+        params = []
+        
+        if provider:
+            where_clauses.append("provider_code = ?")
+            params.append(provider)
+        
+        if node_type:
+            where_clauses.append("node_type = ?")
+            params.append(node_type)
+        
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+        
+        # Query nodes
+        node_query = f"""
+            SELECT id, node_type, provider_code, key, name, description, usage_count
+            FROM kg_nodes
+            {where_sql}
+            ORDER BY node_type, provider_code, key
+            LIMIT ?
+        """
+        params.append(limit)
+        
+        cur.execute(node_query, params)
+        nodes = cur.fetchall()
+        
+        if json_output:
+            # JSON output mode
+            output = {
+                "engine": engine,
+                "filter": {"provider": provider, "node_type": node_type},
+                "nodes": [],
+                "edges": [],
+                "workflow_steps": [],
+            }
+            
+            for node in nodes:
+                node_id, n_type, n_provider, n_key, n_name, n_desc, usage = node
+                output["nodes"].append({
+                    "id": node_id,
+                    "type": n_type,
+                    "provider_code": n_provider,
+                    "key": n_key,
+                    "name": n_name,
+                    "description": n_desc,
+                    "usage_count": usage,
+                })
+            
+            if show_edges and nodes:
+                node_ids = [n[0] for n in nodes]
+                placeholders = ",".join("?" * len(node_ids))
+                edge_query = f"""
+                    SELECT e.id, e.src_node_id, e.dst_node_id, e.relation_type, e.weight,
+                           src.key as src_key, dst.key as dst_key
+                    FROM kg_edges e
+                    JOIN kg_nodes src ON e.src_node_id = src.id
+                    JOIN kg_nodes dst ON e.dst_node_id = dst.id
+                    WHERE e.src_node_id IN ({placeholders}) OR e.dst_node_id IN ({placeholders})
+                """
+                cur.execute(edge_query, node_ids + node_ids)
+                edges = cur.fetchall()
+                
+                for edge in edges:
+                    e_id, src_id, dst_id, rel_type, weight, src_key, dst_key = edge
+                    output["edges"].append({
+                        "id": e_id,
+                        "src_node_id": src_id,
+                        "dst_node_id": dst_id,
+                        "relation_type": rel_type,
+                        "weight": weight,
+                        "src_key": src_key,
+                        "dst_key": dst_key,
+                    })
+            
+            if show_steps:
+                template_ids = [n[0] for n in nodes if n[1] == "workflow_template"]
+                if template_ids:
+                    placeholders = ",".join("?" * len(template_ids))
+                    steps_query = f"""
+                        SELECT s.id, s.template_node_id, s.step_key, s.step_type, s.position, s.label
+                        FROM kg_workflow_steps s
+                        WHERE s.template_node_id IN ({placeholders})
+                        ORDER BY s.template_node_id, s.position
+                    """
+                    cur.execute(steps_query, template_ids)
+                    steps = cur.fetchall()
+                    
+                    for step in steps:
+                        s_id, tmpl_id, s_key, s_type, pos, label = step
+                        output["workflow_steps"].append({
+                            "id": s_id,
+                            "template_node_id": tmpl_id,
+                            "step_key": s_key,
+                            "step_type": s_type,
+                            "position": pos,
+                            "label": label,
+                        })
+            
+            typer.echo(json.dumps(output, indent=2))
+        
+        else:
+            # Human-readable output
+            typer.echo("Knowledge Graph Contents")
+            typer.echo("=" * 60)
+            typer.echo(f"Engine: {engine}")
+            if provider:
+                typer.echo(f"Provider filter: {provider}")
+            if node_type:
+                typer.echo(f"Type filter: {node_type}")
+            typer.echo("")
+            
+            if not nodes:
+                typer.echo("No nodes found. Run a successful integration to populate the KG.")
+                typer.echo("")
+                typer.echo("Hint: Run with --persist (not --dry-run) to write to KG:")
+                typer.echo("  integration-coworker demo --persist")
+                return
+            
+            typer.echo(f"📊 Nodes ({len(nodes)} found):")
+            typer.echo("-" * 60)
+            
+            current_type = None
+            for node in nodes:
+                node_id, n_type, n_provider, n_key, n_name, n_desc, usage = node
+                
+                if n_type != current_type:
+                    current_type = n_type
+                    typer.echo(f"\n  [{n_type.upper()}]")
+                
+                usage_str = f" (used {usage}x)" if usage and usage > 0 else ""
+                typer.echo(f"    • {n_key}{usage_str}")
+                if n_name and n_name != n_key:
+                    typer.echo(f"      Name: {n_name}")
+                if n_desc:
+                    desc_short = n_desc[:60] + "..." if len(n_desc) > 60 else n_desc
+                    typer.echo(f"      Desc: {desc_short}")
+            
+            if show_edges and nodes:
+                typer.echo("")
+                typer.echo("🔗 Edges:")
+                typer.echo("-" * 60)
+                
+                node_ids = [n[0] for n in nodes]
+                placeholders = ",".join("?" * len(node_ids))
+                edge_query = f"""
+                    SELECT e.relation_type, src.key as src_key, dst.key as dst_key
+                    FROM kg_edges e
+                    JOIN kg_nodes src ON e.src_node_id = src.id
+                    JOIN kg_nodes dst ON e.dst_node_id = dst.id
+                    WHERE e.src_node_id IN ({placeholders}) OR e.dst_node_id IN ({placeholders})
+                    LIMIT 30
+                """
+                cur.execute(edge_query, node_ids + node_ids)
+                edges = cur.fetchall()
+                
+                if edges:
+                    for edge in edges:
+                        rel_type, src_key, dst_key = edge
+                        typer.echo(f"    {src_key} --[{rel_type}]--> {dst_key}")
+                else:
+                    typer.echo("    No edges found.")
+            
+            if show_steps:
+                template_ids = [n[0] for n in nodes if n[1] == "workflow_template"]
+                if template_ids:
+                    typer.echo("")
+                    typer.echo("📋 Workflow Steps:")
+                    typer.echo("-" * 60)
+                    
+                    placeholders = ",".join("?" * len(template_ids))
+                    steps_query = f"""
+                        SELECT n.key, s.step_key, s.step_type, s.position, s.label
+                        FROM kg_workflow_steps s
+                        JOIN kg_nodes n ON s.template_node_id = n.id
+                        WHERE s.template_node_id IN ({placeholders})
+                        ORDER BY n.key, s.position
+                    """
+                    cur.execute(steps_query, template_ids)
+                    steps = cur.fetchall()
+                    
+                    current_template = None
+                    for step in steps:
+                        tmpl_key, s_key, s_type, pos, label = step
+                        
+                        if tmpl_key != current_template:
+                            current_template = tmpl_key
+                            typer.echo(f"\n  Template: {tmpl_key}")
+                        
+                        label_str = f" ({label})" if label else ""
+                        typer.echo(f"    {pos}. [{s_type}] {s_key}{label_str}")
+            
+            typer.echo("")
+    
+    except Exception as e:
+        typer.echo(f"✗ Error querying KG: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

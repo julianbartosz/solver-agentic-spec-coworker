@@ -2,17 +2,46 @@
 LLM Client Implementation
 
 Provides unified LLM client for integration coworker nodes.
+Uses LangChain's ChatOpenAI for automatic LangSmith tracing.
 Supports real OpenAI calls and mock fallback for testing.
+
+LangSmith Integration:
+- All LLM calls are automatically traced when LANGCHAIN_TRACING_V2=true
+- Traces include metadata: task_type, model, temperature, run_id
+- Parent-child relationships are maintained via run context
 """
 import json
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol
+import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Protocol, Callable
 
 from integration_coworker.config import get_llm_config, get_settings
 
 logger = logging.getLogger(__name__)
+
+# Context variable for current run_id (set by workflow runtime)
+_current_run_id: ContextVar[Optional[str]] = ContextVar("current_run_id", default=None)
+_current_provider: ContextVar[Optional[str]] = ContextVar("current_provider", default=None)
+
+
+def set_run_context(run_id: str, provider_code: Optional[str] = None) -> None:
+    """Set the current run context for LangSmith tracing."""
+    _current_run_id.set(run_id)
+    _current_provider.set(provider_code)
+
+
+def get_run_context() -> tuple[Optional[str], Optional[str]]:
+    """Get the current run context (run_id, provider_code)."""
+    return _current_run_id.get(), _current_provider.get()
+
+
+def clear_run_context() -> None:
+    """Clear the run context."""
+    _current_run_id.set(None)
+    _current_provider.set(None)
 
 
 class LLMClient(Protocol):
@@ -165,9 +194,11 @@ class MockLLMClient:
 @dataclass
 class OpenAILLMClient:
     """
-    Real OpenAI LLM client.
+    Real OpenAI LLM client with LangSmith tracing.
     
-    Uses the OpenAI API (or Azure OpenAI) for completions.
+    Uses LangChain's ChatOpenAI for automatic LangSmith integration.
+    All LLM calls are traced with metadata including task_type, model,
+    run_id, and provider_code for easy debugging and analysis.
     """
     
     api_key: str
@@ -175,24 +206,46 @@ class OpenAILLMClient:
     base_url: Optional[str] = None
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
+    task_type: str = "default"
     
-    _client: Optional[Any] = None
+    _llm: Optional[Any] = field(default=None, repr=False)
     
-    def _get_client(self):
-        """Lazy-initialize the OpenAI client."""
-        if self._client is None:
-            try:
-                from openai import OpenAI
-                
-                kwargs = {"api_key": self.api_key}
-                if self.base_url:
-                    kwargs["base_url"] = self.base_url
-                
-                self._client = OpenAI(**kwargs)
-            except ImportError:
-                raise ImportError("openai package required for real LLM calls. Install with: pip install openai")
+    def _get_llm(self, temperature: Optional[float] = None, max_tokens: Optional[int] = None):
+        """Get or create the LangChain ChatOpenAI instance."""
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            raise ImportError(
+                "langchain-openai package required for LLM calls with LangSmith tracing. "
+                "Install with: pip install langchain-openai"
+            )
         
-        return self._client
+        # Create a new instance with the requested parameters
+        # (LangChain handles caching internally)
+        kwargs = {
+            "api_key": self.api_key,
+            "model": self.model,
+            "temperature": temperature if temperature is not None else self.default_temperature,
+            "max_tokens": max_tokens or self.default_max_tokens,
+        }
+        
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        
+        return ChatOpenAI(**kwargs)
+    
+    def _build_metadata(self) -> Dict[str, Any]:
+        """Build metadata for LangSmith tracing."""
+        run_id, provider_code = get_run_context()
+        metadata = {
+            "task_type": self.task_type,
+            "model": self.model,
+        }
+        if run_id:
+            metadata["run_id"] = run_id
+        if provider_code:
+            metadata["provider_code"] = provider_code
+        return metadata
     
     def complete(
         self,
@@ -201,26 +254,42 @@ class OpenAILLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """Generate a completion using OpenAI API."""
-        client = self._get_client()
+        """
+        Generate a completion using LangChain ChatOpenAI.
+        
+        Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
+        """
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+        except ImportError:
+            raise ImportError(
+                "langchain-core package required for LLM calls. "
+                "Install with: pip install langchain-core"
+            )
+        
+        llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
         
         messages = []
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=prompt))
+        
+        metadata = self._build_metadata()
         
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature or self.default_temperature,
-                max_tokens=max_tokens or self.default_max_tokens,
+            # LangChain automatically handles LangSmith tracing
+            response = llm.invoke(
+                messages,
+                config={
+                    "metadata": metadata,
+                    "tags": [f"task:{self.task_type}", f"model:{self.model}"],
+                }
             )
             
-            return response.choices[0].message.content or ""
+            return response.content or ""
             
         except Exception as e:
-            logger.error(f"OpenAI API call failed: {e}")
+            logger.error(f"LLM API call failed: {e}")
             raise
     
     def complete_json(
@@ -237,7 +306,7 @@ class OpenAILLMClient:
         response = self.complete(
             prompt=prompt,
             system_prompt=json_system.strip(),
-            temperature=temperature or 0.3,  # Lower temp for structured output
+            temperature=temperature if temperature is not None else 0.3,  # Lower temp for structured output
             max_tokens=max_tokens,
         )
         
@@ -294,13 +363,14 @@ def get_llm_client(task_type: str = "default", strict: bool = False) -> LLMClien
         logger.info(f"Using mock LLM client for task_type={task_type} (USE_MOCK_LLM=true)")
         client = MockLLMClient(task_type=task_type)
     elif has_api_key:
-        logger.info(f"Using OpenAI LLM client for task_type={task_type}, model={config.get('model')}")
+        logger.info(f"Using LangChain ChatOpenAI client for task_type={task_type}, model={config.get('model')}")
         client = OpenAILLMClient(
             api_key=config["api_key"],
             model=config.get("model", "gpt-4"),
             base_url=config.get("base_url"),
             default_temperature=config.get("temperature", 0.7),
             default_max_tokens=config.get("max_tokens", 2000),
+            task_type=task_type,
         )
     elif strict:
         raise RuntimeError(
@@ -382,6 +452,20 @@ def call_llm_json(
     """
     Convenience function to make an LLM call and parse JSON response.
     
+    .. deprecated:: 1.0.0
+        Use :func:`call_llm` with TOON format instead for 30-40% token savings.
+        Import ``from_toon`` from ``integration_coworker.llm.toon`` to parse responses.
+        
+        Example migration::
+        
+            # Before (deprecated):
+            response = call_llm_json(prompt, task_type="planning")
+            
+            # After (recommended):
+            from integration_coworker.llm.toon import from_toon
+            response_text = call_llm(toon_prompt, task_type="planning")
+            response = from_toon(response_text)
+    
     Args:
         prompt: The user prompt
         task_type: Type of task for config lookup
@@ -392,6 +476,13 @@ def call_llm_json(
     Returns:
         Parsed JSON dictionary
     """
+    import warnings
+    warnings.warn(
+        "call_llm_json is deprecated. Use call_llm with TOON format instead "
+        "for 30-40% token savings. See integration_coworker.llm.toon module.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     client = get_llm_client(task_type)
     return client.complete_json(
         prompt=prompt,
