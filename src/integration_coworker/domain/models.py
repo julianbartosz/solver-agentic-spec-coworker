@@ -258,6 +258,9 @@ class KGNodeType(str, Enum):
     ENDPOINT = "endpoint"
     WORKFLOW_TEMPLATE = "workflow_template"
     TASK = "task"
+    # Pattern nodes are provider-agnostic workflow patterns
+    # e.g., "pattern.crud_create", "pattern.list_pagination"
+    PATTERN = "pattern"
 
 
 class KGEdgeRelation(str, Enum):
@@ -269,6 +272,9 @@ class KGEdgeRelation(str, Enum):
     COMPOSED_OF = "composed_of"
     PRECEDES = "precedes"
     BELONGS_TO_PROVIDER = "belongs_to_provider"
+    # Pattern relationships
+    IMPLEMENTS_PATTERN = "implements_pattern"  # workflow_template -> pattern
+    DERIVED_FROM = "derived_from"  # pattern -> workflow_template (learning)
 
 
 @dataclass

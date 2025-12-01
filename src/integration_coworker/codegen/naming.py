@@ -7,7 +7,7 @@ rather than hardcoding assumptions like "checkout".
 import re
 from typing import Optional
 
-from integration_coworker.domain.models import Endpoint, IntegrationTask
+from integration_coworker.domain.models import Endpoint
 
 
 def to_snake_case(text: str) -> str:
@@ -21,17 +21,17 @@ def to_snake_case(text: str) -> str:
     """
     if not text:
         return "unknown"
-    
+
     # Handle camelCase and PascalCase
     text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', text)
     text = re.sub(r'([a-z\d])([A-Z])', r'\1_\2', text)
-    
+
     # Replace non-alphanumeric with underscores
     text = re.sub(r'[^a-zA-Z0-9]+', '_', text)
-    
+
     # Remove leading/trailing underscores and collapse multiple
     text = re.sub(r'_+', '_', text).strip('_')
-    
+
     return text.lower()
 
 
@@ -46,10 +46,10 @@ def to_pascal_case(text: str) -> str:
     """
     if not text:
         return "Unknown"
-    
+
     # Split by underscores or spaces
     parts = re.split(r'[_\s]+', text)
-    
+
     # Capitalize each part
     return ''.join(word.capitalize() for word in parts if word)
 
@@ -72,24 +72,24 @@ def derive_method_name(endpoint: Endpoint) -> str:
     """
     if endpoint.operation_id:
         return to_snake_case(endpoint.operation_id)
-    
+
     # Derive from method + path
     method = endpoint.method.lower()
     path = endpoint.path
-    
+
     # Normalize path: remove version prefix, params, trailing slashes
     path = re.sub(r'^/v\d+/?', '/', path)  # Remove version prefix
     path = re.sub(r'/\{[^}]+\}', '', path)  # Remove path params like {id}
     path = path.strip('/')
-    
+
     # Get last meaningful segment(s)
     segments = [s for s in path.split('/') if s]
     if not segments:
         return f"{method}_resource"
-    
+
     # Use last segment, singularize for specific operations
     resource = segments[-1]
-    
+
     # Map HTTP verbs to action words
     verb_map = {
         'get': 'get',
@@ -99,13 +99,13 @@ def derive_method_name(endpoint: Endpoint) -> str:
         'delete': 'delete',
     }
     action = verb_map.get(method, method)
-    
+
     # Singularize if it looks like a collection
     if resource.endswith('s') and action in ('create', 'get') and '{' not in endpoint.path:
         # Keep plural for list operations, singularize for create
         if action == 'create':
             resource = resource.rstrip('s')
-    
+
     return to_snake_case(f"{action}_{resource}")
 
 

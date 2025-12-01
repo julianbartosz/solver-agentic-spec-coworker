@@ -12,6 +12,9 @@ from integration_coworker.repo.profiles import (
     FASTAPI_PROFILE,
     NEXTJS_APP_ROUTER_PROFILE,
     DJANGO_REST_PROFILE,
+    FLASK_PROFILE,
+    EXPRESS_PROFILE,
+    NESTJS_PROFILE,
     detect_profile_from_repo,
 )
 
@@ -229,9 +232,69 @@ class TestDetectProfileFallback:
         
         profile = detect_profile_from_repo(tmp_path)
         assert profile == SUBATOMIC_MOCK_PROFILE
+
+
+# ---------------------------------------------------------------------------
+# M5 WS3-T3: New Profile Detection Tests (Flask, Express, NestJS)
+# ---------------------------------------------------------------------------
+
+class TestDetectProfileFlask:
+    """Tests for Flask profile detection."""
     
-    def test_node_project_without_next_returns_default(self, tmp_path):
-        """Node project without Next.js returns default (for now)."""
+    def test_detects_flask_from_requirements(self, tmp_path):
+        """Detect Flask via requirements.txt."""
+        requirements_content = '''
+flask>=2.0.0
+gunicorn
+'''
+        (tmp_path / "requirements.txt").write_text(requirements_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "flask"
+        assert profile.language == "python"
+    
+    def test_detects_flask_from_pyproject(self, tmp_path):
+        """Detect Flask via pyproject.toml."""
+        pyproject_content = '''
+[project]
+dependencies = [
+    "flask>=2.0.0",
+]
+'''
+        (tmp_path / "pyproject.toml").write_text(pyproject_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "flask"
+    
+    def test_detects_flask_from_app_py(self, tmp_path):
+        """Detect Flask via app.py with Flask import."""
+        app_content = '''
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+@app.route("/")
+def hello():
+    return jsonify({"message": "Hello"})
+'''
+        (tmp_path / "app.py").write_text(app_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "flask"
+    
+    def test_flask_profile_structure(self):
+        """Test Flask profile has correct structure."""
+        assert FLASK_PROFILE.name == "flask"
+        assert FLASK_PROFILE.framework == "flask"
+        assert FLASK_PROFILE.language == "python"
+        assert "clients_dir" in FLASK_PROFILE.layout_hints
+
+
+class TestDetectProfileExpress:
+    """Tests for Express.js profile detection."""
+    
+    def test_detects_express_from_package_json(self, tmp_path):
+        """Detect Express via package.json dependencies."""
         pkg_content = json.dumps({
             "dependencies": {
                 "express": "^4.18.0"
@@ -240,5 +303,97 @@ class TestDetectProfileFallback:
         (tmp_path / "package.json").write_text(pkg_content)
         
         profile = detect_profile_from_repo(tmp_path)
-        # Express is not explicitly handled, so falls back to default
-        assert profile == SUBATOMIC_MOCK_PROFILE
+        assert profile.framework == "express"
+        assert profile.language == "typescript"
+    
+    def test_express_profile_structure(self):
+        """Test Express profile has correct structure."""
+        assert EXPRESS_PROFILE.name == "express"
+        assert EXPRESS_PROFILE.framework == "express"
+        assert EXPRESS_PROFILE.language == "typescript"
+        assert "services_dir" in EXPRESS_PROFILE.layout_hints
+
+
+class TestDetectProfileNestJS:
+    """Tests for NestJS profile detection."""
+    
+    def test_detects_nestjs_from_core_package(self, tmp_path):
+        """Detect NestJS via @nestjs/core in package.json."""
+        pkg_content = json.dumps({
+            "dependencies": {
+                "@nestjs/core": "^10.0.0",
+                "@nestjs/common": "^10.0.0"
+            }
+        })
+        (tmp_path / "package.json").write_text(pkg_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "nestjs"
+        assert profile.language == "typescript"
+    
+    def test_detects_nestjs_from_common_package(self, tmp_path):
+        """Detect NestJS via @nestjs/common in package.json."""
+        pkg_content = json.dumps({
+            "dependencies": {
+                "@nestjs/common": "^10.0.0"
+            }
+        })
+        (tmp_path / "package.json").write_text(pkg_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "nestjs"
+    
+    def test_nestjs_profile_structure(self):
+        """Test NestJS profile has correct structure."""
+        assert NESTJS_PROFILE.name == "nestjs"
+        assert NESTJS_PROFILE.framework == "nestjs"
+        assert NESTJS_PROFILE.language == "typescript"
+        assert "module_file" in NESTJS_PROFILE.layout_hints
+        # NestJS uses specific naming conventions
+        assert ".service.ts" in NESTJS_PROFILE.conventions["flow_module_pattern"]
+
+
+class TestProfilePriority:
+    """Tests for profile detection priority when multiple markers exist."""
+    
+    def test_nestjs_takes_priority_over_express(self, tmp_path):
+        """NestJS should be detected even if express is also present."""
+        pkg_content = json.dumps({
+            "dependencies": {
+                "@nestjs/core": "^10.0.0",
+                "@nestjs/common": "^10.0.0",
+                "@nestjs/platform-express": "^10.0.0",
+                "express": "^4.18.0"  # Also has express
+            }
+        })
+        (tmp_path / "package.json").write_text(pkg_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        # NestJS should win because it's checked first
+        assert profile.framework == "nestjs"
+    
+    def test_nextjs_takes_priority_with_config(self, tmp_path):
+        """Next.js with config file should be detected first."""
+        pkg_content = json.dumps({
+            "dependencies": {
+                "next": "^14.0.0",
+                "express": "^4.18.0"
+            }
+        })
+        (tmp_path / "package.json").write_text(pkg_content)
+        (tmp_path / "next.config.js").touch()
+        
+        profile = detect_profile_from_repo(tmp_path)
+        assert profile.framework == "nextjs"
+    
+    def test_fastapi_takes_priority_over_flask(self, tmp_path):
+        """FastAPI should be detected before Flask."""
+        requirements_content = '''
+fastapi>=0.100.0
+flask>=2.0.0
+'''
+        (tmp_path / "requirements.txt").write_text(requirements_content)
+        
+        profile = detect_profile_from_repo(tmp_path)
+        # FastAPI is checked first
+        assert profile.framework == "fastapi"

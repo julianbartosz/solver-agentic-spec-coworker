@@ -21,7 +21,7 @@ Example:
           constraints.required=true
 """
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 def to_toon(obj: Dict[str, Any], prefix: str = "") -> str:
@@ -40,10 +40,10 @@ def to_toon(obj: Dict[str, Any], prefix: str = "") -> str:
         'name=test\\nconfig.enabled=true'
     """
     lines = []
-    
+
     for key, value in obj.items():
         full_key = f"{prefix}.{key}" if prefix else key
-        
+
         if value is None:
             # Skip None values (implicit null)
             continue
@@ -77,7 +77,7 @@ def to_toon(obj: Dict[str, Any], prefix: str = "") -> str:
         else:
             # Fallback: stringify
             lines.append(f"{full_key}={str(value)}")
-    
+
     return "\n".join(lines)
 
 
@@ -112,26 +112,26 @@ def from_toon(text: str) -> Dict[str, Any]:
         {'name': 'test', 'config': {'enabled': True}}
     """
     result: Dict[str, Any] = {}
-    
+
     for line in text.strip().split("\n"):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        
+
         # Find the first unescaped equals sign
         eq_pos = _find_unescaped(line, "=")
         if eq_pos == -1:
             continue
-        
+
         key = line[:eq_pos]
         value_str = line[eq_pos + 1:]
-        
+
         # Parse the value
         value = _parse_value(value_str)
-        
+
         # Handle nested keys (dot notation)
         _set_nested(result, key.split("."), value)
-    
+
     return result
 
 
@@ -151,27 +151,27 @@ def _find_unescaped(text: str, char: str) -> int:
 def _parse_value(value_str: str) -> Any:
     """Parse a TOON value string to Python type."""
     value_str = value_str.strip()
-    
+
     # Boolean
     if value_str == "true":
         return True
     if value_str == "false":
         return False
-    
+
     # Empty/null
     if value_str == "" or value_str == "null":
         return None
-    
+
     # Array
     if value_str.startswith("[") and value_str.endswith("]"):
         return _parse_array(value_str[1:-1])
-    
+
     # Number
     if re.match(r"^-?\d+$", value_str):
         return int(value_str)
     if re.match(r"^-?\d+\.\d+$", value_str):
         return float(value_str)
-    
+
     # String - unescape
     return value_str.replace("\\n", "\n").replace("\\=", "=").replace("\\\\", "\\")
 
@@ -180,21 +180,21 @@ def _parse_array(array_str: str) -> List[Any]:
     """Parse a TOON array string."""
     if not array_str.strip():
         return []
-    
+
     items = []
     current = ""
     depth = 0
     i = 0
-    
+
     while i < len(array_str):
         char = array_str[i]
-        
+
         # Handle escape sequences
         if char == "\\" and i + 1 < len(array_str):
             current += char + array_str[i + 1]
             i += 2
             continue
-        
+
         # Track brace depth for nested objects
         if char == "{":
             depth += 1
@@ -208,37 +208,37 @@ def _parse_array(array_str: str) -> List[Any]:
             current = ""
         else:
             current += char
-        
+
         i += 1
-    
+
     # Don't forget the last item
     if current.strip():
         items.append(_parse_array_item(current.strip()))
-    
+
     return items
 
 
 def _parse_array_item(item_str: str) -> Any:
     """Parse a single array item."""
     item_str = item_str.strip()
-    
+
     # Object in array: {key1:value1,key2:value2}
     if item_str.startswith("{") and item_str.endswith("}"):
         obj = {}
         inner = item_str[1:-1]
-        
+
         # Split on commas (respecting nested structures)
         parts = _split_object_parts(inner)
-        
+
         for part in parts:
             colon_pos = part.find(":")
             if colon_pos != -1:
                 k = part[:colon_pos].strip()
                 v = part[colon_pos + 1:].strip()
                 obj[k] = _parse_value(v)
-        
+
         return obj
-    
+
     # Simple value
     return _parse_value(item_str)
 
@@ -248,7 +248,7 @@ def _split_object_parts(inner: str) -> List[str]:
     parts = []
     current = ""
     depth = 0
-    
+
     for char in inner:
         if char == "{":
             depth += 1
@@ -261,10 +261,10 @@ def _split_object_parts(inner: str) -> List[str]:
             current = ""
         else:
             current += char
-    
+
     if current:
         parts.append(current)
-    
+
     return parts
 
 
@@ -320,13 +320,13 @@ def toon_response_format(fields: Dict[str, str], nested: Optional[Dict[str, Dict
         constraints.timeout=int
     """
     lines = []
-    
+
     for field, type_hint in fields.items():
         lines.append(f"{field}={type_hint}")
-    
+
     if nested:
         for parent, children in nested.items():
             for field, type_hint in children.items():
                 lines.append(f"{parent}.{field}={type_hint}")
-    
+
     return "\n".join(lines)

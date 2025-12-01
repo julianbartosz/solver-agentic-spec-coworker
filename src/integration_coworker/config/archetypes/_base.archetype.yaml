@@ -1,0 +1,33 @@
+# Base Archetype Configuration
+# Shared defaults inherited by all node archetypes
+# Per design doc Section 5.5 - Prompting & Agent Configuration
+
+version: "1.0"
+
+# Default model configuration
+model:
+  provider: openai
+  name: gpt-4
+  temperature: 0.7
+  max_tokens: 2000
+
+# Default prompting strategy
+prompting:
+  format: toon  # Token-Oriented Object Notation (YAML-based)
+  strategy: default
+  
+# Default retrieval settings
+retrieval:
+  top_k: 5
+  graph_radius: 0
+  token_budget: 2000
+
+# Parallelism defaults
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+# LangSmith metadata tags
+metadata:
+  version: "1.0"
+  trace_enabled: true

@@ -1,0 +1,32 @@
+{
+  "scenario": "scenario4_csv_schema",
+  "timestamp": "2025-11-30T21:45:30.677555",
+  "fields": [
+    {
+      "name": "id",
+      "type": "integer",
+      "nullable": false
+    },
+    {
+      "name": "name",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "email",
+      "type": "email",
+      "nullable": false
+    },
+    {
+      "name": "amount",
+      "type": "number",
+      "nullable": false
+    },
+    {
+      "name": "created_at",
+      "type": "datetime",
+      "nullable": false
+    }
+  ],
+  "row_count": 3
+}

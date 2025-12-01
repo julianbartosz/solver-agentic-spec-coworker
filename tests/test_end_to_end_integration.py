@@ -10,6 +10,7 @@ import shutil
 
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
+from integration_coworker.repo.profiles import SUBATOMIC_MOCK_PROFILE
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ def test_end_to_end_with_repo_integration(mock_payments_spec, temp_repo):
         task_description="Create checkout session",
         provider_code="mock_payments",
         repo_root=str(temp_repo),
-        repo_profile=None,  # Will default to SUBATOMIC_MOCK_PROFILE
+        repo_profile=SUBATOMIC_MOCK_PROFILE,  # Explicitly pass profile with hooks
         options=IntegrationOptions(
             dry_run=False,
             repo_integration_enabled=True,

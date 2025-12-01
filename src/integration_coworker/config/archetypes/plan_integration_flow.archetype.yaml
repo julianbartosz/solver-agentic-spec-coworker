@@ -1,0 +1,97 @@
+# Plan Integration Flow Node Archetype
+# Designs the integration workflow graph
+# Per design doc Section 5.5.1 - Planning nodes
+
+name: plan_integration_flow
+role: planning
+inherits: _base
+
+model:
+  # Claude excels at complex planning and reasoning
+  provider: anthropic
+  name: claude-sonnet-4-20250514
+  temperature: 0.2
+  max_tokens: 4096
+
+prompting:
+  strategy: chain_of_thought
+  num_samples: 2
+  selector: endpoint_coverage  # Select sample with best endpoint coverage
+  max_branches: 3  # Light tree-of-thought for ambiguous tasks
+  system_template: |
+    You are a workflow architect for API integrations. Design a complete
+    integration flow as a directed graph of nodes and edges.
+    
+    For the given task:
+    1. Identify all required API operations
+    2. Determine the correct order and dependencies
+    3. Add validation, transformation, and error handling nodes
+    4. Ensure all edges have clear conditions
+    
+    Consider:
+    - Data dependencies between steps
+    - Error handling and retry logic
+    - Pagination for list operations
+    - Idempotency requirements
+    
+    Output the flow graph in TOON format.
+
+retrieval:
+  top_k: 12
+  graph_radius: 2
+  token_budget: 4000
+  sources:
+    - spec_endpoints
+    - spec_schemas
+    - kg_templates
+    - kg_patterns
+
+parallelism:
+  num_samples: 2
+  max_parallel_samples: 2
+
+input_schema:
+  task:
+    type: IntegrationTask
+    description: Structured task understanding
+  template_context:
+    type: object
+    description: Template alignment results
+  endpoints:
+    type: list[Endpoint]
+    description: Available API endpoints
+  entities:
+    type: list[Entity]
+    description: Relevant entities
+
+output_schema:
+  flow_key:
+    type: string
+    description: Unique flow identifier
+  nodes:
+    type: list[object]
+    description: Workflow nodes
+    item_schema:
+      node_key:
+        type: string
+      node_type:
+        type: string
+        enum: [start, end, api_call, validation, transform, decision, error_handler]
+      label:
+        type: string
+      position:
+        type: integer
+      endpoint_ref:
+        type: string
+        optional: true
+  edges:
+    type: list[object]
+    description: Workflow edges
+    item_schema:
+      from_node_key:
+        type: string
+      to_node_key:
+        type: string
+      condition:
+        type: string
+        optional: true

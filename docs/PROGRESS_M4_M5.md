@@ -82,13 +82,26 @@ Today, the system runs end-to-end with real persistence, multi-provider support 
 
 ### 2.6 Repository Awareness (`src/integration_coworker/repo/`)
 
-- **RepoProfile detection**: Next.js, Django, FastAPI via marker files
-- **Layout hints** for client/flow/test placement
-- **Integration hooks** for router/settings updates
+- **Two-layer detection pipeline**: 
+  - Layer 1: `detect_repo_profile()` → DetectedProfile with confidence scoring
+  - Layer 2: `build_effective_repo_profile()` → RepoProfile with layout configuration
+- **6 known archetypes**: FastAPI, Django, Flask, Next.js, NestJS, Express
+- **Confidence thresholds**:
+  - ≥0.8: Use archetype defaults directly
+  - ≥0.4: Use heuristic inference
+  - <0.4: Log warning, use heuristic_fallback
+- **Evidence collection**: Detection captures file patterns and dependencies matched
+- **Report integration**: Shows detection confidence, profile source, and evidence
 
 **Key files:**
-- `profiles.py` — `detect_profile_from_repo()` with heuristics
-- `models.py` — `RepoProfile` dataclass
+- `detection.py` — Two-layer detection with `KNOWN_ARCHETYPES` registry (900+ lines)
+- `models.py` — `RepoProfile`, `DetectedProfile` dataclasses
+- `context.py` — Filesystem repo context provider
+
+**Golden repo fixtures** in `tests/fixtures/repos/`:
+- `fastapi_service/`, `django_service/`, `flask_service/`
+- `nextjs_app/`, `nestjs_app/`, `express_app/`
+- `generic_python/`, `generic_js/`
 
 ### 2.7 CLI & Demo (`src/integration_coworker/cli.py`)
 
@@ -112,7 +125,10 @@ Today, the system runs end-to-end with real persistence, multi-provider support 
 | Code Execution | 2 | `test_m4_generated_code_execution.py` |
 | Persistence | 3 | `test_m4_persistence.py` |
 | Silver Model | 6 | `test_build_silver_api_model.py` |
-| Repo Profiles | 21 | `test_repo_profiles.py` |
+| Repo Profiles | 29 | `test_repo_profiles.py` |
+| Detection E2E | 41 | `test_detection_profiles_e2e.py` |
+| Edge Cases | 30 | `test_detection_edge_cases.py` |
+| Pipeline E2E | 12 | `test_end_to_end_repo_profiles.py` |
 | Codegen Validation | 9 | `test_codegen_validation.py` |
 | TOON | 36 | `test_toon.py` |
 | Multi-Spec | 6 | `test_multi_spec.py` |
@@ -125,7 +141,10 @@ Today, the system runs end-to-end with real persistence, multi-provider support 
 | Generated code is executable | `tests/test_m4_generated_code_execution.py::test_generated_mock_payments_flow_executes` |
 | KG is populated and queried | `tests/test_graphrag_integration.py::test_second_run_uses_kg_templates` |
 | Multi-provider works | `tests/test_stripe_integration.py::TestMultiProviderSupport` |
-| Repo detection works | `tests/test_repo_profiles.py::TestDetectProfileNextJS`, `TestDetectProfileDjango`, `TestDetectProfileFastAPI` |
+| Repo detection works | `tests/repo/test_detection_profiles_e2e.py::TestFastAPIServiceDetection`, `TestDjangoServiceDetection`, `TestNextJSAppDetection` |
+| Detection confidence works | `tests/repo/test_detection_profiles_e2e.py::TestLowConfidenceGuardrails` |
+| Deps parsing robust | `tests/repo/test_detection_edge_cases.py::TestPyprojectDepsEdgeCases` |
+| E2E with detection | `tests/test_end_to_end_repo_profiles.py::TestEndToEndReportContents` |
 
 ### 3.3 Commands That Prove It Works
 
@@ -160,7 +179,7 @@ USE_SQLITE=true python -m integration_coworker.cli kg-dump --edges --steps
 ### 4.2 Known Limitations
 
 1. **Two providers implemented**: `mock_payments` and `stripe` (Payment Intents)
-2. **Three archetypes detected**: FastAPI, Django, Next.js (fallback to mock profile otherwise)
+2. **Six archetypes detected**: FastAPI, Django, Flask, Next.js, NestJS, Express (fallback to generic otherwise)
 3. **No real network calls in CI**: All tests use mocked HTTP
 4. **EntityRelationship IDs deferred**: Set to None, backfilled post-persistence
 
@@ -248,13 +267,14 @@ USE_SQLITE=true USE_MOCK_LLM=true pytest tests -v | tail -20
 
 | Metric | Value |
 |--------|-------|
-| Tests passing | 158 |
+| Tests passing | 200+ |
 | Workflow nodes | 18 |
 | Providers implemented | 2 (mock_payments, stripe) |
-| Archetypes detected | 3 (FastAPI, Django, Next.js) |
+| Archetypes detected | 6 (FastAPI, Django, Flask, Next.js, NestJS, Express) |
+| Golden repo fixtures | 8 |
 | KG tables | 4 (nodes, edges, workflow_steps, step_bindings) |
 | CLI commands | 6 (run, demo, status, init-db, kg-dump, main) |
-| Test runtime | ~6 seconds |
+| Test runtime | ~18 seconds |
 
 ---
 

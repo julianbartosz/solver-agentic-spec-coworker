@@ -1,8 +1,11 @@
 """
 Tests for align_task_with_kg node - workflow template matching.
 
-NOTE: These tests use USE_IN_MEMORY_KG_FALLBACK=1 to test against the legacy
-in-memory templates. Production usage should query the real KG.
+NOTE: These tests use USE_IN_MEMORY_KG_FALLBACK=1 AND USE_LEGACY_TEMPLATES=1 to test 
+against the legacy in-memory templates. Production usage should query the real KG.
+
+M5 Update: As of M5, legacy templates are OFF by default (USE_LEGACY_TEMPLATES=0).
+These tests explicitly enable them to verify backwards compatibility.
 """
 import os
 import pytest
@@ -14,8 +17,9 @@ from integration_coworker.domain.models import IntegrationTask
 
 @pytest.fixture(autouse=True)
 def enable_kg_fallback(monkeypatch):
-    """Enable in-memory KG fallback for all tests in this module."""
+    """Enable in-memory KG fallback AND legacy templates for all tests in this module."""
     monkeypatch.setenv("USE_IN_MEMORY_KG_FALLBACK", "1")
+    monkeypatch.setenv("USE_LEGACY_TEMPLATES", "1")  # M5: Legacy templates now off by default
 
 
 def test_get_checkout_session_template_match():

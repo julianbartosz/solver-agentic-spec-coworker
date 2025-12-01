@@ -31,6 +31,7 @@ For structured data, use TOON format instead of JSON for 30-40% token savings:
 from .client import (
     LLMClient,
     get_llm_client,
+    get_llm_client_for_node,
     call_llm,
     call_llm_json,  # Deprecated: use call_llm + TOON instead
     is_mock_llm_mode,
@@ -42,7 +43,8 @@ from .client import (
 
 __all__ = [
     "LLMClient",
-    "get_llm_client", 
+    "get_llm_client",
+    "get_llm_client_for_node",
     "call_llm",
     "call_llm_json",  # Deprecated
     "is_mock_llm_mode",

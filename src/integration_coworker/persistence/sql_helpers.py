@@ -12,7 +12,7 @@ Note: Postgres connections use dict_row factory, so rows are dicts.
       SQLite connections use Row factory, so rows are tuple-like.
       Use get_row_value() to access row values consistently.
 """
-from typing import Any, List, Tuple, Optional, Union
+from typing import Any, List, Optional, Union
 from ..config import get_settings
 
 
@@ -39,7 +39,7 @@ def get_row_value(row: Any, column: Union[str, int]) -> Any:
     """
     if row is None:
         return None
-    
+
     if isinstance(row, dict):
         # Postgres dict_row
         if isinstance(column, int):
@@ -97,7 +97,7 @@ def upsert_ignore(
     full_table = f"{schema}.{table}" if schema and engine == "postgres" else table
     col_list = ", ".join(columns)
     placeholders = placeholder(len(columns))
-    
+
     if engine == "postgres":
         if conflict_columns:
             conflict_list = ", ".join(conflict_columns)
@@ -132,7 +132,7 @@ def upsert_update(
     full_table = f"{schema}.{table}" if schema and engine == "postgres" else table
     col_list = ", ".join(columns)
     placeholders = placeholder(len(columns))
-    
+
     if engine == "postgres":
         conflict_list = ", ".join(conflict_columns)
         update_clauses = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_columns])
@@ -163,10 +163,10 @@ def select_by_columns(
     engine = get_engine_type()
     full_table = f"{schema}.{table}" if schema and engine == "postgres" else table
     col_list = ", ".join(select_columns)
-    
+
     ph = "%s" if engine == "postgres" else "?"
     where_clauses = " AND ".join([f"{col} = {ph}" for col in where_columns])
-    
+
     return f"SELECT {col_list} FROM {full_table} WHERE {where_clauses}"
 
 
