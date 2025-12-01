@@ -24,6 +24,9 @@ dependencies = [
     "langchain>=0.1.0",
     "langgraph>=0.0.20",
     "langchain-core>=0.1.0",
+    "beautifulsoup4>=4.12.0",
+    "pypdf>=4.0.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +34,21 @@ dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
+]
+postgres = [
+    "psycopg[binary]>=3.1.0",
+    "psycopg_pool>=3.1.0",
+]
+ui = [
+    "streamlit>=1.28.0",
+]
+all = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "psycopg[binary]>=3.1.0",
+    "psycopg_pool>=3.1.0",
+    "streamlit>=1.28.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -43,6 +61,11 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+norecursedirs = ["tests/fixtures/repos"]
+markers = [
+    "no_db: mark test as not requiring database setup/teardown",
+    "perf_smoke: performance smoke tests with timing assertions"
+]
 
 [tool.ruff]
 line-length = 100

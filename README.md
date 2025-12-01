@@ -2,6 +2,51 @@
 
 This doc explains how prompts, models, and context are structured for the **Agentic API Integration Designer & Code Generator**.
 
+## Getting Started in 5 Minutes
+
+The fastest way to see everything working:
+
+```bash
+# 1. Install dependencies
+pip install -e .
+
+# 2. Run the golden path demo (no API keys needed)
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1
+```
+
+This will show:
+- ✅ Spec ingestion and parsing
+- ✅ Silver API model extraction (endpoints, schemas, entities)
+- ✅ Task understanding and KG alignment
+- ✅ Code generation (client, flow, test)
+- ✅ Per-node timing table
+- ✅ Artifact locations
+
+**With your own spec:**
+```bash
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1 \
+  --openapi ./your-api.yaml \
+  --task "Create order"
+```
+
+**With repo integration (writes files):**
+```bash
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1 \
+  --openapi ./your-api.yaml \
+  --task "Create order" \
+  --repo ./my-project \
+  --persist
+```
+
+**For production use (real LLM):**
+```bash
+export OPENAI_API_KEY=your-key
+export DATABASE_URL=postgresql://user:pass@localhost/db
+python -m integration_coworker demo-v1 --persist
+```
+
+---
+
 ## Phase 2 Demo (Current Milestone)
 
 The Phase 2 vertical slice demonstrates a complete end-to-end workflow for the **mock_payments** provider with the **"Create checkout session"** task.

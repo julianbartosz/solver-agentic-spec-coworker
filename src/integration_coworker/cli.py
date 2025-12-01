@@ -251,6 +251,216 @@ def run_demo(
     )
 
 
+@app.command("demo-v1")
+def demo_v1(
+    openapi: Optional[Path] = typer.Option(None, "--openapi", "-o", help="Path to OpenAPI spec (default: mock_payments)"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Path to target repository for file writes"),
+    task: Optional[str] = typer.Option(None, "--task", "-t", help="Task description (default: 'Create checkout session')"),
+    dry_run: bool = typer.Option(True, "--dry-run/--persist", help="Dry run mode (default: true)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose debug logging"),
+):
+    """
+    Golden Path demo - shows everything working end-to-end.
+    
+    This command demonstrates the full V1 capabilities:
+    - Spec ingestion and parsing
+    - Silver API model extraction
+    - Task understanding and KG alignment
+    - Code generation with policies
+    - Repo integration (optional)
+    - Per-node timing table
+    - Artifact location summary
+    
+    Examples:
+        # Quick demo with built-in spec
+        integration-coworker demo-v1
+        
+        # Demo with your own OpenAPI spec
+        integration-coworker demo-v1 --openapi ./api.yaml --task "Create order"
+        
+        # Demo with repo integration
+        integration-coworker demo-v1 --repo ./my-project --persist
+        
+        # Demo with HTML spec (experimental)
+        integration-coworker demo-v1 --openapi ./api-docs.html
+    """
+    import time
+    from datetime import datetime
+    
+    _setup_logging(verbose)
+    
+    # Find spec
+    if openapi and openapi.exists():
+        spec_path = openapi.resolve()
+    else:
+        # Use default mock spec
+        possible_paths = [
+            Path(__file__).parent.parent.parent / "tests" / "fixtures" / "mock_payments_openapi.yaml",
+            Path.cwd() / "tests" / "fixtures" / "mock_payments_openapi.yaml",
+        ]
+        spec_path = None
+        for p in possible_paths:
+            if p.exists():
+                spec_path = p.resolve()
+                break
+        
+        if not spec_path:
+            typer.echo("✗ Error: No spec found. Use --openapi to specify one.", err=True)
+            raise typer.Exit(code=1)
+    
+    task_desc = task or "Create checkout session"
+    
+    # Header
+    typer.echo("")
+    typer.echo("╔══════════════════════════════════════════════════════════════╗")
+    typer.echo("║       Integration Co-Worker V1 - Golden Path Demo            ║")
+    typer.echo("╚══════════════════════════════════════════════════════════════╝")
+    typer.echo("")
+    typer.echo(f"  📄 Spec:    {spec_path}")
+    typer.echo(f"  📝 Task:    {task_desc}")
+    if repo:
+        typer.echo(f"  📁 Repo:    {repo}")
+    typer.echo(f"  🔧 Mode:    {'Dry Run' if dry_run else 'Persist'}")
+    typer.echo(f"  ⏱️  Started: {datetime.now().strftime('%H:%M:%S')}")
+    typer.echo("")
+    typer.echo("─" * 66)
+    
+    start_time = time.time()
+    
+    # Run integration
+    options = IntegrationOptions(
+        dry_run=dry_run,
+        repo_integration_enabled=repo is not None,
+    )
+    
+    try:
+        result = design_and_generate_integration(
+            spec_refs=[str(spec_path)],
+            task_description=task_desc,
+            repo_root=str(repo) if repo else None,
+            options=options,
+        )
+    except Exception as e:
+        typer.echo(f"\n✗ Error: {e}", err=True)
+        raise typer.Exit(code=1)
+    
+    elapsed = time.time() - start_time
+    
+    # Results Summary
+    typer.echo("\n📊 RESULTS SUMMARY")
+    typer.echo("─" * 66)
+    typer.echo(f"  Run ID:        {result.run_id}")
+    typer.echo(f"  Provider:      {result.task.provider_code if result.task else 'N/A'}")
+    typer.echo(f"  Task Slug:     {result.task.task_slug if result.task else 'N/A'}")
+    typer.echo(f"  Total Time:    {elapsed:.2f}s")
+    typer.echo("")
+    
+    # Silver Model
+    typer.echo("  📦 Silver API Model:")
+    typer.echo(f"      Endpoints:      {len(result.endpoints)}")
+    typer.echo(f"      Schemas:        {len(result.schemas)}")
+    typer.echo(f"      Entities:       {len(result.entities)}")
+    if result.spec_documents:
+        typer.echo(f"      Spec Documents: {len(result.spec_documents)}")
+    typer.echo("")
+    
+    # Gold Model
+    typer.echo("  🏆 Gold Integration Model:")
+    typer.echo(f"      Workflow Nodes: {len(result.workflow_nodes)}")
+    typer.echo(f"      Workflow Edges: {len(result.workflow_edges)}")
+    typer.echo(f"      Bindings:       {len(result.endpoint_bindings)}")
+    typer.echo("")
+    
+    # Code Artifacts
+    typer.echo("  📝 Generated Artifacts:")
+    for artifact in result.code_artifacts:
+        size_kb = len(artifact.content) / 1024
+        typer.echo(f"      [{artifact.artifact_type:6}] {artifact.rel_path} ({size_kb:.1f}KB)")
+    typer.echo("")
+    
+    # Repo Changes (if applicable)
+    if result.repo_changes and result.repo_changes.changes:
+        typer.echo("  📁 Repo Changes:")
+        for change in result.repo_changes.changes:
+            icon = "+" if change.change_type == "create" else "~"
+            typer.echo(f"      {icon} {change.rel_path}")
+        typer.echo("")
+    
+    # Node Timings (extracted from report)
+    if result.report_markdown and "Node Timings" in result.report_markdown:
+        typer.echo("  ⏱️  Node Execution Times:")
+        typer.echo("  ┌─────────────────────────────────┬───────────┐")
+        typer.echo("  │ Node                            │ Time (ms) │")
+        typer.echo("  ├─────────────────────────────────┼───────────┤")
+        
+        # Parse timings from report
+        lines = result.report_markdown.split("\n")
+        in_timing_section = False
+        for line in lines:
+            if "Node Timings" in line:
+                in_timing_section = True
+                continue
+            if in_timing_section:
+                if line.startswith("- **"):
+                    # Parse "- **node_name**: 1.23 ms"
+                    parts = line.split("**")
+                    if len(parts) >= 3:
+                        node_name = parts[1].strip()
+                        time_part = parts[2].replace(":", "").strip()
+                        typer.echo(f"  │ {node_name:<31} │ {time_part:>9} │")
+                elif line.startswith("---") or line.startswith("#"):
+                    break
+        
+        typer.echo("  └─────────────────────────────────┴───────────┘")
+        typer.echo("")
+    
+    # LangSmith Link (if enabled)
+    langsmith_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    if langsmith_enabled:
+        project = os.getenv("LANGCHAIN_PROJECT", "default")
+        typer.echo("  🔗 LangSmith:")
+        typer.echo(f"      Project: {project}")
+        typer.echo(f"      URL: https://smith.langchain.com/o/default/projects/{project}")
+        typer.echo("")
+    
+    # Completed Steps
+    typer.echo("  ✅ Completed Steps:")
+    steps_per_line = 4
+    steps = result.completed_steps
+    for i in range(0, len(steps), steps_per_line):
+        chunk = steps[i:i+steps_per_line]
+        typer.echo(f"      {', '.join(chunk)}")
+    typer.echo("")
+    
+    # Errors/Warnings
+    if result.errors:
+        critical = [e for e in result.errors if "Warning:" not in e]
+        warnings = [e for e in result.errors if "Warning:" in e]
+        if critical:
+            typer.echo("  ❌ Errors:")
+            for e in critical[:3]:
+                typer.echo(f"      • {e[:60]}")
+        if warnings:
+            typer.echo("  ⚠️  Warnings:")
+            for w in warnings[:3]:
+                typer.echo(f"      • {w[:60]}")
+        typer.echo("")
+    
+    # Footer
+    typer.echo("─" * 66)
+    status_icon = "✅" if not result.errors or all("Warning:" in e for e in result.errors) else "⚠️"
+    typer.echo(f"{status_icon} Demo completed in {elapsed:.2f}s")
+    typer.echo("")
+    
+    # Next steps hint
+    typer.echo("📚 Next Steps:")
+    typer.echo("   • Run with --persist to save to database")
+    typer.echo("   • Run with --repo ./path to write files")
+    typer.echo("   • Run 'integration-coworker kg-dump' to inspect KG")
+    typer.echo("   • Run 'integration-coworker health' to check system status")
+    typer.echo("")
+
+
 @app.command("status")
 def show_status():
     """
@@ -404,6 +614,7 @@ def init_database():
 @app.command("health")
 def health_check(
     check_llm: bool = typer.Option(False, "--check-llm", help="Test LLM connectivity with actual API calls"),
+    perf_summary: bool = typer.Option(False, "--perf-summary", help="Include performance benchmark results"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed checks"),
 ):
@@ -418,6 +629,7 @@ def health_check(
     - Required Python packages
     
     Use --check-llm to make actual API calls to verify connectivity.
+    Use --perf-summary to run quick performance benchmarks.
     
     Returns exit code 0 if healthy, 1 if any critical check fails.
     
@@ -428,12 +640,17 @@ def health_check(
         # Test LLM connectivity with API calls
         integration-coworker health --check-llm
         
+        # Include performance benchmarks
+        integration-coworker health --perf-summary
+        
         # Detailed output
         integration-coworker health --verbose
         
         # JSON output for scripting
         integration-coworker health --json
     """
+    import time
+
     _setup_logging(verbose)
     reset_settings()
     settings = get_settings()
@@ -603,6 +820,77 @@ def health_check(
             "message": f"OpenAI: {llm_connectivity.get('openai', 'n/a')}, Anthropic: {llm_connectivity.get('anthropic', 'n/a')}",
         }
 
+    # 7. Performance Summary (optional)
+    perf_results = {}
+    if perf_summary:
+        import random
+        from integration_coworker.graph.state import WorkflowState
+        from integration_coworker.api.types import IntegrationOptions as PerfOptions
+        
+        # Test state creation
+        start = time.perf_counter()
+        for _ in range(100):
+            WorkflowState(
+                run_id="perf-test",
+                source_refs=["test.yaml"],
+                spec_refs=["test.yaml"],
+                task_description="Test",
+                options=PerfOptions(),
+                completed_steps=[],
+            )
+        state_time = (time.perf_counter() - start) * 10  # ms per creation
+        perf_results["state_creation_ms"] = round(state_time, 2)
+        
+        # Test cosine similarity
+        try:
+            from integration_coworker.retrieval.semantic_search import cosine_similarity
+            vec_a = [random.random() for _ in range(1536)]
+            vec_b = [random.random() for _ in range(1536)]
+            
+            start = time.perf_counter()
+            for _ in range(100):
+                cosine_similarity(vec_a, vec_b)
+            sim_time = (time.perf_counter() - start) * 10  # ms per computation
+            perf_results["cosine_similarity_ms"] = round(sim_time, 2)
+        except ImportError:
+            perf_results["cosine_similarity_ms"] = "n/a"
+        
+        # Test YAML parsing
+        try:
+            import yaml
+            sample_yaml = """
+openapi: "3.0.0"
+info:
+  title: Test API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: Success
+"""
+            start = time.perf_counter()
+            for _ in range(50):
+                yaml.safe_load(sample_yaml)
+            yaml_time = (time.perf_counter() - start) * 20  # ms per parse
+            perf_results["yaml_parse_ms"] = round(yaml_time, 2)
+        except ImportError:
+            perf_results["yaml_parse_ms"] = "n/a"
+        
+        # Determine perf status
+        all_fast = all(
+            isinstance(v, float) and v < 10.0 
+            for v in perf_results.values() 
+            if isinstance(v, (int, float))
+        )
+        checks["performance"] = {
+            "status": "ok" if all_fast else "warning",
+            "message": ", ".join(f"{k}={v}" for k, v in perf_results.items()),
+            "details": perf_results,
+        }
+
     # Determine overall status
     has_errors = any(c["status"] == "error" for c in checks.values())
     has_warnings = any(c["status"] == "warning" for c in checks.values())
@@ -613,6 +901,8 @@ def health_check(
             "checks": checks,
             "summary": "unhealthy" if has_errors else ("degraded" if has_warnings else "healthy"),
         }
+        if perf_summary and perf_results:
+            output["performance"] = perf_results
         typer.echo(json.dumps(output, indent=2))
     else:
         typer.echo("Integration Co-Worker Health Check")
@@ -896,6 +1186,80 @@ def kg_dump(
     except Exception as e:
         typer.echo(f"✗ Error querying KG: {e}", err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("ui")
+def launch_ui(
+    port: int = typer.Option(8501, "--port", "-p", help="Port to run Streamlit on"),
+    host: str = typer.Option("localhost", "--host", "-h", help="Host to bind to"),
+    browser: bool = typer.Option(True, "--browser/--no-browser", help="Open browser automatically"),
+):
+    """
+    Launch the Streamlit web UI for interactive integration design.
+    
+    Provides:
+    - Multi-panel interface (Inputs / Run View / Artifacts / Logs)
+    - Real-time run status and progress tracking
+    - Error capture with interactive recovery (Retry/Skip/Restart)
+    - Artifact browser with code highlighting
+    
+    Requires: pip install 'integration-coworker[ui]'
+    
+    Examples:
+        # Launch UI with default settings
+        integration-coworker ui
+        
+        # Launch on a specific port
+        integration-coworker ui --port 8080
+        
+        # Launch without opening browser
+        integration-coworker ui --no-browser
+        
+        # Bind to all interfaces (for Docker/remote)
+        integration-coworker ui --host 0.0.0.0
+    """
+    import subprocess
+    import sys
+    
+    # Check if streamlit is installed
+    try:
+        import streamlit
+    except ImportError:
+        typer.echo("✗ Error: Streamlit not installed.", err=True)
+        typer.echo("  Install with: pip install 'integration-coworker[ui]'", err=True)
+        raise typer.Exit(code=1)
+    
+    # Find the streamlit app module
+    ui_module = Path(__file__).parent / "ui" / "streamlit_app.py"
+    
+    if not ui_module.exists():
+        typer.echo(f"✗ Error: UI module not found at {ui_module}", err=True)
+        raise typer.Exit(code=1)
+    
+    typer.echo("🚀 Launching Integration Co-Worker UI...")
+    typer.echo(f"   URL: http://{host}:{port}")
+    typer.echo("")
+    typer.echo("   Press Ctrl+C to stop the server")
+    typer.echo("")
+    
+    # Build streamlit command
+    cmd = [
+        sys.executable, "-m", "streamlit", "run",
+        str(ui_module),
+        "--server.port", str(port),
+        "--server.address", host,
+    ]
+    
+    if not browser:
+        cmd.extend(["--server.headless", "true"])
+    
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"✗ Error launching UI: {e}", err=True)
+        raise typer.Exit(code=1)
+    except KeyboardInterrupt:
+        typer.echo("\n\n👋 UI server stopped.")
 
 
 @app.command("kg-query")

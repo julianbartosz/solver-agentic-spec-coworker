@@ -1,0 +1,65 @@
+{
+  "task": {
+    "task_slug": "create_checkout_session",
+    "provider_code": "mock_payments"
+  },
+  "endpoints_count": 4,
+  "endpoint_methods": [
+    "GET /v1/checkout/sessions/{id}",
+    "GET /v1/notifications/{id}",
+    "POST /v1/checkout/sessions",
+    "POST /v1/notifications"
+  ],
+  "schemas_count": 4,
+  "code_artifacts": [
+    {
+      "type": "client",
+      "module": "mock_payments",
+      "has_content": true
+    },
+    {
+      "type": "flow",
+      "module": "mock_payments_create_checkout_session",
+      "has_content": true
+    },
+    {
+      "type": "test",
+      "module": "test_mock_payments_create_checkout_session",
+      "has_content": true
+    }
+  ],
+  "workflow_nodes_count": 4,
+  "endpoint_bindings_count": 1,
+  "completed_steps": [
+    "align_task_with_kg",
+    "attach_policies_and_patterns",
+    "build_report",
+    "build_silver_api_model",
+    "detect_and_parse_spec",
+    "embed_spec_chunks",
+    "generate_code_and_tests",
+    "handle_error",
+    "ingest_spec",
+    "persist_gold_checkpoint",
+    "persist_kg_learning",
+    "persist_run_outcome",
+    "persist_silver_checkpoint",
+    "plan_integration_flow",
+    "plan_run",
+    "understand_task",
+    "validate_integration_design"
+  ],
+  "has_report": true,
+  "errors": [
+    "Warning: EndpointBinding for node 'call_api' has endpoint_id=None"
+  ],
+  "workflow_node_keys": [
+    "IntegrationFlowNode(id=None, task_id=None, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'API Call', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=3)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='start', node_type='start', label=None, description=None, config={'label': 'Start', 'description': ''}, endpoint_id=None, entity_id=None, position=0)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='validate_input', node_type='validation', label=None, description=None, config={'label': 'Validate Input', 'description': ''}, endpoint_id=None, entity_id=None, position=1)"
+  ],
+  "binding_endpoints": [
+    "None"
+  ]
+}
