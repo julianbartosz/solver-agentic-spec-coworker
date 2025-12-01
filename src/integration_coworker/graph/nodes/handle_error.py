@@ -20,7 +20,7 @@ def handle_error(state: WorkflowState) -> WorkflowState:
     """
     # Set failure flag
     state.plan["failed"] = True
-    
+
     # Mark as completed
     state.completed_steps.append("handle_error")
     return state

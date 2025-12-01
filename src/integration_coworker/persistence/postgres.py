@@ -57,13 +57,13 @@ def get_pool() -> "ConnectionPool":
     with SQLite's Row factory (which supports both index and column name access).
     """
     global _pool
-    
+
     if not HAS_PSYCOPG:
         raise ImportError(
             "psycopg and psycopg_pool are required for Postgres support. "
             "Install with: pip install 'psycopg[binary]' psycopg_pool"
         )
-    
+
     if _pool is None:
         settings = get_settings()
         _pool = ConnectionPool(
@@ -73,7 +73,7 @@ def get_pool() -> "ConnectionPool":
             timeout=1.0,  # Shorter timeout for faster cleanup
             # No row_factory - use default tuple rows for consistency with SQLite
         )
-    
+
     return _pool
 
 
@@ -537,7 +537,7 @@ def init_postgres_schema() -> None:
             cur.execute(REPO_META_DDL)
             cur.execute(KG_DDL)
         conn.commit()
-    
+
     logger.info("Postgres schema initialized successfully (including kg schema)")
 
 
@@ -554,7 +554,7 @@ def drop_all_schemas() -> None:
             cur.execute("DROP SCHEMA IF EXISTS integration_gold CASCADE")
             cur.execute("DROP SCHEMA IF EXISTS spec_silver CASCADE")
         conn.commit()
-    
+
     logger.warning("All schemas dropped (including kg)")
 
 

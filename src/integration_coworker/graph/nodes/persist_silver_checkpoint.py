@@ -21,14 +21,12 @@ Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
 from datetime import datetime, UTC
 import json
 import logging
-from typing import Optional
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
 from integration_coworker.persistence.sql_helpers import (
-    upsert_ignore, select_by_columns, get_engine_type, get_row_value
+    upsert_ignore, select_by_columns, get_engine_type
 )
-from integration_coworker.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +48,7 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
     Writes: persisted_ids (silver subset), backfills IDs in state objects
     """
     is_dry_run = state.options.dry_run if state.options else False
-    
+
     if is_dry_run:
         # Don't write to DB, just log what would be persisted
         state.persisted_ids.update({
@@ -67,51 +65,51 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
         })
         state.completed_steps.append("persist_silver_checkpoint")
         return state
-    
+
     try:
         # Initialize schema if needed
         db.init_schema()
         conn = db.get_connection()  # Uses Postgres or SQLite based on config
         cur = conn.cursor()
-        
+
         # Determine engine type for schema prefixes
         engine = get_engine_type()
         schema = SILVER_SCHEMA if engine == "postgres" else None
-        
+
         # 1. Upsert SourceSystem
         provider_code = state.provider_code or "unknown"
         sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], schema)
         cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
-        
+
         sql = select_by_columns("source_systems", ["id"], ["code"], schema)
         cur.execute(sql, (provider_code,))
         source_system_id = cur.fetchone()[0]
-        
+
         # Backfill into state.source_system if exists
         if state.source_system:
             state.source_system.id = source_system_id
-        
+
         # 2. Insert SpecDocuments
         spec_document_ids = {}
         for spec_doc in state.spec_documents:
             sql = upsert_ignore(
-                "spec_documents", 
+                "spec_documents",
                 ["source_system_id", "uri", "sha256", "content_type"],
                 ["source_system_id", "sha256"],
                 schema
             )
             cur.execute(sql, (source_system_id, spec_doc.uri, spec_doc.sha256, spec_doc.content_type))
-            
+
             sql = select_by_columns("spec_documents", ["id"], ["source_system_id", "sha256"], schema)
             cur.execute(sql, (source_system_id, spec_doc.sha256))
             spec_document_id = cur.fetchone()[0]
             spec_doc.id = spec_document_id
             spec_doc.source_system_id = source_system_id
             spec_document_ids[spec_doc.uri] = spec_document_id
-        
+
         # Use first spec_document_id as primary for backward compat
         primary_spec_document_id = state.spec_documents[0].id if state.spec_documents else None
-        
+
         # 3. Insert SpecSections
         for section in state.spec_sections:
             doc_id = section.spec_document_id or primary_spec_document_id
@@ -123,27 +121,27 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             )
             cur.execute(sql, (doc_id, section.section_type, section.title, section.path,
                  section.start_offset, section.end_offset, section.content))
-            
+
             # Backfill ID
             sql = select_by_columns("spec_sections", ["id"], ["spec_document_id", "section_type", "path"], schema)
             cur.execute(sql, (doc_id, section.section_type, section.path or ""))
             row = cur.fetchone()
             if row:
                 section.id = row[0]
-        
+
         # 4. Insert Schemas
         schema_ids_by_name = {}
         for schema_obj in state.schemas:
             sql = upsert_ignore("schemas", ["source_system_id", "name", "ref"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, schema_obj.name, schema_obj.ref))
-            
+
             sql = select_by_columns("schemas", ["id"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, schema_obj.name))
             schema_id = cur.fetchone()[0]
             schema_obj.id = schema_id
             schema_obj.source_system_id = source_system_id
             schema_ids_by_name[schema_obj.name] = schema_id
-        
+
         # 5. Insert SchemaFields
         for field in state.schema_fields:
             if field.schema_id is None and hasattr(field, 'schema_name'):
@@ -156,17 +154,17 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                     ["schema_id", "json_path"],
                     schema
                 )
-                cur.execute(sql, (field.schema_id, field.name, json_path, 
+                cur.execute(sql, (field.schema_id, field.name, json_path,
                      field.field_type or field.type, field.format,
                      1 if field.required else 0, field.description))
-        
+
         # 6. Insert Endpoints
         for endpoint in state.endpoints:
             # Determine spec_document_id from endpoint source URI
             doc_id = endpoint.spec_document_id or primary_spec_document_id
             if hasattr(endpoint, '_source_uri') and endpoint._source_uri:
                 doc_id = spec_document_ids.get(endpoint._source_uri, doc_id)
-            
+
             sql = upsert_ignore(
                 "endpoints",
                 ["source_system_id", "spec_document_id", "method", "path", "operation_id", "summary", "description"],
@@ -175,14 +173,14 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             )
             cur.execute(sql, (source_system_id, doc_id, endpoint.method, endpoint.path,
                  endpoint.operation_id, endpoint.summary, endpoint.description))
-            
+
             sql = select_by_columns("endpoints", ["id"], ["source_system_id", "spec_document_id", "method", "path"], schema)
             cur.execute(sql, (source_system_id, doc_id, endpoint.method, endpoint.path))
             endpoint_id = cur.fetchone()[0]
             endpoint.id = endpoint_id
             endpoint.source_system_id = source_system_id
             endpoint.spec_document_id = doc_id
-        
+
         # 7. Insert EndpointParameters
         endpoint_ids_by_key = {(e.method, e.path): e.id for e in state.endpoints}
         for param in state.endpoint_parameters:
@@ -197,20 +195,20 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                 )
                 cur.execute(sql, (param.endpoint_id, param.name, param.location,
                      1 if param.required else 0, param.schema_ref, param.description))
-        
+
         # 8. Insert Entities
         entity_ids_by_name = {}
         for entity in state.entities:
             sql = upsert_ignore("entities", ["source_system_id", "name", "description"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, entity.name, entity.description))
-            
+
             sql = select_by_columns("entities", ["id"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, entity.name))
             entity_id = cur.fetchone()[0]
             entity.id = entity_id
             entity.source_system_id = source_system_id
             entity_ids_by_name[entity.name] = entity_id
-        
+
         # 9. Insert EntityRelationships
         for rel in state.relationships:
             if rel.source_entity_id and rel.target_entity_id:
@@ -221,23 +219,23 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                     schema
                 )
                 cur.execute(sql, (source_system_id, rel.source_entity_id, rel.target_entity_id, rel.relationship_type))
-        
+
         # 10. Insert Events
         for event in state.events:
             sql = upsert_ignore("events", ["source_system_id", "name", "description"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, event.name, event.description))
-            
+
             sql = select_by_columns("events", ["id"], ["source_system_id", "name"], schema)
             cur.execute(sql, (source_system_id, event.name))
             event_id = cur.fetchone()[0]
             event.id = event_id
-        
+
         # 11. Insert SpecChunks with embeddings
         # Build URI -> spec_document_id mapping for multi-spec support
         chunk_to_uri = {}
         if state.plan and "chunk_index_to_spec_document_uri" in state.plan:
             chunk_to_uri = state.plan["chunk_index_to_spec_document_uri"]
-        
+
         for chunk in state.spec_chunk_embeddings:
             # Resolve spec_document_id
             doc_id = chunk.spec_document_id
@@ -248,11 +246,11 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                     doc_id = spec_document_ids.get(chunk_uri)
                 if doc_id is None:
                     doc_id = primary_spec_document_id
-            
+
             # Use full content if available, otherwise use preview
             content = getattr(chunk, '_full_content', chunk.content)
             embedding_json = json.dumps(chunk.embedding) if chunk.embedding else None
-            
+
             sql = upsert_ignore(
                 "spec_chunks",
                 ["spec_document_id", "chunk_index", "content", "embedding"],
@@ -260,17 +258,17 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                 schema
             )
             cur.execute(sql, (doc_id, chunk.chunk_index, content, embedding_json))
-            
+
             sql = select_by_columns("spec_chunks", ["id"], ["spec_document_id", "chunk_index"], schema)
             cur.execute(sql, (doc_id, chunk.chunk_index))
             row = cur.fetchone()
             if row:
                 chunk.id = row[0]
                 chunk.spec_document_id = doc_id
-        
+
         conn.commit()
         conn.close()
-        
+
         # Update persisted_ids
         state.persisted_ids.update({
             "silver_checkpoint": "completed",
@@ -284,11 +282,11 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             "spec_chunk_count": len(state.spec_chunk_embeddings),
             "silver_timestamp": datetime.now(UTC).isoformat(),
         })
-        
+
         state.completed_steps.append("persist_silver_checkpoint")
         logger.info(f"Silver checkpoint persisted: {len(state.endpoints)} endpoints, {len(state.schemas)} schemas, {len(state.spec_chunk_embeddings)} chunks")
         return state
-        
+
     except Exception as e:
         state.errors.append(f"Silver checkpoint failed: {str(e)}")
         state.persisted_ids.update({

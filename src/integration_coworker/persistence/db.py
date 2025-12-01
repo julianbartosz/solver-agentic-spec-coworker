@@ -11,9 +11,8 @@ The abstraction layer provides:
 - Support for pgvector VECTOR(1536) in Postgres mode
 """
 import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Union, Generator, Any, Protocol
+from typing import Any, Protocol
 import logging
 
 from ..config import get_settings
@@ -76,11 +75,11 @@ def get_connection() -> DBConnection:
     """
     settings = get_settings()
     engine = get_engine_type()
-    
+
     if engine == "sqlite":
         # USE_SQLITE=true explicitly requested
         return get_sqlite_connection()
-    
+
     if engine == "postgres":
         # Postgres is configured - must succeed or fail, no silent fallback
         try:
@@ -91,7 +90,7 @@ def get_connection() -> DBConnection:
                 f"Install with: pip install 'psycopg[binary]' psycopg_pool\n"
                 f"Or set USE_SQLITE=true for SQLite mode."
             ) from e
-        
+
         try:
             pool = get_pool()
             return pool.getconn()
@@ -102,7 +101,7 @@ def get_connection() -> DBConnection:
                 f"Ensure Postgres is running and DATABASE_URL is correct.\n"
                 f"Or set USE_SQLITE=true for SQLite mode."
             ) from e
-    
+
     # Should not reach here, but fail explicitly if we do
     raise RuntimeError(
         f"No database configured. Set DATABASE_URL for Postgres or USE_SQLITE=true for SQLite.\n"
@@ -123,7 +122,7 @@ def init_schema() -> None:
         RuntimeError: If Postgres is configured but dependencies are missing.
     """
     engine = get_engine_type()
-    
+
     if engine == "postgres":
         try:
             from .postgres import init_postgres_schema
@@ -133,10 +132,10 @@ def init_schema() -> None:
                 f"Install with: pip install 'psycopg[binary]' psycopg_pool\n"
                 f"Or set USE_SQLITE=true for SQLite mode."
             ) from e
-        
+
         init_postgres_schema()
         return
-    
+
     # SQLite schema (for tests and development)
     _init_sqlite_schema()
 
@@ -149,11 +148,11 @@ def _init_sqlite_schema() -> None:
     """
     conn = get_sqlite_connection()
     cur = conn.cursor()
-    
+
     # =========================================================================
     # spec_silver tables
     # =========================================================================
-    
+
     # Source systems (providers like stripe, mock_payments)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS source_systems (
@@ -163,7 +162,7 @@ def _init_sqlite_schema() -> None:
             base_url TEXT
         )
     """)
-    
+
     # Spec documents
     cur.execute("""
         CREATE TABLE IF NOT EXISTS spec_documents (
@@ -177,7 +176,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, sha256)
         )
     """)
-    
+
     # Spec sections (per design doc Appendix B.2)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS spec_sections (
@@ -192,7 +191,7 @@ def _init_sqlite_schema() -> None:
             FOREIGN KEY (spec_document_id) REFERENCES spec_documents(id)
         )
     """)
-    
+
     # Schemas (Silver layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS schemas (
@@ -205,7 +204,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, name)
         )
     """)
-    
+
     # Fields (per design doc Appendix B.2)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS fields (
@@ -221,7 +220,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(schema_id, json_path)
         )
     """)
-    
+
     # Entities (Silver layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS entities (
@@ -235,7 +234,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, name)
         )
     """)
-    
+
     # Entity relationships (per design doc Appendix B.2)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS entity_relationships (
@@ -251,7 +250,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, from_entity_id, to_entity_id, relationship_type)
         )
     """)
-    
+
     # Events (per design doc Appendix B.2)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -267,7 +266,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, name)
         )
     """)
-    
+
     # Endpoints (Silver layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS endpoints (
@@ -291,7 +290,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, spec_document_id, path, method)
         )
     """)
-    
+
     # Endpoint parameters (per design doc Appendix B.2)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS endpoint_parameters (
@@ -306,7 +305,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(endpoint_id, name, location)
         )
     """)
-    
+
     # Spec chunks with embeddings (SQLite stores as JSON text)
     # Per design doc Appendix B.2 - spec_chunks for RAG
     cur.execute("""
@@ -320,11 +319,11 @@ def _init_sqlite_schema() -> None:
             UNIQUE(spec_document_id, chunk_index)
         )
     """)
-    
+
     # =========================================================================
     # integration_gold tables
     # =========================================================================
-    
+
     # Integration tasks (Gold layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS integration_tasks (
@@ -342,7 +341,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(provider_code, task_slug)
         )
     """)
-    
+
     # Workflow templates (per design doc Appendix B.3)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS workflow_templates (
@@ -355,7 +354,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(source_system_id, code)
         )
     """)
-    
+
     # Integration flow nodes (Gold layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS integration_flow_nodes (
@@ -373,7 +372,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(task_id, node_key)
         )
     """)
-    
+
     # Integration flow edges (Gold layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS integration_flow_edges (
@@ -386,7 +385,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(task_id, from_node_key, to_node_key)
         )
     """)
-    
+
     # Endpoint bindings (Gold layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS endpoint_bindings (
@@ -401,7 +400,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(task_id, flow_node_key, endpoint_id)
         )
     """)
-    
+
     # Policies (per design doc Appendix B.3)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS policies (
@@ -415,7 +414,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(task_id, policy_type, scope, scope_ref)
         )
     """)
-    
+
     # Code artifacts (Gold layer)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS code_artifacts (
@@ -431,7 +430,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(task_id, rel_path, artifact_type)
         )
     """)
-    
+
     # Run status (per design doc Appendix B.3)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS run_status (
@@ -445,7 +444,7 @@ def _init_sqlite_schema() -> None:
             FOREIGN KEY (task_id) REFERENCES integration_tasks(id)
         )
     """)
-    
+
     # RAG eval metrics (per design doc Appendix B.3)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS rag_eval_metrics (
@@ -466,11 +465,11 @@ def _init_sqlite_schema() -> None:
             FOREIGN KEY (run_id) REFERENCES run_status(run_id)
         )
     """)
-    
+
     # =========================================================================
     # repo_meta tables
     # =========================================================================
-    
+
     # Integrations (per design doc Appendix B.4)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS repo_integrations (
@@ -487,7 +486,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(provider_code, task_slug, repo_name)
         )
     """)
-    
+
     # Repo files (per design doc Appendix B.4)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS repo_files (
@@ -504,11 +503,11 @@ def _init_sqlite_schema() -> None:
             UNIQUE(integration_id, rel_path, artifact_type)
         )
     """)
-    
+
     # =========================================================================
     # kg (Knowledge Graph) tables for GraphRAG
     # =========================================================================
-    
+
     # KG nodes (core graph nodes)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kg_nodes (
@@ -529,7 +528,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(node_type, key)
         )
     """)
-    
+
     # KG edges (relationships between nodes)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kg_edges (
@@ -546,7 +545,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(src_node_id, dst_node_id, relation_type)
         )
     """)
-    
+
     # KG workflow steps
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kg_workflow_steps (
@@ -563,7 +562,7 @@ def _init_sqlite_schema() -> None:
             UNIQUE(template_node_id, step_key)
         )
     """)
-    
+
     # KG step bindings
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kg_step_bindings (
@@ -580,10 +579,10 @@ def _init_sqlite_schema() -> None:
             UNIQUE(step_id, endpoint_node_id)
         )
     """)
-    
+
     conn.commit()
     conn.close()
-    
+
     logger.info("SQLite schema initialized successfully (including kg tables)")
 
 
@@ -598,7 +597,7 @@ def clear_test_data() -> None:
         RuntimeError: If Postgres is configured but dependencies are missing.
     """
     engine = get_engine_type()
-    
+
     if engine == "postgres":
         try:
             from .postgres import get_connection as pg_get_connection
@@ -608,7 +607,7 @@ def clear_test_data() -> None:
                 f"Install with: pip install 'psycopg[binary]' psycopg_pool\n"
                 f"Or set USE_SQLITE=true for SQLite mode."
             ) from e
-        
+
         with pg_get_connection() as conn:
             with conn.cursor() as cur:
                 # Delete in reverse dependency order
@@ -642,11 +641,11 @@ def clear_test_data() -> None:
                 cur.execute("DELETE FROM spec_silver.source_systems")
             conn.commit()
         return
-    
+
     # SQLite path
     conn = get_sqlite_connection()
     cur = conn.cursor()
-    
+
     # Delete in reverse dependency order
     # KG tables first
     cur.execute("DELETE FROM kg_step_bindings")
@@ -676,6 +675,6 @@ def clear_test_data() -> None:
     cur.execute("DELETE FROM spec_sections")
     cur.execute("DELETE FROM spec_documents")
     cur.execute("DELETE FROM source_systems")
-    
+
     conn.commit()
     conn.close()

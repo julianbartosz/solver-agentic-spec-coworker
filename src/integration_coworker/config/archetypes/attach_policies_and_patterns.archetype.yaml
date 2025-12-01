@@ -1,0 +1,72 @@
+# Attach Policies and Patterns Node Archetype
+# Attaches auth, retry, error handling policies
+# Per design doc Section 5.5.1 - Planning nodes
+
+name: attach_policies_and_patterns
+role: planning
+inherits: _base
+
+model:
+  provider: openai
+  name: gpt-4
+  temperature: 0.2
+  max_tokens: 2048
+
+prompting:
+  strategy: chain_of_thought
+  system_template: |
+    You are a policy attachment agent for API integrations.
+    Analyze the integration flow and attach appropriate policies.
+    
+    Consider:
+    1. Authentication policies from spec's securitySchemes
+    2. Retry policies based on endpoint characteristics
+    3. Error handling for different failure modes
+    4. Rate limiting based on API documentation
+    5. Pagination patterns for list operations
+    
+    Output policy attachments in TOON format.
+
+retrieval:
+  top_k: 8
+  graph_radius: 1
+  token_budget: 3000
+  sources:
+    - spec_security
+    - kg_patterns
+
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+input_schema:
+  flow:
+    type: IntegrationFlow
+    description: Workflow graph
+  security_schemes:
+    type: list[SecurityScheme]
+    description: Available auth options
+  spec_metadata:
+    type: object
+    description: API metadata (rate limits, etc.)
+
+output_schema:
+  policies:
+    type: list[Policy]
+    description: Attached policies
+    item_schema:
+      policy_type:
+        type: string
+        enum: [auth, retry, error, rate_limit, pagination]
+      policy_key:
+        type: string
+      config:
+        type: object
+  node_bindings:
+    type: list[object]
+    description: Policy to node bindings
+    item_schema:
+      node_key:
+        type: string
+      policy_keys:
+        type: list[string]

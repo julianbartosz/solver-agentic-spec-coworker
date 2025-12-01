@@ -80,6 +80,12 @@ class WorkflowState:
     errors: List[str] = field(default_factory=list)
     persisted_ids: Dict[str, Any] = field(default_factory=dict)
 
+    # LLM fallback tracking (for observability)
+    llm_fallbacks: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Node timing tracking (for observability - shows non-LLM nodes do work)
+    node_timings: Dict[str, float] = field(default_factory=dict)
+
     # Outputs
     report_markdown: Optional[str] = None
     run_id: Optional[str] = None

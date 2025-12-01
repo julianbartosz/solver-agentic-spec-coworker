@@ -177,3 +177,212 @@ pytest tests/test_end_to_end_integration.py -v
 | `EMBEDDING_MODEL` | No | Override embedding model |
 | `USE_MOCK_LLM` | No | Set to `true` for testing only |
 | `USE_SQLITE` | No | Set to `true` for SQLite fallback |
+| `LANGCHAIN_TRACING_V2` | No | Set to `true` for LangSmith tracing |
+| `LANGCHAIN_API_KEY` | No | LangSmith API key |
+| `LANGCHAIN_PROJECT` | No | LangSmith project name |
+
+## Observability with LangSmith
+
+Integration Co-Worker supports [LangSmith](https://smith.langchain.com/) for full observability of LangGraph workflow execution and LLM calls.
+
+### Setting Up LangSmith
+
+1. Create an account at [smith.langchain.com](https://smith.langchain.com/)
+
+2. Get your API key from Settings → API Keys
+
+3. Configure environment variables:
+
+```bash
+export LANGCHAIN_TRACING_V2="true"
+export LANGCHAIN_API_KEY="lsv2_pt_..."
+export LANGCHAIN_PROJECT="integration-coworker"  # Optional, defaults to "default"
+```
+
+### What's Traced
+
+With LangSmith enabled, you can see:
+
+- **Full workflow execution**: Each LangGraph node appears as a span
+- **LLM calls**: Prompts, responses, token counts, and latency
+- **Embeddings**: Vector embedding operations
+- **Node inputs/outputs**: The WorkflowState at each step
+- **Error traces**: Stack traces when nodes fail
+
+### Viewing Traces
+
+1. Run an integration:
+```bash
+python -m integration_coworker.cli demo --persist
+```
+
+2. Open [smith.langchain.com](https://smith.langchain.com/) → Projects → integration-coworker
+
+3. Click on the latest run to see the trace
+
+### Trace Features
+
+- **Timeline view**: See execution order and parallelism
+- **Token usage**: Track costs per run
+- **Feedback**: Mark runs as good/bad for evaluation
+- **Datasets**: Export runs for regression testing
+
+### Debugging with LangSmith
+
+Common debugging scenarios:
+
+1. **Slow runs**: Check the timeline to find bottleneck nodes
+2. **LLM failures**: View the exact prompt and response
+3. **Parsing errors**: See input/output at each node
+4. **Workflow routing**: Trace which edges were taken
+
+### Disabling LangSmith
+
+Unset the environment variables or set:
+```bash
+export LANGCHAIN_TRACING_V2="false"
+```
+
+## Advanced Troubleshooting
+
+### Health Check Command
+
+Run a quick health check before starting:
+
+```bash
+# Quick check
+python -m integration_coworker.cli health
+
+# Detailed output
+python -m integration_coworker.cli health --verbose
+
+# JSON for scripts/CI
+python -m integration_coworker.cli health --json
+```
+
+Expected output:
+```
+Integration Co-Worker Health Check
+========================================
+
+✓ Database
+   PostgreSQL connection successful
+
+✓ Pgvector
+   pgvector extension available
+
+✓ Llm
+   Configured with gpt-4
+
+✓ Packages
+   All 4 required packages installed
+
+✓ All health checks passed
+```
+
+### Verbose Logging
+
+Enable verbose debug logging to see internal execution:
+
+```bash
+# For the run command
+python -m integration_coworker.cli run \
+  -s ./spec.yaml \
+  -t "Create checkout" \
+  --verbose
+
+# For the demo command
+python -m integration_coworker.cli demo --verbose
+```
+
+This shows:
+- Workflow node entry/exit
+- LLM prompt summaries
+- Database operations
+- File system operations
+
+### Common Issues
+
+#### pgvector Not Installed
+
+```
+⚠ pgvector not found (run CREATE EXTENSION vector)
+```
+
+**Solution:**
+```bash
+# Connect to Postgres and run:
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+#### psycopg Not Installed
+
+```
+✗ psycopg not installed
+```
+
+**Solution:**
+```bash
+pip install 'psycopg[binary]' psycopg_pool
+```
+
+#### LLM Returning Empty Responses
+
+If you see:
+```
+WARNING - LLM returned empty response
+```
+
+**Possible causes:**
+1. API rate limits hit - wait and retry
+2. API key invalid - verify `OPENAI_API_KEY`
+3. Model not available - try a different `LLM_MODEL`
+
+#### Generated Code Fails Syntax Check
+
+```
+WARNING - LLM output failed AST syntax validation
+```
+
+**The system automatically falls back to template code.** This is a safety feature.
+
+To investigate:
+1. Enable verbose logging: `--verbose`
+2. Check LangSmith traces for the raw LLM output
+3. Consider using a more capable model like gpt-4
+
+#### Database Connection Timeout
+
+```
+✗ Failed to connect to PostgreSQL
+```
+
+**Solutions:**
+1. Verify Postgres is running: `pg_isready -h localhost -p 5432`
+2. Check connection string format: `postgresql://user:pass@host:port/db`
+3. Test connection: `psql $DATABASE_URL -c "SELECT 1"`
+
+#### Knowledge Graph Is Empty
+
+```
+⚠ KG is empty. Run an integration with --persist first.
+```
+
+**Solution:**
+Run an integration with persistence enabled:
+```bash
+python -m integration_coworker.cli demo --persist
+```
+
+Then query the KG:
+```bash
+python -m integration_coworker.cli kg-dump
+```
+
+### Getting Help
+
+1. **Check status**: `python -m integration_coworker.cli status`
+2. **Run health check**: `python -m integration_coworker.cli health`
+3. **Enable verbose mode**: Add `--verbose` to any command
+4. **View LangSmith traces**: Check the web UI for detailed execution info
+5. **Run tests**: `pytest tests/ -v` to verify setup

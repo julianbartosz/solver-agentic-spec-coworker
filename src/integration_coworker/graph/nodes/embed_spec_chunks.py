@@ -9,7 +9,6 @@ Falls back to deterministic fake embeddings for tests.
 
 Supports token-aware batching for large specs.
 """
-import os
 import logging
 from typing import Optional, List, Tuple
 
@@ -39,14 +38,14 @@ def _get_embedding_client():
     """Get LangChain OpenAIEmbeddings client if available and configured."""
     if not HAS_LANGCHAIN_OPENAI:
         return None
-    
+
     settings = get_settings()
     if not settings.llm.api_key or settings.llm.use_mock:
         return None
-    
+
     config = get_embedding_config()
     model = config.get("model", "text-embedding-3-small")
-    
+
     try:
         kwargs = {
             "api_key": settings.llm.api_key,
@@ -84,29 +83,29 @@ def _create_token_aware_batches(texts: List[str]) -> List[List[Tuple[int, str]]]
     batches = []
     current_batch = []
     current_tokens = 0
-    
+
     for idx, text in enumerate(texts):
         # Truncate text if needed
         truncated = text[:MAX_INPUT_CHARS]
         text_tokens = _estimate_tokens(truncated)
-        
+
         # Check if adding this text would exceed limits
         would_exceed_tokens = (current_tokens + text_tokens) > MAX_TOKENS_PER_REQUEST
         would_exceed_count = len(current_batch) >= MAX_BATCH_SIZE
-        
+
         if current_batch and (would_exceed_tokens or would_exceed_count):
             # Save current batch and start a new one
             batches.append(current_batch)
             current_batch = []
             current_tokens = 0
-        
+
         current_batch.append((idx, truncated))
         current_tokens += text_tokens
-    
+
     # Don't forget the last batch
     if current_batch:
         batches.append(current_batch)
-    
+
     return batches
 
 
@@ -121,38 +120,38 @@ def _batch_embed(client, texts: List[str]) -> List[Optional[List[float]]]:
     """
     # Initialize result array with None
     all_embeddings: List[Optional[List[float]]] = [None] * len(texts)
-    
+
     # Create token-aware batches
     batches = _create_token_aware_batches(texts)
     total_batches = len(batches)
-    
+
     # Get run context for logging
     run_id, provider_code = get_run_context()
-    
+
     logger.info(f"Embedding {len(texts)} chunks in {total_batches} batches (run_id={run_id})")
-    
+
     for batch_num, batch in enumerate(batches):
         # Extract just the texts for the API call
         batch_texts = [text for _, text in batch]
         batch_indices = [idx for idx, _ in batch]
-        
+
         try:
             # LangChain's embed_documents automatically handles LangSmith tracing
             embeddings = client.embed_documents(batch_texts)
-            
+
             # Map embeddings back to original indices
             for i, embedding in enumerate(embeddings):
                 original_idx = batch_indices[i]
                 all_embeddings[original_idx] = embedding
-            
+
             if (batch_num + 1) % 10 == 0 or batch_num == total_batches - 1:
                 embedded_count = sum(1 for e in all_embeddings if e is not None)
                 logger.info(f"Embedded {embedded_count}/{len(texts)} chunks (batch {batch_num + 1}/{total_batches})")
-                
+
         except Exception as e:
             logger.error(f"Batch {batch_num + 1}/{total_batches} failed: {e}")
             # Leave None values for failed batch - will use fake embeddings
-    
+
     return all_embeddings
 
 
@@ -192,13 +191,13 @@ def embed_spec_chunks(state: WorkflowState) -> WorkflowState:
     use_real = client is not None
 
     total_chunks = len(state.doc_chunks)
-    
+
     if use_real:
         logger.info(f"Using LangChain OpenAIEmbeddings with model {model} for {total_chunks} chunks")
-        
+
         # Use batched embedding for efficiency (auto-traced in LangSmith)
         embeddings = _batch_embed(client, state.doc_chunks)
-        
+
         for idx, chunk in enumerate(state.doc_chunks):
             chunk_uri = chunk_to_uri.get(idx)
             spec_document_id = uri_to_doc_id.get(chunk_uri) if chunk_uri else None
@@ -222,7 +221,7 @@ def embed_spec_chunks(state: WorkflowState) -> WorkflowState:
             state.spec_chunk_embeddings.append(chunk_embedding)
     else:
         logger.info(f"Using fake embeddings for {total_chunks} chunks (no OpenAI API key or USE_MOCK_LLM=true)")
-        
+
         for idx, chunk in enumerate(state.doc_chunks):
             chunk_uri = chunk_to_uri.get(idx)
             spec_document_id = uri_to_doc_id.get(chunk_uri) if chunk_uri else None

@@ -32,70 +32,6 @@ logger = logging.getLogger(__name__)
 # This should NOT be used on the demo path; it exists only for bootstrapping.
 # ---------------------------------------------------------------------------
 _LEGACY_WORKFLOW_TEMPLATES = {
-    # -------------------------------------------------------------------------
-    # Stripe Payment Intents Templates
-    # -------------------------------------------------------------------------
-    ("stripe", "create_payment_intent"): {
-        "template_id": "stripe_payment_intent_v1",
-        "name": "Stripe Create Payment Intent",
-        "description": "Standard flow for creating a Stripe PaymentIntent",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate amount, currency, and payment method types"},
-            {"key": "call_create_intent", "type": "api_call", "label": "Create PaymentIntent",
-             "description": "POST to /v1/payment_intents"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract id, client_secret, and status"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "confirm_payment_intent"): {
-        "template_id": "stripe_confirm_intent_v1",
-        "name": "Stripe Confirm Payment Intent",
-        "description": "Flow for confirming a PaymentIntent with payment method",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate payment_intent_id and payment_method"},
-            {"key": "call_confirm", "type": "api_call", "label": "Confirm PaymentIntent",
-             "description": "POST to /v1/payment_intents/{id}/confirm"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract status and next_action if required"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "get_payment_intent"): {
-        "template_id": "stripe_get_intent_v1",
-        "name": "Stripe Get Payment Intent",
-        "description": "Retrieve an existing PaymentIntent by ID",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Ensure payment_intent_id is provided"},
-            {"key": "call_get_intent", "type": "api_call", "label": "Get PaymentIntent",
-             "description": "GET /v1/payment_intents/{id}"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Return full PaymentIntent object"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "cancel_payment_intent"): {
-        "template_id": "stripe_cancel_intent_v1",
-        "name": "Stripe Cancel Payment Intent",
-        "description": "Cancel a PaymentIntent",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate payment_intent_id and cancellation_reason"},
-            {"key": "call_cancel", "type": "api_call", "label": "Cancel PaymentIntent",
-             "description": "POST to /v1/payment_intents/{id}/cancel"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Confirm cancellation status"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    # Legacy Stripe checkout template (kept for backwards compatibility)
     ("stripe", "create_checkout_session"): {
         "template_id": "stripe_checkout_v1",
         "name": "Stripe Checkout Session Creation",
@@ -111,9 +47,6 @@ _LEGACY_WORKFLOW_TEMPLATES = {
             {"key": "end", "type": "end", "label": "Return Result"},
         ],
     },
-    # -------------------------------------------------------------------------
-    # Mock Payments Templates
-    # -------------------------------------------------------------------------
     ("mock_payments", "create_checkout_session"): {
         "template_id": "mock_checkout_v1",
         "name": "Mock Payments Checkout Session",

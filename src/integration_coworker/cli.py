@@ -8,10 +8,13 @@ Supports:
 - Demo mode with pre-configured examples
 - Postgres persistence (set DATABASE_URL) or SQLite fallback (USE_SQLITE=true)
 - Real LLM calls (set OPENAI_API_KEY) or mock mode (USE_MOCK_LLM=true)
+- Verbose mode for debugging (--verbose or -v)
 """
 import typer
 import json
+import logging
 import os
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,6 +30,46 @@ except ImportError:
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.config import get_settings, reset_settings
+
+# Configure logging
+_logger = logging.getLogger("integration_coworker")
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """
+    Configure logging based on verbose flag.
+    
+    Args:
+        verbose: If True, enable DEBUG level logging with detailed format.
+                 If False, only WARNING and above.
+    """
+    level = logging.DEBUG if verbose else logging.WARNING
+
+    # Create handler with appropriate format
+    handler = logging.StreamHandler(sys.stderr)
+    if verbose:
+        formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S"
+        )
+    else:
+        formatter = logging.Formatter("%(levelname)s: %(message)s")
+
+    handler.setFormatter(formatter)
+
+    # Configure root logger for integration_coworker
+    root_logger = logging.getLogger("integration_coworker")
+    root_logger.handlers = []
+    root_logger.addHandler(handler)
+    root_logger.setLevel(level)
+
+    # Also configure langchain/langgraph loggers in verbose mode
+    if verbose:
+        for logger_name in ["langchain", "langgraph", "openai", "httpx"]:
+            lg = logging.getLogger(logger_name)
+            lg.setLevel(logging.INFO)
+            lg.addHandler(handler)
+
 
 app = typer.Typer(
     name="integration-coworker",
@@ -48,6 +91,7 @@ def run_integration(
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Run without persisting to database"),
     provider_code: Optional[str] = typer.Option(None, "--provider", "-p", help="Override provider code"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose debug logging"),
 ):
     """
     Run the integration design and code generation workflow.
@@ -61,7 +105,18 @@ def run_integration(
         
         # With repo integration
         integration-coworker run -s ./api.yaml -t "Add payment flow" -r ./my-project
+        
+        # With verbose debug logging
+        integration-coworker run -s ./api.yaml -t "Create payment" --verbose
     """
+    # Setup logging based on verbose flag
+    _setup_logging(verbose)
+
+    if verbose:
+        _logger.debug(f"Starting integration run with {len(spec_ref)} spec(s)")
+        _logger.debug(f"Task: {task}")
+        _logger.debug(f"Dry run: {dry_run}")
+
     options = IntegrationOptions(
         dry_run=dry_run,
         repo_integration_enabled=repo_root is not None,
@@ -86,7 +141,7 @@ def run_integration(
         else:
             typer.echo(f"✗ Error: {str(e)}", err=True)
         raise typer.Exit(code=1)
-    
+
     # Check for errors in the result
     has_errors = False
     if result.report_markdown and "## Errors" in result.report_markdown:
@@ -94,7 +149,7 @@ def run_integration(
         error_section = result.report_markdown.split("## Errors", 1)[1].split("##", 1)[0]
         if error_section.strip() and not error_section.strip().startswith("*(none)*"):
             has_errors = True
-    
+
     if json_output:
         # Output only valid JSON to stdout
         output = {
@@ -123,14 +178,14 @@ def run_integration(
             typer.echo(f"  Files created: {files_created}")
             typer.echo(f"  Files updated: {files_updated}")
             typer.echo(f"  Dry run: {'Yes' if options.dry_run else 'No'}")
-        
+
         if has_errors:
             typer.echo("\n⚠ Completed with errors - check report for details")
-        
+
         if result.report_markdown:
-            typer.echo(f"\n--- Full Report ---\n")
+            typer.echo("\n--- Full Report ---\n")
             typer.echo(result.report_markdown)
-    
+
     # Exit with non-zero code if there were errors
     if has_errors:
         raise typer.Exit(code=1)
@@ -140,6 +195,7 @@ def run_integration(
 def run_demo(
     dry_run: bool = typer.Option(True, "--dry-run/--persist", help="Run in dry-run mode (default: true)"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose debug logging"),
 ):
     """
     Run a demo integration with the built-in mock payments spec.
@@ -153,6 +209,9 @@ def run_demo(
         
         # Demo with database persistence
         integration-coworker demo --persist
+        
+        # With verbose logging
+        integration-coworker demo --verbose
     """
     # Find the mock spec in fixtures - try multiple locations
     possible_paths = [
@@ -163,23 +222,23 @@ def run_demo(
         # If installed as package (relative to module)
         Path(__file__).parent / "fixtures" / "mock_payments_openapi.yaml",
     ]
-    
+
     mock_spec = None
     for p in possible_paths:
         if p.exists():
             mock_spec = p.resolve()
             break
-    
+
     if not mock_spec:
         typer.echo("✗ Error: Demo spec not found. Run from project root or check installation.", err=True)
         typer.echo(f"   Looked in: {[str(p) for p in possible_paths]}", err=True)
         raise typer.Exit(code=1)
-    
+
     typer.echo("🚀 Running demo with mock payments API...")
     typer.echo(f"   Spec: {mock_spec}")
     typer.echo(f"   Mode: {'dry-run' if dry_run else 'persist to database'}")
     typer.echo("")
-    
+
     # Run the integration
     run_integration(
         spec_ref=[str(mock_spec.resolve())],
@@ -188,6 +247,7 @@ def run_demo(
         dry_run=dry_run,
         provider_code=None,
         json_output=json_output,
+        verbose=verbose,
     )
 
 
@@ -206,14 +266,14 @@ def show_status():
     reset_settings()
     settings = get_settings()
     warnings = settings.validate()
-    
+
     typer.echo("Integration Co-Worker Status")
     typer.echo("=" * 40)
-    
+
     # Database
     typer.echo("\n📦 Database:")
     if settings.database.use_sqlite:
-        typer.echo(f"   Engine: SQLite (test mode)")
+        typer.echo("   Engine: SQLite (test mode)")
         typer.echo(f"   Path: {settings.database.sqlite_path}")
     else:
         # Mask password in URL for display
@@ -224,9 +284,9 @@ def show_status():
             if ":" in user_pass:
                 user = user_pass.split(":")[0]
                 display_url = f"postgresql://{user}:***@{parts[1]}"
-        typer.echo(f"   Engine: PostgreSQL + pgvector")
+        typer.echo("   Engine: PostgreSQL + pgvector")
         typer.echo(f"   URL: {display_url}")
-        
+
         # Check Postgres connection and pgvector
         try:
             from integration_coworker.persistence.postgres import check_connection, check_pgvector
@@ -243,7 +303,7 @@ def show_status():
             typer.echo("   Install: pip install 'psycopg[binary]' psycopg_pool")
         except Exception as e:
             typer.echo(f"   Connection: ✗ Error: {str(e)[:50]}")
-    
+
     # LLM
     typer.echo("\n🤖 LLM:")
     if settings.llm.use_mock:
@@ -255,13 +315,13 @@ def show_status():
             typer.echo(f"   Base URL: {settings.llm.base_url}")
     else:
         typer.echo("   Mode: ⚠ Not configured (set OPENAI_API_KEY)")
-    
+
     # Embeddings
     typer.echo("\n📊 Embeddings:")
     typer.echo(f"   Model: {settings.embedding.model}")
     typer.echo(f"   Dimensions: {settings.embedding.dimensions}")
     typer.echo(f"   Batch Size: {settings.embedding.batch_size}")
-    
+
     # Warnings
     if warnings:
         typer.echo("\n⚠ Warnings:")
@@ -269,7 +329,7 @@ def show_status():
             typer.echo(f"   - {w}")
     else:
         typer.echo("\n✓ All systems configured for production use")
-    
+
     typer.echo("")
 
 
@@ -293,17 +353,17 @@ def init_database():
         USE_SQLITE=true integration-coworker init-db
     """
     from integration_coworker.persistence.db import init_schema, get_engine_type
-    
+
     # Reset settings to pick up fresh environment
     reset_settings()
     settings = get_settings()
     engine = get_engine_type()
-    
+
     typer.echo("Database Schema Initialization")
     typer.echo("=" * 40)
-    
+
     if engine == "sqlite":
-        typer.echo(f"Mode: SQLite")
+        typer.echo("Mode: SQLite")
         typer.echo(f"Path: {settings.database.sqlite_path}")
     else:
         display_url = settings.database.url
@@ -313,15 +373,15 @@ def init_database():
             if ":" in user_pass:
                 user = user_pass.split(":")[0]
                 display_url = f"postgresql://{user}:***@{parts[1]}"
-        typer.echo(f"Mode: PostgreSQL + pgvector")
+        typer.echo("Mode: PostgreSQL + pgvector")
         typer.echo(f"URL: {display_url}")
-    
+
     typer.echo("\nInitializing schema...")
-    
+
     try:
         init_schema()
         typer.echo("✓ Schema initialized successfully!")
-        
+
         # For Postgres, check pgvector
         if engine == "postgres":
             try:
@@ -332,12 +392,250 @@ def init_database():
                     typer.echo("⚠ pgvector not found. Run: CREATE EXTENSION IF NOT EXISTS vector;")
             except Exception as e:
                 typer.echo(f"⚠ Could not check pgvector: {e}")
-                
+
     except RuntimeError as e:
         typer.echo(f"✗ Error: {e}", err=True)
         raise typer.Exit(code=1)
     except Exception as e:
         typer.echo(f"✗ Unexpected error: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("health")
+def health_check(
+    check_llm: bool = typer.Option(False, "--check-llm", help="Test LLM connectivity with actual API calls"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed checks"),
+):
+    """
+    Run health checks on all system components.
+    
+    Validates:
+    - Database connection (Postgres or SQLite)
+    - pgvector extension (Postgres only)
+    - LLM configuration (API keys, archetypes)
+    - LangSmith tracing configuration
+    - Required Python packages
+    
+    Use --check-llm to make actual API calls to verify connectivity.
+    
+    Returns exit code 0 if healthy, 1 if any critical check fails.
+    
+    Examples:
+        # Quick health check
+        integration-coworker health
+        
+        # Test LLM connectivity with API calls
+        integration-coworker health --check-llm
+        
+        # Detailed output
+        integration-coworker health --verbose
+        
+        # JSON output for scripting
+        integration-coworker health --json
+    """
+    _setup_logging(verbose)
+    reset_settings()
+    settings = get_settings()
+
+    checks = {
+        "database": {"status": "unknown", "message": ""},
+        "pgvector": {"status": "unknown", "message": ""},
+        "llm": {"status": "unknown", "message": ""},
+        "langsmith": {"status": "unknown", "message": ""},
+        "archetypes": {"status": "unknown", "message": ""},
+        "packages": {"status": "unknown", "message": ""},
+    }
+
+    # 1. Database check
+    if settings.database.use_sqlite:
+        checks["database"]["status"] = "ok"
+        checks["database"]["message"] = f"SQLite at {settings.database.sqlite_path}"
+        checks["pgvector"]["status"] = "skip"
+        checks["pgvector"]["message"] = "Not applicable for SQLite"
+    else:
+        try:
+            from integration_coworker.persistence.postgres import check_connection, check_pgvector
+            if check_connection():
+                checks["database"]["status"] = "ok"
+                checks["database"]["message"] = "PostgreSQL connection successful"
+
+                if check_pgvector():
+                    checks["pgvector"]["status"] = "ok"
+                    checks["pgvector"]["message"] = "pgvector extension available"
+                else:
+                    checks["pgvector"]["status"] = "warning"
+                    checks["pgvector"]["message"] = "pgvector not installed (run CREATE EXTENSION vector)"
+            else:
+                checks["database"]["status"] = "error"
+                checks["database"]["message"] = "Failed to connect to PostgreSQL"
+                checks["pgvector"]["status"] = "skip"
+                checks["pgvector"]["message"] = "Skipped (database not connected)"
+        except ImportError:
+            checks["database"]["status"] = "error"
+            checks["database"]["message"] = "psycopg not installed"
+            checks["pgvector"]["status"] = "skip"
+            checks["pgvector"]["message"] = "Skipped (psycopg not installed)"
+        except Exception as e:
+            checks["database"]["status"] = "error"
+            checks["database"]["message"] = f"Error: {str(e)[:100]}"
+            checks["pgvector"]["status"] = "skip"
+            checks["pgvector"]["message"] = "Skipped (database error)"
+
+    # 2. LLM check (API keys)
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+
+    if settings.llm.use_mock:
+        checks["llm"]["status"] = "ok"
+        checks["llm"]["message"] = "Mock LLM mode (USE_MOCK_LLM=true)"
+    elif openai_key and anthropic_key:
+        checks["llm"]["status"] = "ok"
+        checks["llm"]["message"] = "Both OpenAI and Anthropic API keys configured"
+    elif openai_key:
+        checks["llm"]["status"] = "warning"
+        checks["llm"]["message"] = "Only OpenAI configured (ANTHROPIC_API_KEY missing)"
+    elif anthropic_key:
+        checks["llm"]["status"] = "warning"
+        checks["llm"]["message"] = "Only Anthropic configured (OPENAI_API_KEY missing)"
+    else:
+        checks["llm"]["status"] = "error"
+        checks["llm"]["message"] = "No LLM API keys set"
+
+    # 3. LangSmith check
+    tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    langchain_key = os.getenv("LANGCHAIN_API_KEY", "") or os.getenv("LANGSMITH_API_KEY", "")
+
+    if tracing_enabled and langchain_key:
+        checks["langsmith"]["status"] = "ok"
+        checks["langsmith"]["message"] = f"Enabled, project: {os.getenv('LANGCHAIN_PROJECT', 'default')}"
+    elif tracing_enabled:
+        checks["langsmith"]["status"] = "warning"
+        checks["langsmith"]["message"] = "LANGCHAIN_TRACING_V2=true but no API key"
+    else:
+        checks["langsmith"]["status"] = "skip"
+        checks["langsmith"]["message"] = "Tracing disabled (LANGCHAIN_TRACING_V2 not true)"
+
+    # 4. Archetypes check
+    try:
+        from integration_coworker.config import list_available_archetypes, load_archetype, reset_archetype_cache
+
+        reset_archetype_cache()
+        archetypes = list_available_archetypes()
+
+        # Check for provider/model mismatches
+        mismatches = []
+        for node_name in archetypes:
+            arch = load_archetype(node_name)
+            model_cfg = arch.get("model", {})
+            provider = model_cfg.get("provider", "openai")
+            model_name = model_cfg.get("name", "")
+
+            if provider == "anthropic" and model_name.startswith("gpt-"):
+                mismatches.append(f"{node_name}: anthropic+gpt-*")
+            elif provider == "openai" and model_name.startswith("claude-"):
+                mismatches.append(f"{node_name}: openai+claude-*")
+
+        if mismatches:
+            checks["archetypes"]["status"] = "error"
+            checks["archetypes"]["message"] = f"Provider/model mismatch: {', '.join(mismatches[:2])}"
+        else:
+            checks["archetypes"]["status"] = "ok"
+            checks["archetypes"]["message"] = f"{len(archetypes)} archetypes, all valid"
+    except Exception as e:
+        checks["archetypes"]["status"] = "error"
+        checks["archetypes"]["message"] = f"Error loading: {str(e)[:50]}"
+
+    # 5. Package check (including langchain-anthropic)
+    required_packages = [
+        ("typer", "typer"),
+        ("yaml", "pyyaml"),
+        ("langgraph", "langgraph"),
+        ("openai", "openai"),
+        ("langchain_anthropic", "langchain-anthropic"),
+    ]
+    missing = []
+    for import_name, package_name in required_packages:
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(package_name)
+
+    if missing:
+        checks["packages"]["status"] = "error"
+        checks["packages"]["message"] = f"Missing: {', '.join(missing)}"
+    else:
+        checks["packages"]["status"] = "ok"
+        checks["packages"]["message"] = f"All {len(required_packages)} required packages installed"
+
+    # 6. Optional: Test LLM connectivity with actual API calls
+    if check_llm:
+        llm_connectivity = {}
+
+        # Test OpenAI
+        if openai_key:
+            try:
+                from langchain_openai import ChatOpenAI
+                llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=10)
+                llm.invoke("Say 'OK'")
+                llm_connectivity["openai"] = "ok"
+            except Exception as e:
+                llm_connectivity["openai"] = f"error: {str(e)[:40]}"
+        else:
+            llm_connectivity["openai"] = "skipped (no key)"
+
+        # Test Anthropic
+        if anthropic_key:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                llm = ChatAnthropic(model="claude-sonnet-4-20250514", max_tokens=10)
+                llm.invoke("Say 'OK'")
+                llm_connectivity["anthropic"] = "ok"
+            except ImportError:
+                llm_connectivity["anthropic"] = "error: langchain-anthropic not installed"
+            except Exception as e:
+                llm_connectivity["anthropic"] = f"error: {str(e)[:40]}"
+        else:
+            llm_connectivity["anthropic"] = "skipped (no key)"
+
+        checks["llm_connectivity"] = {
+            "status": "ok" if all(v == "ok" for v in llm_connectivity.values() if not v.startswith("skipped")) else "error",
+            "message": f"OpenAI: {llm_connectivity.get('openai', 'n/a')}, Anthropic: {llm_connectivity.get('anthropic', 'n/a')}",
+        }
+
+    # Determine overall status
+    has_errors = any(c["status"] == "error" for c in checks.values())
+    has_warnings = any(c["status"] == "warning" for c in checks.values())
+
+    if json_output:
+        output = {
+            "healthy": not has_errors,
+            "checks": checks,
+            "summary": "unhealthy" if has_errors else ("degraded" if has_warnings else "healthy"),
+        }
+        typer.echo(json.dumps(output, indent=2))
+    else:
+        typer.echo("Integration Co-Worker Health Check")
+        typer.echo("=" * 40)
+
+        status_icons = {"ok": "✓", "warning": "⚠", "error": "✗", "skip": "○", "unknown": "?"}
+
+        for check_name, result in checks.items():
+            icon = status_icons.get(result["status"], "?")
+            typer.echo(f"\n{icon} {check_name.replace('_', ' ').title()}")
+            if verbose or result["status"] in ("error", "warning"):
+                typer.echo(f"   {result['message']}")
+
+        typer.echo("")
+        if has_errors:
+            typer.echo("✗ Health check FAILED - resolve errors before running")
+        elif has_warnings:
+            typer.echo("⚠ Health check passed with warnings")
+        else:
+            typer.echo("✓ All health checks passed")
+        typer.echo("")
+
+    if has_errors:
         raise typer.Exit(code=1)
 
 
@@ -391,30 +689,30 @@ def kg_dump(
         integration-coworker kg-dump --provider mock_payments --edges
     """
     from integration_coworker.persistence.db import get_connection, get_engine_type
-    
+
     reset_settings()
     engine = get_engine_type()
-    
+
     try:
         conn = get_connection()
         cur = conn.cursor()
-        
+
         # Build query for nodes
         where_clauses = []
         params = []
-        
+
         if provider:
             where_clauses.append("provider_code = ?")
             params.append(provider)
-        
+
         if node_type:
             where_clauses.append("node_type = ?")
             params.append(node_type)
-        
+
         where_sql = ""
         if where_clauses:
             where_sql = "WHERE " + " AND ".join(where_clauses)
-        
+
         # Query nodes
         node_query = f"""
             SELECT id, node_type, provider_code, key, name, description, usage_count
@@ -424,10 +722,10 @@ def kg_dump(
             LIMIT ?
         """
         params.append(limit)
-        
+
         cur.execute(node_query, params)
         nodes = cur.fetchall()
-        
+
         if json_output:
             # JSON output mode
             output = {
@@ -437,7 +735,7 @@ def kg_dump(
                 "edges": [],
                 "workflow_steps": [],
             }
-            
+
             for node in nodes:
                 node_id, n_type, n_provider, n_key, n_name, n_desc, usage = node
                 output["nodes"].append({
@@ -449,7 +747,7 @@ def kg_dump(
                     "description": n_desc,
                     "usage_count": usage,
                 })
-            
+
             if show_edges and nodes:
                 node_ids = [n[0] for n in nodes]
                 placeholders = ",".join("?" * len(node_ids))
@@ -463,7 +761,7 @@ def kg_dump(
                 """
                 cur.execute(edge_query, node_ids + node_ids)
                 edges = cur.fetchall()
-                
+
                 for edge in edges:
                     e_id, src_id, dst_id, rel_type, weight, src_key, dst_key = edge
                     output["edges"].append({
@@ -475,7 +773,7 @@ def kg_dump(
                         "src_key": src_key,
                         "dst_key": dst_key,
                     })
-            
+
             if show_steps:
                 template_ids = [n[0] for n in nodes if n[1] == "workflow_template"]
                 if template_ids:
@@ -488,7 +786,7 @@ def kg_dump(
                     """
                     cur.execute(steps_query, template_ids)
                     steps = cur.fetchall()
-                    
+
                     for step in steps:
                         s_id, tmpl_id, s_key, s_type, pos, label = step
                         output["workflow_steps"].append({
@@ -499,9 +797,9 @@ def kg_dump(
                             "position": pos,
                             "label": label,
                         })
-            
+
             typer.echo(json.dumps(output, indent=2))
-        
+
         else:
             # Human-readable output
             typer.echo("Knowledge Graph Contents")
@@ -512,25 +810,25 @@ def kg_dump(
             if node_type:
                 typer.echo(f"Type filter: {node_type}")
             typer.echo("")
-            
+
             if not nodes:
                 typer.echo("No nodes found. Run a successful integration to populate the KG.")
                 typer.echo("")
                 typer.echo("Hint: Run with --persist (not --dry-run) to write to KG:")
                 typer.echo("  integration-coworker demo --persist")
                 return
-            
+
             typer.echo(f"📊 Nodes ({len(nodes)} found):")
             typer.echo("-" * 60)
-            
+
             current_type = None
             for node in nodes:
                 node_id, n_type, n_provider, n_key, n_name, n_desc, usage = node
-                
+
                 if n_type != current_type:
                     current_type = n_type
                     typer.echo(f"\n  [{n_type.upper()}]")
-                
+
                 usage_str = f" (used {usage}x)" if usage and usage > 0 else ""
                 typer.echo(f"    • {n_key}{usage_str}")
                 if n_name and n_name != n_key:
@@ -538,12 +836,12 @@ def kg_dump(
                 if n_desc:
                     desc_short = n_desc[:60] + "..." if len(n_desc) > 60 else n_desc
                     typer.echo(f"      Desc: {desc_short}")
-            
+
             if show_edges and nodes:
                 typer.echo("")
                 typer.echo("🔗 Edges:")
                 typer.echo("-" * 60)
-                
+
                 node_ids = [n[0] for n in nodes]
                 placeholders = ",".join("?" * len(node_ids))
                 edge_query = f"""
@@ -556,21 +854,21 @@ def kg_dump(
                 """
                 cur.execute(edge_query, node_ids + node_ids)
                 edges = cur.fetchall()
-                
+
                 if edges:
                     for edge in edges:
                         rel_type, src_key, dst_key = edge
                         typer.echo(f"    {src_key} --[{rel_type}]--> {dst_key}")
                 else:
                     typer.echo("    No edges found.")
-            
+
             if show_steps:
                 template_ids = [n[0] for n in nodes if n[1] == "workflow_template"]
                 if template_ids:
                     typer.echo("")
                     typer.echo("📋 Workflow Steps:")
                     typer.echo("-" * 60)
-                    
+
                     placeholders = ",".join("?" * len(template_ids))
                     steps_query = f"""
                         SELECT n.key, s.step_key, s.step_type, s.position, s.label
@@ -581,20 +879,182 @@ def kg_dump(
                     """
                     cur.execute(steps_query, template_ids)
                     steps = cur.fetchall()
-                    
+
                     current_template = None
                     for step in steps:
                         tmpl_key, s_key, s_type, pos, label = step
-                        
+
                         if tmpl_key != current_template:
                             current_template = tmpl_key
                             typer.echo(f"\n  Template: {tmpl_key}")
-                        
+
                         label_str = f" ({label})" if label else ""
                         typer.echo(f"    {pos}. [{s_type}] {s_key}{label_str}")
-            
+
             typer.echo("")
+
+    except Exception as e:
+        typer.echo(f"✗ Error querying KG: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("kg-query")
+def kg_query(
+    entity: Optional[str] = typer.Option(None, "--entity", "-e", help="Find tasks related to this entity"),
+    endpoint: Optional[str] = typer.Option(None, "--endpoint", help="Find tasks using this endpoint"),
+    pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="Find tasks implementing this pattern"),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Optional: filter to specific provider"),
+    max_depth: int = typer.Option(3, "--depth", "-d", help="Maximum graph traversal depth"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Maximum results to return"),
+    show_path: bool = typer.Option(False, "--path", help="Show traversal path to each result"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Query the Knowledge Graph using graph traversal (BFS/DFS).
     
+    Finds related tasks by traversing graph relationships, NOT by
+    semantic/embedding similarity. Uses the actual graph structure.
+    
+    You can query by:
+    - Entity name (e.g., "Payment", "Customer")
+    - Endpoint path (e.g., "/checkout/sessions")
+    - Pattern key (e.g., "pattern.crud_create")
+    
+    Works without --provider flag - discovers across all providers.
+    
+    Examples:
+        # Find tasks related to Payment entity
+        integration-coworker kg-query --entity Payment
+        
+        # Find tasks using a specific endpoint
+        integration-coworker kg-query --endpoint /checkout/sessions
+        
+        # Find tasks implementing CRUD create pattern
+        integration-coworker kg-query --pattern pattern.crud_create
+        
+        # Filter to specific provider
+        integration-coworker kg-query --entity Payment --provider stripe
+        
+        # Show traversal paths
+        integration-coworker kg-query --entity Payment --path
+    """
+    from integration_coworker.kg import (
+        find_related_tasks_via_graph,
+        get_kg_node_count,
+    )
+
+    reset_settings()
+
+    # Require at least one query parameter
+    if not entity and not endpoint and not pattern:
+        typer.echo("✗ Error: Specify at least one of --entity, --endpoint, or --pattern", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        if json_output:
+            output = {
+                "query": {
+                    "entity": entity,
+                    "endpoint": endpoint,
+                    "pattern": pattern,
+                    "provider": provider,
+                    "max_depth": max_depth,
+                },
+                "results": [],
+                "kg_stats": {},
+            }
+        else:
+            typer.echo("Knowledge Graph Query (BFS/DFS Traversal)")
+            typer.echo("=" * 50)
+            if entity:
+                typer.echo(f"Entity: {entity}")
+            if endpoint:
+                typer.echo(f"Endpoint: {endpoint}")
+            if pattern:
+                typer.echo(f"Pattern: {pattern}")
+            if provider:
+                typer.echo(f"Provider filter: {provider}")
+            typer.echo(f"Max depth: {max_depth}")
+            typer.echo("")
+
+        # Get KG stats
+        kg_stats = get_kg_node_count()
+
+        if json_output:
+            output["kg_stats"] = kg_stats
+        else:
+            if kg_stats:
+                typer.echo(f"📊 KG contains: {sum(kg_stats.values())} nodes")
+                typer.echo(f"   Types: {', '.join(f'{t}={c}' for t, c in kg_stats.items())}")
+            else:
+                typer.echo("⚠ KG is empty. Run an integration with --persist first.")
+                return
+            typer.echo("")
+
+        # Run the query
+        matches = find_related_tasks_via_graph(
+            entity_name=entity,
+            endpoint_path=endpoint,
+            pattern_key=pattern,
+            provider_code=provider,
+            max_depth=max_depth,
+            top_k=limit,
+        )
+
+        if json_output:
+            for match in matches:
+                output["results"].append({
+                    "task_key": match.task_key,
+                    "task_description": match.task_description,
+                    "provider_code": match.provider_code,
+                    "graph_distance": match.graph_distance,
+                    "path": match.path if show_path else None,
+                    "relation_types": match.relation_types if show_path else None,
+                    "associated_templates": match.associated_templates,
+                })
+            typer.echo(json.dumps(output, indent=2))
+
+        else:
+            if not matches:
+                typer.echo("No related tasks found.")
+                typer.echo("")
+                typer.echo("Hints:")
+                typer.echo("  • Check that your entity/endpoint/pattern exists in the KG")
+                typer.echo("  • Try increasing --depth for deeper traversal")
+                typer.echo("  • Run 'integration-coworker kg-dump' to see what's in the KG")
+            else:
+                typer.echo(f"🔍 Found {len(matches)} related tasks:")
+                typer.echo("-" * 50)
+
+                for i, match in enumerate(matches, 1):
+                    distance_str = f"({match.graph_distance} hop{'s' if match.graph_distance > 1 else ''})"
+                    typer.echo(f"\n  {i}. {match.task_key} {distance_str}")
+                    if match.provider_code:
+                        typer.echo(f"     Provider: {match.provider_code}")
+                    if match.task_description:
+                        desc_short = match.task_description[:60] + "..." if len(match.task_description) > 60 else match.task_description
+                        typer.echo(f"     Description: {desc_short}")
+                    if match.associated_templates:
+                        typer.echo(f"     Templates: {', '.join(match.associated_templates[:3])}")
+
+                    if show_path and match.path:
+                        typer.echo(f"     Path: {' → '.join(match.path)}")
+                        if match.relation_types:
+                            typer.echo(f"     Via: {' → '.join(match.relation_types)}")
+
+                typer.echo("")
+
+                # Show cross-provider summary if querying by pattern
+                if pattern:
+                    typer.echo("📋 Cross-Provider Summary:")
+                    providers = {}
+                    for m in matches:
+                        p = m.provider_code or "unknown"
+                        providers[p] = providers.get(p, 0) + 1
+                    for p, count in sorted(providers.items(), key=lambda x: -x[1]):
+                        typer.echo(f"   • {p}: {count} task(s)")
+                    typer.echo("")
+
     except Exception as e:
         typer.echo(f"✗ Error querying KG: {e}", err=True)
         raise typer.Exit(code=1)

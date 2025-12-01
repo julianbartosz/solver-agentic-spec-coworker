@@ -5,7 +5,7 @@ Derives paths and import statements based on RepoProfile layout_hints
 rather than hardcoded assumptions.
 """
 import re
-from typing import Dict, Any, Optional, Tuple
+from typing import Optional, Tuple
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.repo.models import RepoProfile
@@ -22,20 +22,20 @@ def path_to_module(path: str) -> str:
     """
     if not path:
         return ""
-    
+
     # Normalize separators
     path = path.replace("\\", "/")
-    
+
     # Remove .py extension
     if path.endswith(".py"):
         path = path[:-3]
-    
+
     # Replace slashes with dots
     module = path.replace("/", ".")
-    
+
     # Remove leading/trailing dots
     module = module.strip(".")
-    
+
     return module
 
 
@@ -69,14 +69,14 @@ def get_layout_dirs(repo_profile: Optional[RepoProfile]) -> Tuple[str, str, str]
             "src/integrations/flows",
             "tests/integrations",
         )
-    
+
     hints = repo_profile.layout_hints
-    
+
     # Note: profile might use "workflows_dir" or "flows_dir"
     clients_dir = hints.get("clients_dir", "src/integrations/clients")
     flows_dir = hints.get("workflows_dir", hints.get("flows_dir", "src/integrations/flows"))
     tests_dir = hints.get("tests_dir", "tests/integrations")
-    
+
     return (clients_dir, flows_dir, tests_dir)
 
 
@@ -97,15 +97,15 @@ def compute_import_path(
         Import module path (e.g., "integrations.clients.stripe" or "..clients.stripe")
     """
     target_module = path_to_module(target_file_path)
-    
+
     if not use_relative:
         # For absolute imports, strip src/ prefix since PYTHONPATH usually includes src
         return path_to_module(strip_src_prefix(target_file_path))
-    
+
     # For relative imports, compute relative path
     from_parts = strip_src_prefix(from_file_dir).split("/")
     target_parts = path_to_module(strip_src_prefix(target_file_path)).split(".")
-    
+
     # Find common prefix
     common_len = 0
     for i, (a, b) in enumerate(zip(from_parts, target_parts)):
@@ -113,11 +113,11 @@ def compute_import_path(
             common_len = i + 1
         else:
             break
-    
+
     # Calculate dots needed to go up from from_dir
     ups = len(from_parts) - common_len
     relative_prefix = "." * (ups + 1) if ups > 0 else "."
-    
+
     # Add remaining target path
     remaining = target_parts[common_len:]
     if remaining:
@@ -143,7 +143,7 @@ def derive_base_url(state: WorkflowState) -> str:
     # Strategy 1: Use source_system.base_url if available
     if state.source_system and state.source_system.base_url:
         return state.source_system.base_url
-    
+
     # Strategy 2: Check OpenAPI spec servers
     if state.openapi_spec:
         servers = state.openapi_spec.get("servers", [])
@@ -155,7 +155,7 @@ def derive_base_url(state: WorkflowState) -> str:
                 if url.startswith("/"):
                     return f"https://api.example.com{url}"
                 return url
-    
+
     # Strategy 3: Try to construct from spec info
     if state.openapi_spec:
         info = state.openapi_spec.get("info", {})
@@ -164,11 +164,11 @@ def derive_base_url(state: WorkflowState) -> str:
             # Create a reasonable placeholder based on API name
             slug = re.sub(r'[^a-zA-Z0-9]+', '', title.lower())
             return f"https://api.{slug}.com"
-    
+
     # Strategy 4: Use provider code
     if state.provider_code:
         provider = re.sub(r'[^a-zA-Z0-9]+', '', state.provider_code.lower())
         return f"https://api.{provider}.com"
-    
+
     # Final fallback
     return "https://api.example.com"

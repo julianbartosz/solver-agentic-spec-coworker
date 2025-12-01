@@ -35,7 +35,7 @@ def upsert_block_between_markers(
     # Check if markers already exist
     pattern = rf"({re.escape(start_marker)}.*?{re.escape(end_marker)})"
     match = re.search(pattern, original, re.DOTALL)
-    
+
     if match:
         # Replace existing block
         replacement = f"{start_marker}\n{new_block}\n{end_marker}"
@@ -70,12 +70,12 @@ def generate_router_block(
     # Use flow_module_name if provided, otherwise use integration_slug
     module_to_import = flow_module_name or integration_slug
     full_module = f"{flows_module}.{module_to_import}"
-    
+
     lines = [
         f"from {full_module} import {integration_slug}_flow as flow_module",
         "",
         "router.include_router(",
-        f"    flow_module.router if hasattr(flow_module, 'router') else APIRouter(),",
+        "    flow_module.router if hasattr(flow_module, 'router') else APIRouter(),",
         f'    prefix="/integrations/{provider_code}/{integration_slug}",',
         f'    tags=["{provider_code}"],',
         ")",
@@ -98,7 +98,7 @@ def generate_settings_block(provider_code: str, base_url: Optional[str] = None) 
     """
     if base_url is None:
         base_url = f"https://api.{provider_code}.com"
-    
+
     lines = [
         f'INTEGRATIONS["{provider_code}"] = ProviderSettings(',
         f'    api_base_url="{base_url}",',

@@ -9,7 +9,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
     Writes: persisted_ids, run status summary, backfills IDs in state objects
     """
     is_dry_run = state.options.dry_run if state.options else False
-    
+
     if is_dry_run:
         # Don't write to DB, just log what would be persisted
         summary = {
@@ -35,7 +35,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             db.init_schema()
             conn = db.get_connection()
             cur = conn.cursor()
-            
+
             # 1. Upsert SourceSystem
             provider_code = state.provider_code or "unknown"
             cur.execute(
@@ -44,7 +44,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             )
             cur.execute("SELECT id FROM source_systems WHERE code = ?", (provider_code,))
             source_system_id = cur.fetchone()[0]
-            
+
             # 2. Insert SpecDocument
             spec_document_id = None
             if state.spec_documents:
@@ -59,7 +59,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 )
                 spec_document_id = cur.fetchone()[0]
                 state.spec_documents[0].id = spec_document_id
-            
+
             # 3. Insert Schemas (needed for endpoint FK)
             schema_ids_by_name = {}
             for schema in state.schemas:
@@ -74,7 +74,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 schema_id = cur.fetchone()[0]
                 schema.id = schema_id
                 schema_ids_by_name[schema.name] = schema_id
-            
+
             # 4. Insert Endpoints
             endpoint_ids_by_key = {}
             for endpoint in state.endpoints:
@@ -91,19 +91,19 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 # Create lookup key for bindings
                 key = (endpoint.method, endpoint.path, endpoint.operation_id)
                 endpoint_ids_by_key[key] = endpoint_id
-            
+
             # P1.3: Link request/response schema IDs for endpoints
             for endpoint in state.endpoints:
                 # Check for temporary schema name attributes set by build_silver_api_model
                 req_schema_id = None
                 resp_schema_id = None
-                
+
                 if hasattr(endpoint, '_request_schema_name') and endpoint._request_schema_name:
                     req_schema_id = schema_ids_by_name.get(endpoint._request_schema_name)
-                
+
                 if hasattr(endpoint, '_response_schema_name') and endpoint._response_schema_name:
                     resp_schema_id = schema_ids_by_name.get(endpoint._response_schema_name)
-                
+
                 # Update endpoint record if we have schema IDs to link
                 if req_schema_id is not None or resp_schema_id is not None:
                     cur.execute(
@@ -113,7 +113,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                     # Backfill into state
                     endpoint.request_schema_id = req_schema_id
                     endpoint.response_schema_id = resp_schema_id
-            
+
             # 5. Insert Entities
             for entity in state.entities:
                 schema_id = schema_ids_by_name.get(entity.name)  # Link by name if exists
@@ -126,7 +126,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                     (source_system_id, entity.name)
                 )
                 entity.id = cur.fetchone()[0]
-            
+
             # 6. Insert IntegrationTask
             task_id = None
             if state.integration_task:
@@ -143,7 +143,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 task.id = task_id
                 task.source_system_id = source_system_id
                 task.target_spec_document_id = spec_document_id
-            
+
             # 7. Insert FlowNodes
             for node in state.workflow_nodes:
                 cur.execute(
@@ -156,7 +156,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 )
                 node.id = cur.fetchone()[0]
                 node.task_id = task_id
-            
+
             # 8. Insert FlowEdges
             for edge in state.workflow_edges:
                 cur.execute(
@@ -166,7 +166,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 cur.execute("SELECT last_insert_rowid()")
                 edge.id = cur.fetchone()[0]
                 edge.task_id = task_id
-            
+
             # 9. Insert EndpointBindings and backfill endpoint_id
             for binding in state.endpoint_bindings:
                 # Try to match endpoint by operation_id or method/path
@@ -177,11 +177,11 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                         op = target_ops[0]
                         key = (op.get("method"), op.get("path"), op.get("operation_id"))
                         endpoint_id = endpoint_ids_by_key.get(key)
-                
+
                 # Serialize mappings to JSON
                 request_json = json.dumps(binding.request_mapping or {})
                 response_json = json.dumps(binding.response_mapping or {})
-                
+
                 cur.execute(
                     "INSERT OR IGNORE INTO endpoint_bindings (task_id, flow_node_key, endpoint_id, request_mapping_json, response_mapping_json) VALUES (?, ?, ?, ?, ?)",
                     (task_id, binding.flow_node_key, endpoint_id, request_json, response_json)
@@ -194,10 +194,10 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 binding.id = row[0]
                 binding.task_id = task_id
                 binding.endpoint_id = row[1]  # Backfill from DB
-            
+
             conn.commit()
             conn.close()
-            
+
             # Store summary
             state.persisted_ids = {
                 "source_system_id": source_system_id,
@@ -209,7 +209,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 "error_count": len(state.errors),
                 "timestamp": datetime.now(UTC).isoformat(),
             }
-            
+
         except Exception as e:
             state.errors.append(f"Persistence failed: {str(e)}")
             state.persisted_ids = {
@@ -217,6 +217,6 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 "error": str(e),
                 "timestamp": datetime.now(UTC).isoformat(),
             }
-    
+
     state.completed_steps.append("persist_results")
     return state

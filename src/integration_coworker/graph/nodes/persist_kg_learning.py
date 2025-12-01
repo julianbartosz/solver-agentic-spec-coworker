@@ -18,7 +18,6 @@ KG Schema:
 """
 import json
 import logging
-from datetime import datetime, UTC
 from typing import Optional, List, Dict, Any
 
 from integration_coworker.graph.state import WorkflowState
@@ -35,7 +34,7 @@ def _compute_embedding(text: str) -> Optional[List[float]]:
     if not settings.llm.api_key or settings.llm.use_mock:
         logger.debug("Embedding computation skipped: mock LLM or no API key")
         return None
-    
+
     try:
         from openai import OpenAI
         client = OpenAI(api_key=settings.llm.api_key)
@@ -68,7 +67,7 @@ def _upsert_kg_node(
     """Upsert a KG node and return its ID."""
     props_json = json.dumps(properties or {})
     embedding_val = json.dumps(embedding) if embedding and not is_postgres else embedding
-    
+
     if is_postgres:
         # Postgres with pgvector
         if embedding:
@@ -133,7 +132,7 @@ def _upsert_kg_edge(
 ) -> int:
     """Upsert a KG edge and return its ID."""
     props_json = json.dumps(properties or {})
-    
+
     if is_postgres:
         cur.execute("""
             INSERT INTO kg.edges (src_node_id, dst_node_id, relation_type, weight, properties, source_run_id)
@@ -174,7 +173,7 @@ def _upsert_workflow_step(
 ) -> int:
     """Upsert a workflow step and return its ID."""
     config_json = json.dumps(config or {})
-    
+
     if is_postgres:
         cur.execute("""
             INSERT INTO kg.workflow_steps (template_node_id, step_key, step_type, position, label, description, config)
@@ -221,9 +220,9 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
     Writes: kg.nodes, kg.edges, kg.workflow_steps
     """
     global _logged_embedding_warning
-    
+
     is_dry_run = state.options.dry_run if state.options else False
-    
+
     if is_dry_run:
         logger.info("persist_kg_learning: Dry run - skipping KG writes")
         state.persisted_ids.update({
@@ -236,12 +235,12 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
         })
         state.completed_steps.append("persist_kg_learning")
         return state
-    
+
     if not state.provider_code:
         logger.warning("No provider_code, skipping KG learning")
         state.completed_steps.append("persist_kg_learning")
         return state
-    
+
     # Log embedding availability once per run
     settings = get_settings()
     embeddings_available = bool(settings.llm.api_key and not settings.llm.use_mock)
@@ -253,18 +252,18 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
         _logged_embedding_warning = True
     elif embeddings_available:
         logger.debug("persist_kg_learning: Embeddings available for KG nodes")
-    
+
     try:
         db.init_schema()
         conn = db.get_connection()
         is_postgres = db.get_engine_type() == "postgres"
         cur = conn.cursor()
-        
+
         provider_code = state.provider_code
         run_id = state.run_id
         task_slug = state.integration_task.task_slug if state.integration_task else None
         task_description = state.integration_task.description if state.integration_task else state.task_description
-        
+
         # =====================================================================
         # 1. Create/upsert provider node
         # =====================================================================
@@ -279,7 +278,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
             run_id=run_id,
             is_postgres=is_postgres,
         )
-        
+
         # =====================================================================
         # 2. Create/upsert task node (the current integration task)
         # =====================================================================
@@ -288,7 +287,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
             task_key = f"task.{provider_code}.{task_slug}"
             # Compute embedding for task description for semantic search
             task_embedding = _compute_embedding(task_description) if task_description else None
-            
+
             task_node_id = _upsert_kg_node(
                 cur,
                 node_type=KGNodeType.TASK.value,
@@ -300,7 +299,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 run_id=run_id,
                 is_postgres=is_postgres,
             )
-            
+
             # Edge: task → provider
             _upsert_kg_edge(
                 cur,
@@ -310,7 +309,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 run_id=run_id,
                 is_postgres=is_postgres,
             )
-        
+
         # =====================================================================
         # 3. Create/upsert workflow template node (from the workflow_nodes)
         # =====================================================================
@@ -332,11 +331,11 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 "node_count": len(state.workflow_nodes),
                 "edge_count": len(state.workflow_edges) if state.workflow_edges else 0,
             }
-            
+
             # Create a compact description for embedding
             template_desc = f"Workflow template for {task_slug}: {task_description or ''}"
             template_embedding = _compute_embedding(template_desc)
-            
+
             template_node_id = _upsert_kg_node(
                 cur,
                 node_type=KGNodeType.WORKFLOW_TEMPLATE.value,
@@ -349,7 +348,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 run_id=run_id,
                 is_postgres=is_postgres,
             )
-            
+
             # Edge: task → template (task uses this template)
             if task_node_id:
                 _upsert_kg_edge(
@@ -360,7 +359,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                     run_id=run_id,
                     is_postgres=is_postgres,
                 )
-            
+
             # =====================================================================
             # 4. Create workflow steps in kg.workflow_steps
             # =====================================================================
@@ -376,7 +375,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                     config=wf_node.config,
                     is_postgres=is_postgres,
                 )
-        
+
         # =====================================================================
         # 5. Create entity nodes and edges
         # =====================================================================
@@ -394,7 +393,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 is_postgres=is_postgres,
             )
             entity_node_ids[entity.name] = entity_node_id
-            
+
             # Edge: entity → provider
             _upsert_kg_edge(
                 cur,
@@ -404,7 +403,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 run_id=run_id,
                 is_postgres=is_postgres,
             )
-        
+
         # Create edges for task → entities (if we know input/output entities)
         if task_node_id and state.integration_task:
             # Output entities
@@ -419,7 +418,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                         run_id=run_id,
                         is_postgres=is_postgres,
                     )
-            
+
             # Input entities
             input_entities = state.integration_task.input_entities or []
             for entity_name in input_entities:
@@ -432,7 +431,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                         run_id=run_id,
                         is_postgres=is_postgres,
                     )
-        
+
         # =====================================================================
         # 6. Create endpoint nodes and edges
         # =====================================================================
@@ -455,7 +454,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 is_postgres=is_postgres,
             )
             endpoint_node_ids[f"{endpoint.method}:{endpoint.path}"] = endpoint_node_id
-            
+
             # Edge: endpoint → provider
             _upsert_kg_edge(
                 cur,
@@ -465,7 +464,7 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                 run_id=run_id,
                 is_postgres=is_postgres,
             )
-        
+
         # Create edges: template → endpoints (for api_call steps)
         if template_node_id and state.endpoint_bindings:
             for binding in state.endpoint_bindings:
@@ -486,9 +485,9 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                                     is_postgres=is_postgres,
                                 )
                             break
-        
+
         conn.commit()
-        
+
         # Update persisted_ids with KG info
         state.persisted_ids.update({
             "kg_learning": "completed",
@@ -496,15 +495,15 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
             "kg_template_node_id": template_node_id,
             "kg_task_node_id": task_node_id,
         })
-        
+
         logger.info(f"KG learning complete: {len(entity_node_ids)} entities, {len(endpoint_node_ids)} endpoints, template={template_node_id}")
-        
+
         state.completed_steps.append("persist_kg_learning")
-        
+
     except Exception as e:
         logger.error(f"KG learning failed: {e}")
         state.errors.append(f"KG learning failed: {str(e)}")
         state.persisted_ids.update({"kg_learning": "failed", "kg_error": str(e)})
         state.completed_steps.append("persist_kg_learning")
-    
+
     return state

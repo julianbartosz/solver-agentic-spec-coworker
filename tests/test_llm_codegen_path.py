@@ -7,10 +7,11 @@ Uses a recognizable sentinel to verify the LLM-generated code flows through to a
 import ast
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
+from integration_coworker.llm.client import MockLLMClient
 
 
 # Sentinel code that the LLM "returns" - recognizable and valid Python
@@ -103,35 +104,39 @@ class TestLLMCodegenPath:
         Prove that when LLM returns valid code, it flows through to the artifact.
         
         Strategy:
-        1. Monkeypatch call_llm to return sentinel code with a recognizable marker
+        1. Monkeypatch get_llm_client_for_node to return a mock client with sentinel code
         2. Run design_and_generate_integration
         3. Assert the sentinel marker appears in the client artifact
         4. Assert the code still passes AST validation
         """
         call_count = {"client": 0, "flow": 0, "test": 0}
         
-        def fake_call_llm(prompt: str, task_type: str = "default") -> str:
-            """Fake LLM that returns sentinel code based on artifact type."""
-            prompt_lower = prompt.lower()
+        class SentinelLLMClient:
+            """Mock client that returns sentinel code."""
             
-            # Detect artifact type from prompt
-            if "artifact type: client" in prompt_lower:
-                call_count["client"] += 1
-                return SENTINEL_CLIENT_CODE
-            elif "artifact type: flow" in prompt_lower:
-                call_count["flow"] += 1
-                return SENTINEL_FLOW_CODE
-            elif "artifact type: test" in prompt_lower:
-                call_count["test"] += 1
-                # Return something that won't pass validation so template is used
-                return "# test code placeholder"
-            
-            return f"# Mock for: {task_type}"
+            def complete(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
+                """Return sentinel code based on artifact type."""
+                prompt_lower = prompt.lower()
+                
+                if "artifact type: client" in prompt_lower:
+                    call_count["client"] += 1
+                    return SENTINEL_CLIENT_CODE
+                elif "artifact type: flow" in prompt_lower:
+                    call_count["flow"] += 1
+                    return SENTINEL_FLOW_CODE
+                elif "artifact type: test" in prompt_lower:
+                    call_count["test"] += 1
+                    return "# test code placeholder"
+                
+                return "# Mock response"
         
-        # Patch the call_llm function where it's imported
+        def fake_get_client(node_name: str, strict: bool = False):
+            return SentinelLLMClient()
+        
+        # Patch get_llm_client_for_node where it's imported
         monkeypatch.setattr(
-            "integration_coworker.graph.nodes.generate_code_and_tests.call_llm",
-            fake_call_llm
+            "integration_coworker.graph.nodes.generate_code_and_tests.get_llm_client_for_node",
+            fake_get_client
         )
         
         # Run the pipeline
@@ -148,9 +153,9 @@ class TestLLMCodegenPath:
             ),
         )
         
-        # Verify call_llm was actually called for codegen
-        assert call_count["client"] >= 1, "call_llm should be invoked for client artifact"
-        assert call_count["flow"] >= 1, "call_llm should be invoked for flow artifact"
+        # Verify LLM was actually called for codegen
+        assert call_count["client"] >= 1, "LLM client should be invoked for client artifact"
+        assert call_count["flow"] >= 1, "LLM client should be invoked for flow artifact"
         
         # Find client artifact
         client_artifacts = [a for a in result.code_artifacts if a.artifact_type == "client"]
@@ -187,13 +192,18 @@ class TestLLMCodegenPath:
         - If LLM returns syntactically invalid code, use template
         - Template code should still be valid and usable
         """
-        def fake_call_llm_invalid(prompt: str, task_type: str = "default") -> str:
-            """Return syntactically invalid Python."""
-            return "def broken(:\n    return # invalid syntax"
+        class InvalidCodeClient:
+            """Mock client that returns syntactically invalid Python."""
+            
+            def complete(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
+                return "def broken(:\n    return # invalid syntax"
+        
+        def fake_get_client(node_name: str, strict: bool = False):
+            return InvalidCodeClient()
         
         monkeypatch.setattr(
-            "integration_coworker.graph.nodes.generate_code_and_tests.call_llm",
-            fake_call_llm_invalid
+            "integration_coworker.graph.nodes.generate_code_and_tests.get_llm_client_for_node",
+            fake_get_client
         )
         
         fixture_path = Path(__file__).parent / "fixtures" / "mock_payments_openapi.yaml"
@@ -233,15 +243,19 @@ class TestLLMCodegenPath:
         """
         captured_prompts = []
         
-        def capture_call_llm(prompt: str, task_type: str = "default") -> str:
-            """Capture prompts for inspection."""
-            captured_prompts.append(prompt)
-            # Return mock response to trigger fallback
-            return "# mock"
+        class CapturingClient:
+            """Mock client that captures prompts."""
+            
+            def complete(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
+                captured_prompts.append(prompt)
+                return "# mock"
+        
+        def fake_get_client(node_name: str, strict: bool = False):
+            return CapturingClient()
         
         monkeypatch.setattr(
-            "integration_coworker.graph.nodes.generate_code_and_tests.call_llm",
-            capture_call_llm
+            "integration_coworker.graph.nodes.generate_code_and_tests.get_llm_client_for_node",
+            fake_get_client
         )
         
         fixture_path = Path(__file__).parent / "fixtures" / "mock_payments_openapi.yaml"

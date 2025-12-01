@@ -1,25 +1,20 @@
 """
 plan_integration_flow node - Validate and finalize workflow structure, create endpoint bindings.
 
-Uses LLM with TOON format when available to enhance endpoint binding mappings.
+Uses LLM when available to enhance endpoint binding mappings.
 """
 import logging
 from typing import Dict, Any, List
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import EndpointBinding
-from integration_coworker.llm import call_llm
-from integration_coworker.llm.toon import from_toon
+from integration_coworker.llm import call_llm_json
 
 logger = logging.getLogger(__name__)
 
 
 def _build_binding_prompt(state: WorkflowState, api_node, endpoint) -> str:
-    """
-    Build TOON-formatted prompt for generating request/response mappings.
-    
-    Uses Token-Oriented Object Notation for ~25-35% token savings vs JSON.
-    """
+    """Build prompt for generating request/response mappings."""
     endpoint_info = f"{endpoint.method} {endpoint.path}"
     if endpoint.summary:
         endpoint_info += f" - {endpoint.summary}"
@@ -30,18 +25,19 @@ TASK: {state.task_description}
 ENDPOINT: {endpoint_info}
 OPERATION_ID: {endpoint.operation_id or "N/A"}
 
-Respond in TOON format (key=value notation):
-
-request_mapping.description=how input maps to request
-request_mapping.path_params=[param1,param2]
-request_mapping.query_params=[param1,param2]
-request_mapping.body_fields=[field1,field2]
-response_mapping.description=how response maps to output
-response_mapping.extract_fields=[field1,field2]
-
-Rules:
-- List actual parameter/field names from the API spec
-- Use exact TOON format, no JSON
+Return JSON with:
+{{
+    "request_mapping": {{
+        "description": "how input maps to request",
+        "path_params": {{}},
+        "query_params": {{}},
+        "body": {{}}
+    }},
+    "response_mapping": {{
+        "description": "how response maps to output",
+        "extract_fields": []
+    }}
+}}
 """
 
 
@@ -145,16 +141,12 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
         if matched_endpoint:
             try:
                 prompt = _build_binding_prompt(state, api_node, matched_endpoint)
-                llm_response_text = call_llm(prompt, task_type="plan_integration_flow")
+                llm_response = call_llm_json(prompt, task_type="plan_integration_flow")
                 
-                if llm_response_text and not llm_response_text.startswith("Mock response"):
-                    try:
-                        llm_response = from_toon(llm_response_text)
-                        request_mapping = llm_response.get("request_mapping", {})
-                        response_mapping = llm_response.get("response_mapping", {})
-                        logger.info(f"LLM generated TOON mappings for {api_node.node_key}")
-                    except Exception as parse_error:
-                        logger.warning(f"Failed to parse TOON response: {parse_error}")
+                if llm_response and not llm_response.get("error"):
+                    request_mapping = llm_response.get("request_mapping", {})
+                    response_mapping = llm_response.get("response_mapping", {})
+                    logger.info(f"LLM generated mappings for {api_node.node_key}")
             except Exception as e:
                 logger.warning(f"LLM mapping generation failed, using empty scaffolds: {e}")
         
