@@ -20,6 +20,45 @@ class PolicyType(str, Enum):
     TRANSFORM = "transform"
 
 
+class SourceRefType(str, Enum):
+    """Type of source reference (API-002)."""
+    URL = "url"
+    FILE = "file"
+
+
+# ============================================================================
+# Source Reference Model (API-002: Multi-Spec Traceability)
+# ============================================================================
+
+@dataclass
+class SourceRef:
+    """
+    A reference to a source specification file or URL.
+    
+    Enables traceability: every Silver entity (Endpoint, Schema) can be
+    traced back to its specific source. Critical for multi-provider
+    integrations where entities come from different specs.
+    
+    Per V2_IMPLEMENTATION_PLAN_SUPPLEMENT.md Section 4.
+    """
+    id: Optional[int]
+    uri: str  # The URL or file path
+    ref_type: SourceRefType  # URL or FILE
+    provider_code: Optional[str] = None  # e.g., "stripe", "github"
+    spec_document_id: Optional[int] = None  # Link to SpecDocument once persisted
+    
+    @classmethod
+    def from_ref(cls, ref: str, provider_code: Optional[str] = None) -> "SourceRef":
+        """Create a SourceRef from a reference string."""
+        ref_type = SourceRefType.URL if ref.startswith(("http://", "https://")) else SourceRefType.FILE
+        return cls(
+            id=None,
+            uri=ref,
+            ref_type=ref_type,
+            provider_code=provider_code,
+        )
+
+
 # ============================================================================
 # Silver Layer Models (API Spec Model)
 # ============================================================================

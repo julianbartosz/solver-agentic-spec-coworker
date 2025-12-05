@@ -28,11 +28,49 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Literal
 from urllib.parse import urlparse
 
+from integration_coworker.config.llm_mode import LLMMode, get_llm_mode, reset_llm_mode
+
 # Cache for loaded config
 _CONFIG_CACHE: Optional[Dict[str, Any]] = None
 
 # Cache for loaded archetypes
 _ARCHETYPE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+# =============================================================================
+# V2: Scoring Weight Configuration (per Section 3.4)
+# =============================================================================
+
+# Default scoring weights for hybrid GraphRAG scoring
+DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
+    "graph": 0.4,
+    "embedding": 0.4,
+    "exact_match": 0.2,
+}
+
+# Provider-specific overrides (learned/tuned over time)
+PROVIDER_SCORING_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "stripe": {"graph": 0.5, "embedding": 0.3, "exact_match": 0.2},
+    "github": {"graph": 0.3, "embedding": 0.5, "exact_match": 0.2},
+    # Default applies to unknown providers
+}
+
+
+def get_scoring_weights(provider_code: Optional[str] = None) -> Dict[str, float]:
+    """
+    Get scoring weights for hybrid GraphRAG scoring.
+    
+    V2: Per-provider configurable weights for graph, embedding, and exact-match scoring.
+    
+    Args:
+        provider_code: Optional provider code for provider-specific weights
+        
+    Returns:
+        Dict with "graph", "embedding", and "exact_match" weights (sum to 1.0)
+    """
+    if provider_code and provider_code in PROVIDER_SCORING_WEIGHTS:
+        return PROVIDER_SCORING_WEIGHTS[provider_code]
+    return DEFAULT_SCORING_WEIGHTS.copy()
 
 
 @dataclass
@@ -76,16 +114,21 @@ class LLMConfig:
     # Default model (can be overridden per task type)
     default_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4"))
 
-    # Use mock LLM for tests
-    use_mock: bool = field(default_factory=lambda: os.getenv("USE_MOCK_LLM", "").lower() == "true")
+    # LLM Mode (replaces use_mock boolean) - see LLM-003
+    mode: LLMMode = field(default_factory=get_llm_mode)
 
     # Embedding model (used by KG and embeddings)
     _embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
 
     @property
+    def use_mock(self) -> bool:
+        """Legacy compatibility: Check if in mock mode."""
+        return self.mode.is_mock
+
+    @property
     def is_configured(self) -> bool:
         """Check if LLM is properly configured for real calls."""
-        return bool(self.api_key) and not self.use_mock
+        return bool(self.api_key) and self.mode.is_real
 
     @property
     def embedding_model(self) -> str:
@@ -119,6 +162,28 @@ class Settings:
     http_timeout: int = field(default_factory=lambda: int(os.getenv("HTTP_TIMEOUT", "30")))
     http_max_retries: int = field(default_factory=lambda: int(os.getenv("HTTP_MAX_RETRIES", "3")))
     http_retry_backoff: float = field(default_factory=lambda: float(os.getenv("HTTP_RETRY_BACKOFF", "1.0")))
+
+    # V3 Streaming Persistence (reduces memory from 200MB+ to <20MB for large specs)
+    # When enabled:
+    # - ingest_spec streams chunks to DB immediately, clears state.doc_chunks
+    # - embed_spec_chunks lazy loads chunks, streams embeddings to DB
+    # - WorkflowState holds only IDs and counts, not full content
+    # 
+    # Modes:
+    # - "auto" (default): Automatically enable for large specs (>500KB or >500 chunks)
+    # - "true"/"on": Always enable streaming
+    # - "false"/"off": Always disable streaming (legacy mode)
+    streaming_persistence: str = field(
+        default_factory=lambda: os.getenv("STREAMING_PERSISTENCE", "auto").lower()
+    )
+    
+    # Thresholds for auto-streaming (when streaming_persistence="auto")
+    streaming_threshold_bytes: int = field(
+        default_factory=lambda: int(os.getenv("STREAMING_THRESHOLD_BYTES", "500000"))  # 500KB
+    )
+    streaming_threshold_chunks: int = field(
+        default_factory=lambda: int(os.getenv("STREAMING_THRESHOLD_CHUNKS", "500"))  # 500 chunks
+    )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -157,11 +222,78 @@ def get_settings() -> Settings:
     return _settings
 
 
+def is_streaming_persistence_enabled() -> bool:
+    """
+    Check if streaming persistence is explicitly forced ON.
+    
+    V3 Feature: When enabled, large data (chunks, embeddings) is streamed to DB
+    immediately instead of accumulated in WorkflowState. This reduces memory
+    from 200MB+ to <20MB for large specs.
+    
+    Returns True only if STREAMING_PERSISTENCE=true/on (forced mode).
+    For automatic mode, use should_use_streaming_for_spec() instead.
+    
+    Returns:
+        True if streaming persistence is explicitly enabled
+    """
+    mode = get_settings().streaming_persistence
+    return mode in ("true", "on", "1", "yes")
+
+
+def is_streaming_persistence_disabled() -> bool:
+    """
+    Check if streaming persistence is explicitly forced OFF.
+    
+    Returns:
+        True if streaming persistence is explicitly disabled
+    """
+    mode = get_settings().streaming_persistence
+    return mode in ("false", "off", "0", "no")
+
+
+def should_use_streaming_for_spec(total_content_bytes: int, estimated_chunks: int = 0) -> bool:
+    """
+    Determine if streaming should be used for a spec based on size.
+    
+    V3 Adaptive Streaming: Automatically enables streaming for large specs
+    to prevent memory issues, while using faster in-memory mode for small specs.
+    
+    Args:
+        total_content_bytes: Total size of spec content in bytes
+        estimated_chunks: Estimated number of chunks (optional, for early decision)
+    
+    Returns:
+        True if streaming should be used for this spec
+    
+    Decision logic:
+    - STREAMING_PERSISTENCE=true/on → always stream
+    - STREAMING_PERSISTENCE=false/off → never stream
+    - STREAMING_PERSISTENCE=auto (default) → stream if spec exceeds thresholds
+    """
+    settings = get_settings()
+    mode = settings.streaming_persistence
+    
+    # Explicit modes override auto-detection
+    if mode in ("true", "on", "1", "yes"):
+        return True
+    if mode in ("false", "off", "0", "no"):
+        return False
+    
+    # Auto mode: check thresholds
+    if total_content_bytes >= settings.streaming_threshold_bytes:
+        return True
+    if estimated_chunks >= settings.streaming_threshold_chunks:
+        return True
+    
+    return False
+
+
 def reset_settings() -> None:
     """Reset settings (for testing)."""
     global _settings, _CONFIG_CACHE
     _settings = None
     _CONFIG_CACHE = None
+    reset_llm_mode()
 
 
 def _load_config() -> Dict[str, Any]:

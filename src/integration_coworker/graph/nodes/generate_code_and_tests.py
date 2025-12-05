@@ -2,6 +2,11 @@
 generate_code_and_tests node - Generate client, flow, and test code.
 
 Uses spec-driven naming and RepoProfile layout for paths, with LLM for code body generation.
+
+Per design doc Section 5.5:
+- Archetype: generate_code_and_tests.archetype.yaml
+- Provider: Anthropic (claude-3-sonnet) - superior code generation
+- Strategy: generation with multi-candidate selection
 """
 import ast
 import logging
@@ -9,7 +14,8 @@ from typing import Optional, Literal
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import CodeArtifact, Endpoint
-from integration_coworker.llm import call_llm, is_mock_llm_mode
+from integration_coworker.llm import get_llm_client_for_node, is_mock_llm_mode
+from integration_coworker.config import get_archetype_prompt_config
 from integration_coworker.codegen.naming import (
     derive_method_name,
     derive_client_class_name,
@@ -26,8 +32,22 @@ from integration_coworker.codegen.paths import (
     strip_src_prefix,
 )
 from integration_coworker.codegen.prompts import build_codegen_prompt
+from integration_coworker.codegen.policy_templates import (
+    inject_policies_into_client_code,
+)
+from integration_coworker.codegen.security import (
+    validate_code_security,
+    format_violations,
+)
+from integration_coworker.llm.content_policy import (
+    validate_generated_code as validate_content_policy,
+    format_violations as format_policy_violations,
+)
 
 logger = logging.getLogger(__name__)
+
+# Node name for archetype loading
+NODE_NAME = "generate_code_and_tests"
 
 
 def _build_code_generation_prompt(
@@ -67,21 +87,21 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
             "Codegen is running with mock LLM; generated code is for testing only "
             "and not production-grade. Set OPENAI_API_KEY for real LLM codegen."
         )
-    
+
     if not state.endpoint_bindings:
         state.errors.append("No endpoint_bindings to generate code from")
         state.completed_steps.append("generate_code_and_tests")
         return state
-    
+
     provider_code = state.provider_code or "unknown"
     task_slug = state.integration_task.task_slug if state.integration_task else "integration"
-    
+
     # Get the primary endpoint for this task
     primary_endpoint = _get_primary_endpoint(state)
-    
+
     # Get layout directories from RepoProfile
     clients_dir, flows_dir, tests_dir = get_layout_dirs(state.repo_profile)
-    
+
     # Derive spec-driven names
     client_module = derive_client_module_name(provider_code)
     client_class = derive_client_class_name(provider_code)
@@ -89,10 +109,10 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
     flow_module = derive_flow_module_name(provider_code, task_slug)
     flow_function = derive_flow_function_name(task_slug)
     test_module = derive_test_module_name(provider_code, task_slug)
-    
+
     # Derive base URL from spec
     base_url = derive_base_url(state)
-    
+
     try:
         # Generate CLIENT code
         client_code = _generate_client_code(
@@ -106,7 +126,16 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
         client_code = _refine_with_llm(
             client_code, state, "client", client_class, method_name, primary_endpoint
         )
-        
+
+        # P1: Inject policy code into client
+        if state.policies:
+            policies_for_injection = [
+                {"policy_type": p.policy_type.value if hasattr(p.policy_type, 'value') else str(p.policy_type), "config": p.config}
+                for p in state.policies
+            ]
+            client_code = inject_policies_into_client_code(client_code, policies_for_injection)
+            logger.info(f"Injected {len(state.policies)} policies into client code")
+
         client_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -117,10 +146,10 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
             content=client_code,
         )
         state.code_artifacts.append(client_artifact)
-        
+
         # Compute import path for flow to import client
         client_import_module = path_to_module(strip_src_prefix(f"{clients_dir}/{client_module}.py"))
-        
+
         # Generate FLOW code
         flow_code = _generate_flow_code(
             state=state,
@@ -134,7 +163,7 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
         flow_code = _refine_with_llm(
             flow_code, state, "flow", None, flow_function, primary_endpoint
         )
-        
+
         flow_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -145,10 +174,10 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
             content=flow_code,
         )
         state.code_artifacts.append(flow_artifact)
-        
+
         # Compute import path for test to import flow
         flow_import_module = path_to_module(strip_src_prefix(f"{flows_dir}/{flow_module}.py"))
-        
+
         # Generate TEST code
         test_code = _generate_test_code(
             state=state,
@@ -161,7 +190,7 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
         test_code = _refine_with_llm(
             test_code, state, "test", None, None, primary_endpoint
         )
-        
+
         test_artifact = CodeArtifact(
             id=None,
             task_id=None,
@@ -172,11 +201,11 @@ def generate_code_and_tests(state: WorkflowState) -> WorkflowState:
             content=test_code,
         )
         state.code_artifacts.append(test_artifact)
-        
+
     except Exception as e:
         state.errors.append(f"Failed to generate code: {str(e)}")
         logger.exception("Code generation failed")
-    
+
     state.completed_steps.append("generate_code_and_tests")
     return state
 
@@ -186,20 +215,20 @@ def _get_primary_endpoint(state: WorkflowState) -> Optional[Endpoint]:
     binding = state.endpoint_bindings[0] if state.endpoint_bindings else None
     if not binding:
         return None
-    
+
     endpoint = None
-    
+
     # Try by ID if available
     if binding.endpoint_id is not None:
         for ep in state.endpoints:
             if ep.id == binding.endpoint_id:
                 endpoint = ep
                 break
-    
+
     # Fallback: look for stored endpoint reference
     if not endpoint and hasattr(binding, '_matched_endpoint'):
         endpoint = binding._matched_endpoint
-    
+
     # Fallback: find a suitable POST endpoint
     if not endpoint and state.endpoints:
         for ep in state.endpoints:
@@ -208,7 +237,7 @@ def _get_primary_endpoint(state: WorkflowState) -> Optional[Endpoint]:
                 break
         if not endpoint:
             endpoint = state.endpoints[0]
-    
+
     return endpoint
 
 
@@ -235,8 +264,15 @@ def _refine_with_llm(
         Refined code, or template code if LLM fails validation
     """
     module_name = expected_class or expected_function or artifact_type
-    
+
     try:
+        # Get LLM client configured for this node's archetype
+        client = get_llm_client_for_node(NODE_NAME)
+
+        # Get system prompt from archetype if available
+        prompt_config = get_archetype_prompt_config(NODE_NAME)
+        system_prompt = prompt_config.get("system_template")
+
         prompt = _build_code_generation_prompt(
             skeleton_code=template_code,
             state=state,
@@ -246,12 +282,12 @@ def _refine_with_llm(
             method_name=expected_function if artifact_type == "client" else None,
             flow_function=expected_function if artifact_type in ("flow", "test") else None,
         )
-        refined = call_llm(prompt, task_type="codegen")
-        
+        refined = client.complete(prompt, system_prompt=system_prompt)
+
         if not refined:
             logger.info(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM returned empty response")
             return template_code
-        
+
         # Clean up markdown code blocks if present
         clean_refined = refined
         if clean_refined.startswith("```"):
@@ -261,35 +297,55 @@ def _refine_with_llm(
                 clean_refined = "\n".join(lines[1:-1])
             else:
                 clean_refined = "\n".join(lines[1:])
-        
-        # Check if it's a mock/placeholder response
-        is_mock = (
-            "mock_function" in clean_refined or 
-            "Mock response" in refined or
-            len(clean_refined) < 100
-        )
-        
-        if is_mock:
-            logger.info(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM returned mock/placeholder response")
-            return template_code
-        
+
+        # REMOVED: Mock detection heuristic (LLM-007)
+        # v2: We now trust the LLM with proper prompting instead of fragile
+        # string-matching heuristics. Security validation below catches real issues.
+
         # Validate syntax with AST
         if not _validate_python_syntax(clean_refined):
             logger.warning(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM output failed AST syntax validation")
             return template_code
+
+        # v2: Security validation (SEC-003)
+        is_secure, violations = validate_code_security(
+            clean_refined,
+            allow_subprocess=False,  # Default: no subprocess
+            allow_file_io=True,       # Allow open() for config reading
+        )
         
+        if not is_secure:
+            logger.warning(
+                f"Falling back to template skeleton for {artifact_type} '{module_name}' "
+                f"because: security violations detected:\n{format_violations(violations)}"
+            )
+            return template_code
+
+        # SEC-004: Content policy validation (semantic checks)
+        is_policy_valid, policy_violations = validate_content_policy(
+            clean_refined,
+            endpoints=state.endpoints if state.endpoints else None,
+        )
+        
+        if not is_policy_valid:
+            logger.warning(
+                f"Falling back to template skeleton for {artifact_type} '{module_name}' "
+                f"because: content policy violations detected:\n{format_policy_violations(policy_violations)}"
+            )
+            return template_code
+
         # Validate expected symbols are present
         if expected_class and not _has_class(clean_refined, expected_class):
             logger.warning(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM output missing expected class '{expected_class}'")
             return template_code
-        
+
         if expected_function and not _has_function(clean_refined, expected_function):
             logger.warning(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM output missing expected function '{expected_function}'")
             return template_code
-        
+
         logger.info(f"Using LLM-generated body for {artifact_type} '{module_name}'")
         return clean_refined
-        
+
     except Exception as e:
         logger.warning(f"Falling back to template skeleton for {artifact_type} '{module_name}' because: LLM refinement failed with exception: {e}")
         return template_code
@@ -360,7 +416,7 @@ Auto-generated by Integration Co-Worker
     endpoint_path = endpoint.path
     http_method = endpoint.method.upper()
     summary = endpoint.summary or f"{http_method} {endpoint_path}"
-    
+
     # Build the template code
     code = f'''"""
 {provider_code.title()} API Client
@@ -457,7 +513,7 @@ def _generate_flow_code(
         flow_function: Flow function name
     """
     task_desc = state.task_description or f"{provider_code} integration"
-    
+
     code = f'''"""
 {provider_code.title()} {task_slug.replace('_', ' ').title()} Flow
 
@@ -466,6 +522,7 @@ Task: {task_desc}
 """
 from typing import Dict, Any, Optional
 from {client_import_module} import {client_class}
+from integration_coworker.runtime.exceptions import IntegrationError
 
 
 def {flow_function}(
@@ -503,10 +560,13 @@ def {flow_function}(
     client = {client_class}(api_key=api_key)
     idempotency_key = kwargs.get("idempotency_key")
     
-    response = client.{method_name}(
-        payload=payload,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        response = client.{method_name}(
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception as e:
+        raise IntegrationError(f"API call failed: {{str(e)}}") from e
     
     # Step 3: Transform and return response
     return {{

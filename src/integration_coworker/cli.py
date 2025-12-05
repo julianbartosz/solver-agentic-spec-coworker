@@ -544,11 +544,14 @@ def show_status():
 
 
 @app.command("init-db")
-def init_database():
+def init_database(
+    seed_kg: bool = typer.Option(True, "--seed-kg/--no-seed-kg", help="Seed Knowledge Graph with curated templates"),
+):
     """
-    Initialize the database schema.
+    Initialize the database schema and seed the Knowledge Graph.
     
     Creates all required tables for spec_silver, integration_gold, and repo_meta.
+    Optionally seeds the Knowledge Graph with curated workflow templates (KG-002).
     Safe to run multiple times (uses CREATE IF NOT EXISTS).
     
     Requires:
@@ -556,13 +559,17 @@ def init_database():
     - For SQLite: USE_SQLITE=true
     
     Examples:
-        # Initialize Postgres
+        # Initialize Postgres with KG seeding
         DATABASE_URL="postgresql://user:pass@localhost/db" integration-coworker init-db
+        
+        # Initialize without KG seeding
+        integration-coworker init-db --no-seed-kg
         
         # Initialize SQLite (for testing)
         USE_SQLITE=true integration-coworker init-db
     """
     from integration_coworker.persistence.db import init_schema, get_engine_type
+    from integration_coworker.persistence.seed_kg import seed_knowledge_graph
 
     # Reset settings to pick up fresh environment
     reset_settings()
@@ -602,6 +609,20 @@ def init_database():
                     typer.echo("⚠ pgvector not found. Run: CREATE EXTENSION IF NOT EXISTS vector;")
             except Exception as e:
                 typer.echo(f"⚠ Could not check pgvector: {e}")
+
+        # KG-002: Seed Knowledge Graph with curated templates
+        if seed_kg:
+            typer.echo("\nSeeding Knowledge Graph...")
+            try:
+                added, skipped = seed_knowledge_graph()
+                if added > 0:
+                    typer.echo(f"✓ Seeded {added} workflow templates")
+                elif skipped > 0:
+                    typer.echo(f"✓ Knowledge Graph already seeded ({skipped} templates exist)")
+                else:
+                    typer.echo("✓ Knowledge Graph is ready")
+            except Exception as e:
+                typer.echo(f"⚠ Could not seed Knowledge Graph: {e}")
 
     except RuntimeError as e:
         typer.echo(f"✗ Error: {e}", err=True)

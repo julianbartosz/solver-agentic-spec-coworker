@@ -3,16 +3,39 @@ build_silver_api_model node — extracts Silver layer entities from parsed OpenA
 
 Implements: Design Doc §3.4 Build Silver API Model
 Touches: endpoints, endpoint_parameters, schemas, schema_fields, entities, relationships
+
+V1 Implementation:
+  - Converts parsed OpenAPI (including HTML/PDF pseudo-OpenAPI) to Silver domain models
+  - Multi-spec support: iterates state.openapi_specs for each source
+
+API-002: Multi-Spec Source Reference Handling
+  - Links all extracted entities to their SourceRef
+  - Uses state.source_refs for traceability
+  - Enables multi-provider integrations with proper provenance
 """
+from typing import Dict, Optional
+
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import (
-    Endpoint, EndpointParameter, Schema, SchemaField, Entity, EntityRelationship
+    Endpoint, EndpointParameter, Schema, SchemaField, Entity, EntityRelationship, SourceRef
 )
 
 
-def _extract_from_spec(spec: dict, state: WorkflowState, source_uri: str) -> dict[str, str]:
+def _get_source_ref_for_uri(state: WorkflowState, uri: str) -> Optional[SourceRef]:
+    """Find the SourceRef matching a given URI."""
+    for source_ref in state.source_refs:
+        # Handle both SourceRef objects and legacy string refs
+        if hasattr(source_ref, 'uri') and source_ref.uri == uri:
+            return source_ref
+    return None
+
+
+def _extract_from_spec(spec: dict, state: WorkflowState, source_uri: str, source_ref: Optional[SourceRef] = None) -> dict[str, str]:
     """
     Extract endpoints, schemas, entities from a single parsed OpenAPI spec.
+    
+    API-002: All extracted entities are linked to their SourceRef for traceability.
+    
     Returns a mapping of schema_name -> source_uri for relationship detection.
     """
     endpoint_schema_names: dict[tuple[str, str], tuple[str | None, str | None]] = {}
@@ -69,8 +92,10 @@ def _extract_from_spec(spec: dict, state: WorkflowState, source_uri: str) -> dic
                 pagination_style=None,
                 rate_limit_bucket=None,
             )
-            # Tag with source URI for multi-spec tracking
+            # API-002: Tag with source URI and SourceRef for traceability
             endpoint._source_uri = source_uri
+            if source_ref:
+                endpoint._source_ref = source_ref
             state.endpoints.append(endpoint)
 
             if request_schema_name or response_schema_name:
@@ -172,13 +197,22 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
     """
     Build Silver API model from all parsed OpenAPI specs (primary + supporting).
 
-    Reads: openapi_spec, plan["openapi_specs"]
+    V2 Section 3.12: Multi-spec support
+    - Uses pending_specs and parsed_specs for spec tracking
+    - Falls back to openapi_spec/plan["openapi_specs"] for compatibility
+
+    API-002: Links all extracted entities to their SourceRef for traceability.
+
+    Reads: openapi_spec, plan["openapi_specs"], pending_specs, parsed_specs, source_refs
     Writes: endpoints, endpoint_parameters, schemas, schema_fields, entities, relationships
     """
-    # Get all parsed specs from plan (set by detect_and_parse_spec)
+    # Get all parsed specs - V2 prefers parsed_specs, falls back to legacy
     all_specs: list[dict] = []
 
-    if state.plan and "openapi_specs" in state.plan:
+    # V2 path: use parsed_specs if available
+    if state.parsed_specs:
+        all_specs = state.parsed_specs
+    elif state.plan and "openapi_specs" in state.plan:
         all_specs = state.plan["openapi_specs"]
     elif state.openapi_spec:
         # Fallback: only primary spec available
@@ -192,10 +226,30 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
     try:
         all_schema_uris: dict[str, str] = {}
 
-        for spec in all_specs:
+        for idx, spec in enumerate(all_specs):
+            # Determine source_uri and provider_code
             source_uri = spec.get("_source_uri", "unknown")
-            schema_uris = _extract_from_spec(spec, state, source_uri)
+            
+            # V2: Enrich with pending_specs info if available
+            if idx < len(state.pending_specs):
+                spec_info = state.pending_specs[idx]
+                if source_uri == "unknown":
+                    source_uri = spec_info.get("ref", "unknown")
+                # Tag endpoints with provider_code for multi-spec
+                provider_code = spec_info.get("provider_code", state.provider_code)
+            else:
+                provider_code = state.provider_code
+            
+            # API-002: Get the SourceRef for this URI
+            source_ref = _get_source_ref_for_uri(state, source_uri)
+            
+            schema_uris = _extract_from_spec(spec, state, source_uri, source_ref=source_ref)
             all_schema_uris.update(schema_uris)
+            
+            # V2: Tag all extracted items with provider_code
+            for endpoint in state.endpoints:
+                if hasattr(endpoint, "_source_uri") and endpoint._source_uri == source_uri:
+                    endpoint._provider_code = provider_code
 
         # Store schema->uri mapping in plan for persistence layer
         if state.plan is not None:

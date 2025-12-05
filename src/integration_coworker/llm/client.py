@@ -9,19 +9,33 @@ Supported Providers:
 - OpenAI: gpt-4, gpt-4o-mini, gpt-3.5-turbo, etc.
 - Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku, etc.
 
+LLM Modes (LLM-003):
+- REAL: Call OpenAI/Anthropic APIs
+- MOCK: Return deterministic static strings
+- RECORD: Call Real APIs, save request/response to disk
+- REPLAY: Read from disk, fail if missing
+
 LangSmith Integration:
 - All LLM calls are automatically traced when LANGCHAIN_TRACING_V2=true
 - Traces include metadata: task_type, model, provider, temperature, run_id
 - Parent-child relationships are maintained via run context
+
+v2 Security (SEC-001):
+- All system prompts are hardened with safety preamble via harden_system_prompt()
+- Protects against prompt injection attacks in user-provided content
 """
+import hashlib
 import json
 import logging
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional, Protocol, Literal
 
 from integration_coworker.config import get_llm_config, get_settings
+from integration_coworker.config.llm_mode import LLMMode, get_llm_mode
+from integration_coworker.llm.safety import harden_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +62,71 @@ def clear_run_context() -> None:
     """Clear the run context."""
     _current_run_id.set(None)
     _current_provider.set(None)
+
+
+# =============================================================================
+# Record/Replay Support (LLM-003)
+# =============================================================================
+
+# Default directory for recorded interactions
+_REPLAY_DIR = Path(__file__).parent.parent.parent.parent / ".llm_recordings"
+
+
+def _get_interaction_key(prompt: str, system_prompt: Optional[str], model: str) -> str:
+    """Generate a deterministic key for a prompt/model combination."""
+    content = f"{model}|{system_prompt or ''}|{prompt}"
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def _get_recording_path(key: str) -> Path:
+    """Get the file path for a recorded interaction."""
+    return _REPLAY_DIR / f"{key}.json"
+
+
+def _save_interaction(
+    prompt: str,
+    system_prompt: Optional[str],
+    model: str,
+    response: str,
+) -> None:
+    """Save an LLM interaction to disk for later replay."""
+    _REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+    key = _get_interaction_key(prompt, system_prompt, model)
+    path = _get_recording_path(key)
+    
+    data = {
+        "model": model,
+        "system_prompt": system_prompt,
+        "prompt": prompt,
+        "response": response,
+    }
+    
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    
+    logger.debug(f"Recorded LLM interaction to {path}")
+
+
+def _load_interaction(
+    prompt: str,
+    system_prompt: Optional[str],
+    model: str,
+) -> Optional[str]:
+    """Load a previously recorded LLM interaction."""
+    key = _get_interaction_key(prompt, system_prompt, model)
+    path = _get_recording_path(key)
+    
+    if not path.exists():
+        return None
+    
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        logger.debug(f"Replayed LLM interaction from {path}")
+        return data.get("response")
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Failed to load recording {path}: {e}")
+        return None
 
 
 class LLMClient(Protocol):
@@ -264,6 +343,8 @@ class OpenAILLMClient:
         Generate a completion using LangChain ChatOpenAI.
         
         Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
+        v2: System prompts are hardened with safety preamble (SEC-001).
+        LLM-003: Supports RECORD/REPLAY modes for regression testing.
         """
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -273,11 +354,24 @@ class OpenAILLMClient:
                 "Install with: pip install langchain-core"
             )
 
+        # v2: Harden system prompt (SEC-001)
+        hardened_system = harden_system_prompt(system_prompt)
+
+        # LLM-003: Check for REPLAY mode first
+        mode = get_llm_mode()
+        if mode.should_replay:
+            cached = _load_interaction(prompt, hardened_system, self.model)
+            if cached is not None:
+                return cached
+            raise RuntimeError(
+                f"REPLAY mode: No recorded interaction found for prompt. "
+                f"Run with LLM_MODE=record first to capture interactions."
+            )
+
         llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
 
         messages = []
-        if system_prompt:
-            messages.append(SystemMessage(content=system_prompt))
+        messages.append(SystemMessage(content=hardened_system))
         messages.append(HumanMessage(content=prompt))
 
         metadata = self._build_metadata()
@@ -292,7 +386,13 @@ class OpenAILLMClient:
                 }
             )
 
-            return response.content or ""
+            result = response.content or ""
+            
+            # LLM-003: Save interaction if in RECORD mode
+            if mode.should_record:
+                _save_interaction(prompt, hardened_system, self.model, result)
+
+            return result
 
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
@@ -395,6 +495,8 @@ class AnthropicLLMClient:
         Generate a completion using LangChain ChatAnthropic.
         
         Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
+        v2: System prompts are hardened with safety preamble (SEC-001).
+        LLM-003: Supports RECORD/REPLAY modes for regression testing.
         """
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -404,11 +506,24 @@ class AnthropicLLMClient:
                 "Install with: pip install langchain-core"
             )
 
+        # v2: Harden system prompt (SEC-001)
+        hardened_system = harden_system_prompt(system_prompt)
+
+        # LLM-003: Check for REPLAY mode first
+        mode = get_llm_mode()
+        if mode.should_replay:
+            cached = _load_interaction(prompt, hardened_system, self.model)
+            if cached is not None:
+                return cached
+            raise RuntimeError(
+                f"REPLAY mode: No recorded interaction found for prompt. "
+                f"Run with LLM_MODE=record first to capture interactions."
+            )
+
         llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
 
         messages = []
-        if system_prompt:
-            messages.append(SystemMessage(content=system_prompt))
+        messages.append(SystemMessage(content=hardened_system))
         messages.append(HumanMessage(content=prompt))
 
         metadata = self._build_metadata()
@@ -422,7 +537,13 @@ class AnthropicLLMClient:
                 }
             )
 
-            return response.content or ""
+            result = response.content or ""
+            
+            # LLM-003: Save interaction if in RECORD mode
+            if mode.should_record:
+                _save_interaction(prompt, hardened_system, self.model, result)
+
+            return result
 
         except Exception as e:
             logger.error(f"Anthropic API call failed: {e}")
@@ -471,7 +592,12 @@ def get_llm_client(
     """
     Get an LLM client for the specified task type.
     
-    Uses config from get_llm_config() and respects USE_MOCK_LLM setting.
+    Uses LLMMode from config to determine behavior (LLM-003):
+    - REAL: Use real API clients
+    - MOCK: Use MockLLMClient
+    - RECORD: Use real API clients (recording handled in complete())
+    - REPLAY: Use real API clients (replay handled in complete())
+    
     Supports multiple providers: OpenAI, Anthropic, and mock.
     
     Args:
@@ -487,8 +613,11 @@ def get_llm_client(
     Raises:
         RuntimeError: If strict=True and required API key is not set
     """
-    # Cache key includes provider to allow different clients per task/provider combo
-    cache_key = f"{task_type}:{provider or 'default'}"
+    # Get the current LLM mode (LLM-003)
+    mode = get_llm_mode()
+    
+    # Cache key includes provider and mode to allow different clients
+    cache_key = f"{task_type}:{provider or 'default'}:{mode.value}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
@@ -498,11 +627,13 @@ def get_llm_client(
     # Determine provider from explicit arg, config, or default
     effective_provider = provider or config.get("provider", "openai")
 
-    # Check if mock mode is explicitly requested
-    use_mock = config.get("use_mock", False) or effective_provider == "mock"
+    # LLM-003: Check mode instead of use_mock boolean
+    # MOCK mode or mock provider → MockLLMClient
+    # RECORD/REPLAY modes still need a real client (they wrap the calls)
+    use_mock = mode.is_mock or effective_provider == "mock"
 
     if use_mock:
-        logger.info(f"Using mock LLM client for task_type={task_type} (USE_MOCK_LLM=true)")
+        logger.info(f"Using mock LLM client for task_type={task_type} (LLM_MODE={mode.value})")
         client = MockLLMClient(task_type=task_type)
     elif effective_provider == "anthropic":
         # Anthropic provider
