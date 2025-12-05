@@ -26,7 +26,7 @@
       "has_content": true
     }
   ],
-  "workflow_nodes_count": 4,
+  "workflow_nodes_count": 5,
   "endpoint_bindings_count": 1,
   "completed_steps": [
     "align_task_with_kg",
@@ -52,13 +52,14 @@
   "has_report": true,
   "errors": [],
   "workflow_node_keys": [
-    "IntegrationFlowNode(id=5200, task_id=1183, node_key='start', node_type='start', label=None, description=None, config={'label': 'Start', 'description': ''}, endpoint_id=None, entity_id=None, position=0)",
-    "IntegrationFlowNode(id=5201, task_id=1183, node_key='validate_input', node_type='validation', label=None, description=None, config={'label': 'Validate Input', 'description': ''}, endpoint_id=None, entity_id=None, position=1)",
-    "IntegrationFlowNode(id=5202, task_id=1183, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'API Call', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
-    "IntegrationFlowNode(id=5203, task_id=1183, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=3)"
+    "IntegrationFlowNode(id=2941, task_id=608, node_key='start', node_type='start', label=None, description=None, config={'label': 'Start', 'description': ''}, endpoint_id=None, entity_id=None, position=0)",
+    "IntegrationFlowNode(id=2942, task_id=608, node_key='validate', node_type='validation', label=None, description=None, config={'label': 'validate', 'description': ''}, endpoint_id=None, entity_id=None, position=1)",
+    "IntegrationFlowNode(id=2943, task_id=608, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'call_api', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
+    "IntegrationFlowNode(id=2944, task_id=608, node_key='handle_response', node_type='transform', label=None, description=None, config={'label': 'handle_response', 'description': ''}, endpoint_id=None, entity_id=None, position=3)",
+    "IntegrationFlowNode(id=2945, task_id=608, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=4)"
   ],
   "binding_endpoints": [
-    "2613"
+    "1457"
   ],
   "files_created": [
     "src/app/router.py",

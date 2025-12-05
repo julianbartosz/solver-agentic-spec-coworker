@@ -371,7 +371,7 @@ def infer_provider_semantic(spec: dict) -> str:
 
 ## Migration Path to v2
 
-### Phase 1: Add x-provider-code Extension (v2)
+### Phase 1: Add x-provider-code Extension
 
 ```python
 def infer_provider_code_v2(spec_ref: str, parsed_spec: dict) -> str:
@@ -386,7 +386,7 @@ def infer_provider_code_v2(spec_ref: str, parsed_spec: dict) -> str:
     # Priority 3+: Existing cascade (unchanged)
 ```
 
-### Phase 2: Domain Fingerprint Cache (v2+)
+### Phase 2: Domain Fingerprint Cache
 
 Add high-confidence domain mappings as an optional priority:
 
@@ -400,7 +400,7 @@ KNOWN_DOMAINS = {
 # Insert between extension and server URL extraction
 ```
 
-### Phase 3: Provider Alias Support (v3)
+### Phase 3: Provider Alias Support
 
 Allow multiple names to resolve to same canonical provider:
 

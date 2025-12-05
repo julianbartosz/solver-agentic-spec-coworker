@@ -136,17 +136,13 @@ class TestDynamicProviderInference:
         assert len(result.workflow_nodes) >= 3
 
 
-class TestLegacyTemplatesGating:
-    """Tests for USE_LEGACY_TEMPLATES env var gating."""
+class TestInferenceBasedWorkflow:
+    """V2: Tests for KG-only with inference fallback (legacy templates removed)."""
     
-    def test_legacy_templates_disabled_by_default(self, mock_payments_spec, monkeypatch):
+    def test_inference_used_when_kg_empty(self, mock_payments_spec, monkeypatch):
         """
-        With USE_LEGACY_TEMPLATES=0 (default), should use dynamic inference.
+        V2: When KG has no templates, should use HTTP-method-based inference.
         """
-        # Explicitly disable legacy templates
-        monkeypatch.setenv("USE_LEGACY_TEMPLATES", "0")
-        monkeypatch.setenv("USE_IN_MEMORY_KG_FALLBACK", "0")
-        
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -156,30 +152,24 @@ class TestLegacyTemplatesGating:
         # Should still work using dynamic inference
         assert result.code_artifacts is not None
         
-        # Check template source - should be "inferred" not "legacy"
+        # Check template source - can be "inferred", "pattern", "kg", or None
         template_source = result.plan.get("template_source")
-        # With both legacy and KG fallback disabled, we expect inference
-        assert template_source in (None, "inferred", "kg")
+        assert template_source in (None, "inferred", "pattern", "kg")
     
-    def test_legacy_templates_enabled_when_requested(self, mock_payments_spec, monkeypatch):
+    def test_workflow_nodes_created_from_inference(self, mock_payments_spec, monkeypatch):
         """
-        With USE_LEGACY_TEMPLATES=1, should use legacy templates.
+        V2: Inference should create valid workflow nodes.
         """
-        monkeypatch.setenv("USE_LEGACY_TEMPLATES", "1")
-        monkeypatch.setenv("USE_IN_MEMORY_KG_FALLBACK", "0")
-        
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
-            provider_code="mock_payments",  # Need exact match for legacy
+            provider_code="mock_payments",
             options=IntegrationOptions(dry_run=True),
         )
         
-        # Should have found a legacy template
-        templates = result.plan.get("candidate_templates", [])
-        if templates:
-            # Legacy template should have template_id
-            assert templates[0].get("template_id") is not None
+        # Should have workflow nodes from inference
+        assert result.workflow_nodes is not None
+        assert len(result.workflow_nodes) >= 3  # At least start, api_call, end
 
 
 class TestCodeArtifactQuality:
@@ -206,8 +196,10 @@ class TestCodeArtifactQuality:
         
         client_code = client_artifacts[0].content
         
-        # Should use proper import paths (not relative)
-        assert "from integration_coworker.runtime.http_client" in client_code
+        # In inline mode (default): uses httpx directly
+        # In runtime mode: uses from integration_coworker.runtime.http_client
+        # Both are valid - just check we have proper imports, not relative ones
+        assert "import httpx" in client_code or "from integration_coworker.runtime.http_client" in client_code
         # Should NOT use relative imports
         assert "from .http_client" not in client_code
     

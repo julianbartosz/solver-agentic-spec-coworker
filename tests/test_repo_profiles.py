@@ -15,6 +15,8 @@ from integration_coworker.repo.profiles import (
     FLASK_PROFILE,
     EXPRESS_PROFILE,
     NESTJS_PROFILE,
+    GENERIC_PYTHON_PROFILE,
+    GENERIC_TYPESCRIPT_PROFILE,
     detect_profile_from_repo,
 )
 
@@ -213,25 +215,25 @@ fastapi[all]>=0.100.0
 class TestDetectProfileFallback:
     """Tests for fallback behavior when no framework is detected."""
     
-    def test_empty_directory_returns_default(self, tmp_path):
-        """Empty directory returns SUBATOMIC_MOCK_PROFILE."""
+    def test_empty_directory_returns_generic(self, tmp_path):
+        """Empty directory returns GENERIC_PYTHON_PROFILE (V2)."""
         profile = detect_profile_from_repo(tmp_path)
-        assert profile == SUBATOMIC_MOCK_PROFILE
+        assert profile == GENERIC_PYTHON_PROFILE
     
-    def test_nonexistent_path_returns_default(self, tmp_path):
-        """Non-existent path returns SUBATOMIC_MOCK_PROFILE."""
+    def test_nonexistent_path_returns_generic(self, tmp_path):
+        """Non-existent path returns GENERIC_PYTHON_PROFILE (V2)."""
         nonexistent = tmp_path / "does_not_exist"
         profile = detect_profile_from_repo(nonexistent)
-        assert profile == SUBATOMIC_MOCK_PROFILE
+        assert profile == GENERIC_PYTHON_PROFILE
     
-    def test_generic_python_project_returns_default(self, tmp_path):
-        """Generic Python project without framework markers returns default."""
+    def test_generic_python_project_returns_generic(self, tmp_path):
+        """Generic Python project without framework markers returns GENERIC_PYTHON_PROFILE (V2)."""
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "myproject"\n')
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("print('hello')")
         
         profile = detect_profile_from_repo(tmp_path)
-        assert profile == SUBATOMIC_MOCK_PROFILE
+        assert profile == GENERIC_PYTHON_PROFILE
 
 
 # ---------------------------------------------------------------------------

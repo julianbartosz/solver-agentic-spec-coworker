@@ -7,8 +7,10 @@ role: planning
 inherits: _base
 
 model:
+  # GPT-5.1 for planning and KG alignment
+  # Change provider/name here to swap models without code changes
   provider: openai
-  name: gpt-4
+  name: gpt-5.1
   temperature: 0.3
   max_tokens: 2048
 

@@ -110,6 +110,18 @@ class WorkflowState:
     # Node timing tracking (for observability - shows non-LLM nodes do work)
     node_timings: Dict[str, float] = field(default_factory=dict)
 
+    # V4 Observability: LLM token usage tracking
+    # Aggregated across all LLM calls in this run
+    llm_token_usage: Dict[str, int] = field(default_factory=lambda: {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    })
+
+    # V1.1: Spec caching (FT-001)
+    # When True, build_silver_api_model skips LLM parsing and loads from DB
+    cache_hit: bool = False
+
     # Outputs
     report_markdown: Optional[str] = None
     run_id: Optional[str] = None

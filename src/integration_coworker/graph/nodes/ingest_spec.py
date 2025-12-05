@@ -91,6 +91,12 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
     Ingest all spec_refs (primary + supporting) into spec_documents and doc_chunks.
 
     API-002: Creates SourceRef objects for each spec, enabling traceability.
+    
+    V1.1 Spec Caching (FT-001):
+    - Computes SHA-256 hash of spec content
+    - Checks DB for existing spec_document with matching hash
+    - If found (cache hit): Sets state.cache_hit=True, skips persistence
+    - If not found (cache miss): Proceeds with normal persistence
 
     V3 Adaptive Streaming:
     - Automatically streams large specs (>500KB) to DB for memory efficiency
@@ -107,9 +113,9 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
     - Chunks are accumulated in state.doc_chunks (original behavior)
     - All data persisted in persist_silver_checkpoint
 
-    Reads: spec_refs, plan, provider_code
+    Reads: spec_refs, plan, provider_code, options.no_cache
     Writes: source_refs, spec_documents, doc_chunks (legacy) OR spec_chunk_ids (streaming),
-            plan["chunk_index_to_spec_document_uri"]
+            plan["chunk_index_to_spec_document_uri"], cache_hit
     """
     if not state.spec_refs:
         state.errors.append("No spec_refs provided")
@@ -126,10 +132,15 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
     
     logger.debug(f"Created {len(state.source_refs)} SourceRef objects")
 
+    # V1.1: Check if caching is disabled via CLI flag
+    no_cache = False
+    if state.options and hasattr(state.options, 'no_cache'):
+        no_cache = state.options.no_cache
+    
     # If streaming is explicitly disabled, use legacy mode
     if is_streaming_persistence_disabled():
         logger.debug("Streaming persistence disabled, using legacy mode")
-        return _ingest_spec_legacy(state)
+        return _ingest_spec_legacy(state, no_cache=no_cache)
     
     # Fetch all specs first to determine total size
     fetched_specs = []
@@ -148,6 +159,19 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
         state.completed_steps.append("ingest_spec")
         return state
     
+    # V1.1: Check cache BEFORE deciding streaming mode
+    if not no_cache:
+        cache_result = _check_spec_cache(fetched_specs, state.provider_code)
+        if cache_result:
+            logger.info(f"Spec cache hit! Using existing spec_document id={cache_result.id}")
+            state.spec_documents = [cache_result]
+            state.cache_hit = True
+            state.completed_steps.append("ingest_spec")
+            return state
+    
+    # Cache miss - proceed with normal ingestion
+    state.cache_hit = False
+    
     # Estimate chunks (rough: 1 chunk per 1000 chars)
     estimated_chunks = total_bytes // 1000
     
@@ -162,7 +186,85 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
         return _ingest_spec_legacy_with_fetched(state, fetched_specs)
 
 
-def _ingest_spec_legacy(state: WorkflowState) -> WorkflowState:
+def _check_spec_cache(
+    fetched_specs: List[Tuple[str, str, str]],
+    provider_code: str = None,
+) -> SpecDocument | None:
+    """
+    V1.1 (FT-001): Check if specs already exist in the database.
+    
+    Computes SHA-256 hash of all fetched spec content and checks
+    if a matching spec_document exists in the database.
+    
+    Args:
+        fetched_specs: List of (uri, content, content_type) tuples
+        provider_code: Optional provider code for filtering
+        
+    Returns:
+        SpecDocument if cache hit, None if cache miss
+    """
+    from integration_coworker.persistence import db
+    from integration_coworker.persistence.sql_helpers import get_engine_type
+    
+    if not fetched_specs:
+        return None
+    
+    # For now, we only cache single-spec scenarios
+    # Multi-spec caching is more complex (need to match ALL specs)
+    if len(fetched_specs) > 1:
+        logger.debug("Multi-spec scenario, skipping cache check")
+        return None
+    
+    ref, content, content_type = fetched_specs[0]
+    sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    
+    try:
+        db.init_schema()
+        conn = db.get_connection()
+        engine = get_engine_type()
+        cur = conn.cursor()
+        
+        if engine == "postgres":
+            cur.execute("""
+                SELECT id, source_system_id, version, uri, content_type, sha256
+                FROM spec_silver.spec_documents
+                WHERE sha256 = %s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (sha256,))
+        else:
+            cur.execute("""
+                SELECT id, source_system_id, version, uri, content_type, sha256
+                FROM spec_documents
+                WHERE sha256 = ?
+                ORDER BY id DESC
+                LIMIT 1
+            """, (sha256,))
+        
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            logger.info(f"Spec cache hit: sha256={sha256[:16]}... -> id={row[0]}")
+            return SpecDocument(
+                id=row[0],
+                source_system_id=row[1],
+                version=row[2],
+                uri=row[3],
+                content_type=row[4],
+                sha256=row[5],
+                content=content,  # Provide content for downstream parsing
+            )
+        else:
+            logger.debug(f"Spec cache miss: sha256={sha256[:16]}...")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"Spec cache check failed: {e}")
+        return None
+
+
+def _ingest_spec_legacy(state: WorkflowState, no_cache: bool = False) -> WorkflowState:
     """
     Legacy ingest mode: accumulate chunks in memory.
     
@@ -171,38 +273,63 @@ def _ingest_spec_legacy(state: WorkflowState) -> WorkflowState:
     
     Note: This fetches specs itself. For pre-fetched specs, use
     _ingest_spec_legacy_with_fetched().
+    
+    Args:
+        state: WorkflowState to update
+        no_cache: If True, skip cache check (V1.1 FT-001)
     """
-    all_chunks: list[str] = []
-    chunk_index_to_uri: dict[int, str] = {}
-
+    # Fetch specs first
+    fetched_specs = []
     for ref in state.spec_refs:
         try:
             content, content_type = _fetch_spec_content(ref)
-            sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-            # Create SpecDocument for this ref
-            spec_doc = SpecDocument(
-                id=None,
-                source_system_id=None,
-                version="1.0",
-                uri=ref,
-                content_type=content_type,
-                sha256=sha256,
-                content=content,
-            )
-            state.spec_documents.append(spec_doc)
-
-            # Chunk this document
-            doc_chunks = _chunk_content(content)
-
-            # Track which chunks belong to which spec document
-            start_idx = len(all_chunks)
-            for i, chunk in enumerate(doc_chunks):
-                chunk_index_to_uri[start_idx + i] = ref
-            all_chunks.extend(doc_chunks)
-
+            fetched_specs.append((ref, content, content_type))
         except Exception as e:
-            state.errors.append(f"Failed to ingest spec from {ref}: {str(e)}")
+            state.errors.append(f"Failed to fetch spec from {ref}: {str(e)}")
+    
+    if not fetched_specs:
+        state.errors.append("No specs could be fetched")
+        state.completed_steps.append("ingest_spec")
+        return state
+    
+    # V1.1: Check cache before proceeding
+    if not no_cache:
+        cache_result = _check_spec_cache(fetched_specs, state.provider_code)
+        if cache_result:
+            logger.info(f"Spec cache hit! Using existing spec_document id={cache_result.id}")
+            state.spec_documents = [cache_result]
+            state.cache_hit = True
+            state.completed_steps.append("ingest_spec")
+            return state
+    
+    state.cache_hit = False
+    
+    all_chunks: list[str] = []
+    chunk_index_to_uri: dict[int, str] = {}
+
+    for ref, content, content_type in fetched_specs:
+        sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        # Create SpecDocument for this ref
+        spec_doc = SpecDocument(
+            id=None,
+            source_system_id=None,
+            version="1.0",
+            uri=ref,
+            content_type=content_type,
+            sha256=sha256,
+            content=content,
+        )
+        state.spec_documents.append(spec_doc)
+
+        # Chunk this document
+        doc_chunks = _chunk_content(content)
+
+        # Track which chunks belong to which spec document
+        start_idx = len(all_chunks)
+        for i, chunk in enumerate(doc_chunks):
+            chunk_index_to_uri[start_idx + i] = ref
+        all_chunks.extend(doc_chunks)
 
     state.doc_chunks = all_chunks
 
@@ -222,10 +349,15 @@ def _ingest_spec_legacy_with_fetched(
     Legacy ingest mode with pre-fetched specs.
     
     API-002: Links each SpecDocument to its SourceRef for traceability.
+    V2.1 (GAP-01): Stores raw spec bytes to Bronze layer for audit trail.
     
     Args:
         fetched_specs: List of (uri, content, content_type) tuples
     """
+    from integration_coworker.persistence.streaming import stream_raw_spec_to_bronze
+    from integration_coworker.persistence import db
+    from integration_coworker.persistence.sql_helpers import upsert_ignore, select_by_columns, get_engine_type
+    
     all_chunks: list[str] = []
     chunk_index_to_uri: dict[int, str] = {}
     
@@ -238,13 +370,64 @@ def _ingest_spec_legacy_with_fetched(
         elif isinstance(sr, str):
             uri_to_source_ref[sr] = None  # Legacy: no SourceRef object
 
+    # Get or create source_system FIRST so we have the ID for Bronze storage
+    db.init_schema()
+    engine = get_engine_type()
+    schema = "spec_silver" if engine == "postgres" else None
+    provider_code = state.provider_code or "unknown"
+    conn = db.get_connection()
+    cur = conn.cursor()
+    sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], schema)
+    cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
+    sql = select_by_columns("source_systems", ["id"], ["code"], schema)
+    cur.execute(sql, (provider_code,))
+    source_system_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
+
     for ref, content, content_type in fetched_specs:
         sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-        # Create SpecDocument for this ref
+        # V2.1 (GAP-01): Store raw spec to Bronze layer for audit trail
+        try:
+            raw_spec_id = stream_raw_spec_to_bronze(
+                content=content,
+                uri=ref,
+                content_type=content_type,
+                source_system_id=source_system_id,
+            )
+            logger.debug(f"Stored raw spec to bronze layer: {ref} (id={raw_spec_id})")
+        except Exception as e:
+            # Non-fatal: Bronze storage is for audit, not critical path
+            logger.warning(f"Failed to store raw spec to bronze layer: {e}")
+
+        # V1.1 (FT-001): Persist spec_document NOW for cache lookups
+        # Previously this was only done in persist_silver_checkpoint, but that
+        # runs AFTER ingest_spec, so cache checks would always miss.
+        spec_document_id = None
+        conn = None
+        try:
+            conn = db.get_connection()
+            cur = conn.cursor()
+            sql = upsert_ignore(
+                "spec_documents",
+                ["source_system_id", "uri", "sha256", "content_type"],
+                ["source_system_id", "sha256"],
+                schema
+            )
+            cur.execute(sql, (source_system_id, ref, sha256, content_type))
+            sql = select_by_columns("spec_documents", ["id"], ["source_system_id", "sha256"], schema)
+            cur.execute(sql, (source_system_id, sha256))
+            spec_document_id = cur.fetchone()[0]
+            conn.commit()
+        finally:
+            if conn:
+                conn.close()
+
+        # Create SpecDocument for this ref with persisted ID
         spec_doc = SpecDocument(
-            id=None,
-            source_system_id=None,
+            id=spec_document_id,
+            source_system_id=source_system_id,
             version="1.0",
             uri=ref,
             content_type=content_type,
@@ -309,11 +492,13 @@ def _ingest_spec_streaming_with_fetched(
     """
     V3 Streaming ingest mode with pre-fetched specs.
     
+    V2.1 (GAP-01): Also stores raw spec bytes to Bronze layer for audit trail.
+    
     Args:
         fetched_specs: List of (uri, content, content_type) tuples
     """
     from integration_coworker.persistence import db
-    from integration_coworker.persistence.streaming import stream_chunks_to_silver
+    from integration_coworker.persistence.streaming import stream_chunks_to_silver, stream_raw_spec_to_bronze
     from integration_coworker.persistence.sql_helpers import upsert_ignore, select_by_columns, get_engine_type
 
     # Initialize schema for streaming writes
@@ -327,14 +512,39 @@ def _ingest_spec_streaming_with_fetched(
     engine = get_engine_type()
     schema = "spec_silver" if engine == "postgres" else None
 
+    # Get or create source_system FIRST so we have the ID for all operations
+    provider_code = state.provider_code or "unknown"
+    conn = db.get_connection()
+    cur = conn.cursor()
+    sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], schema)
+    cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
+    sql = select_by_columns("source_systems", ["id"], ["code"], schema)
+    cur.execute(sql, (provider_code,))
+    source_system_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
+
     for ref, content, content_type in fetched_specs:
         try:
             sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
+            # V2.1 (GAP-01): Store raw spec to Bronze layer for audit trail
+            try:
+                raw_spec_id = stream_raw_spec_to_bronze(
+                    content=content,
+                    uri=ref,
+                    content_type=content_type,
+                    source_system_id=source_system_id,
+                )
+                logger.debug(f"Stored raw spec to bronze layer: {ref} (id={raw_spec_id})")
+            except Exception as e:
+                # Non-fatal: Bronze storage is for audit, not critical path
+                logger.warning(f"Failed to store raw spec to bronze layer: {e}")
+
             # Create SpecDocument for this ref (content stored for parsing, will be cleared later)
             spec_doc = SpecDocument(
                 id=None,
-                source_system_id=None,
+                source_system_id=source_system_id,
                 version="1.0",
                 uri=ref,
                 content_type=content_type,
@@ -343,18 +553,9 @@ def _ingest_spec_streaming_with_fetched(
             )
             state.spec_documents.append(spec_doc)
 
-            # We need to persist the spec_document first to get an ID
-            # This is normally done in persist_silver_checkpoint, but we need it now
+            # We need to persist the spec_document to get an ID
             conn = db.get_connection()
             cur = conn.cursor()
-            
-            # Get or create source_system
-            provider_code = state.provider_code or "unknown"
-            sql = upsert_ignore("source_systems", ["code", "display_name"], ["code"], schema)
-            cur.execute(sql, (provider_code, provider_code.replace("_", " ").title()))
-            sql = select_by_columns("source_systems", ["id"], ["code"], schema)
-            cur.execute(sql, (provider_code,))
-            source_system_id = cur.fetchone()[0]
             
             # Insert spec_document
             sql = upsert_ignore(

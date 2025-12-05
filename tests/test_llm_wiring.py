@@ -27,10 +27,13 @@ class TestArchetypeLoading:
         
         reset_archetype_cache()
         
+        # Updated for new model configuration:
+        # - understand_task, plan_integration_flow use OpenAI (gpt-5.1) for planning
+        # - generate_code_and_tests uses Anthropic (claude-sonnet-4) for code writing
         expected_configs = [
-            ("understand_task", {"provider": "anthropic", "model_prefix": "claude-sonnet-4"}),
-            ("plan_integration_flow", {"provider": "anthropic", "model_prefix": "claude-sonnet-4"}),
-            ("generate_code_and_tests", {"provider": "anthropic", "model_prefix": "claude-sonnet-4"}),
+            ("understand_task", {"provider": "openai", "model_prefix": "gpt-5.1"}),
+            ("plan_integration_flow", {"provider": "openai", "model_prefix": "gpt-5.1"}),
+            ("generate_code_and_tests", {"provider": "anthropic", "model_prefix": "claude-sonnet"}),
             # build_report uses base archetype (openai)
         ]
         
@@ -80,11 +83,12 @@ class TestLLMClientWiring:
         reset_archetype_cache()
         reset_client_cache()
         
-        archetype = load_archetype("understand_task")
+        # generate_code_and_tests uses Anthropic (claude-sonnet-4)
+        archetype = load_archetype("generate_code_and_tests")
         client = get_llm_client_for_archetype(archetype)
         
         assert isinstance(client, AnthropicLLMClient), \
-            f"Expected AnthropicLLMClient for understand_task, got {type(client).__name__}"
+            f"Expected AnthropicLLMClient for generate_code_and_tests, got {type(client).__name__}"
 
     def test_openai_archetype_returns_openai_client(self, monkeypatch):
         """OpenAI archetypes should return OpenAILLMClient."""
@@ -118,8 +122,8 @@ class TestEnvOverrides:
         
         reset_archetype_cache()
         
-        # Anthropic archetype should NOT pick up gpt-4o-mini
-        anthropic_archetype = load_archetype("understand_task")
+        # Anthropic archetype (generate_code_and_tests) should NOT pick up gpt-4o-mini
+        anthropic_archetype = load_archetype("generate_code_and_tests")
         anthropic_model = anthropic_archetype.get("model", {}).get("name", "")
         assert not anthropic_model.startswith("gpt-"), \
             f"Anthropic archetype should not use gpt-* model, got {anthropic_model}"
@@ -142,7 +146,7 @@ class TestEnvOverrides:
         reset_archetype_cache()
         reset_client_cache()
         
-        # Even Anthropic archetype should return MockLLMClient
+        # Even OpenAI archetype should return MockLLMClient
         archetype = load_archetype("understand_task")
         client = get_llm_client_for_archetype(archetype)
         
@@ -158,8 +162,8 @@ class TestEnvOverrides:
         
         reset_archetype_cache()
         
-        # Anthropic archetype SHOULD pick up claude-3-haiku
-        anthropic_archetype = load_archetype("understand_task")
+        # Anthropic archetype (generate_code_and_tests) SHOULD pick up claude-3-haiku
+        anthropic_archetype = load_archetype("generate_code_and_tests")
         anthropic_model = anthropic_archetype.get("model", {}).get("name", "")
         assert anthropic_model == "claude-3-haiku-20240307", \
             f"Anthropic archetype should use claude-3-haiku from env, got {anthropic_model}"

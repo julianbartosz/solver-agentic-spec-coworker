@@ -17,7 +17,7 @@ Requires Silver checkpoint to have run first (needs source_system_id, endpoint I
 
 Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
 """
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import json
 import logging
 
@@ -256,7 +256,7 @@ def persist_gold_checkpoint(state: WorkflowState) -> WorkflowState:
             "endpoint_binding_count": len(state.endpoint_bindings),
             "policy_count": len(state.policies),
             "code_artifact_count": len(state.code_artifacts),
-            "gold_timestamp": datetime.now(UTC).isoformat(),
+            "gold_timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
         state.completed_steps.append("persist_gold_checkpoint")

@@ -1,6 +1,12 @@
 import ast
 import logging
+from typing import Optional
 from integration_coworker.graph.state import WorkflowState
+from integration_coworker.feedback.hooks import (
+    safe_record_validation_result,
+    safe_record_syntax_check,
+    are_hooks_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +31,28 @@ def _validate_python_syntax(code: str, filepath: str) -> list[str]:
     return errors
 
 
+def _get_template_key(state: WorkflowState) -> str:
+    """Get the template key from state for feedback recording."""
+    if state.workflow_template and state.workflow_template.key:
+        return state.workflow_template.key
+    # Fallback to constructed key from provider + task
+    provider = state.provider_code or "unknown"
+    task_slug = state.integration_task.task_slug if state.integration_task else "task"
+    return f"workflow.{provider}.{task_slug}"
+
+
 def _validate_code_artifacts(state: WorkflowState) -> list[str]:
     """
     Validate generated code artifacts for syntax errors.
     
     M5 WS3-T2: AST parse generated code before returning.
+    
+    Also records feedback for each artifact's syntax check result
+    to update KG confidence scores.
     """
     errors = []
+    run_id = state.run_id or "unknown"
+    template_key = _get_template_key(state)
 
     for artifact in state.code_artifacts:
         if artifact.language == "python":
@@ -40,6 +61,24 @@ def _validate_code_artifacts(state: WorkflowState) -> list[str]:
                 artifact.rel_path
             )
             errors.extend(syntax_errors)
+            
+            # Record syntax check result for feedback learning
+            if are_hooks_enabled():
+                if syntax_errors:
+                    safe_record_syntax_check(
+                        run_id=run_id,
+                        template_key=template_key,
+                        artifact_type=artifact.artifact_type,
+                        success=False,
+                        error_message="; ".join(syntax_errors),
+                    )
+                else:
+                    safe_record_syntax_check(
+                        run_id=run_id,
+                        template_key=template_key,
+                        artifact_type=artifact.artifact_type,
+                        success=True,
+                    )
 
     if errors:
         logger.warning(f"Found {len(errors)} syntax error(s) in generated code")
@@ -144,6 +183,18 @@ def validate_integration_design(state: WorkflowState) -> WorkflowState:
 
     # For M3: don't raise on warnings, only on critical structural failures
     critical_failures = [e for e in validation_errors if "Warning" not in e and "warning" not in e]
+    
+    # Record validation result for feedback learning
+    if are_hooks_enabled():
+        run_id = state.run_id or "unknown"
+        template_key = _get_template_key(state)
+        safe_record_validation_result(
+            run_id=run_id,
+            template_key=template_key,
+            success=len(critical_failures) == 0,
+            validation_errors=critical_failures if critical_failures else None,
+        )
+    
     if critical_failures:
         error_msg = f"Validation failed with {len(critical_failures)} critical error(s)"
         raise ValueError(error_msg)

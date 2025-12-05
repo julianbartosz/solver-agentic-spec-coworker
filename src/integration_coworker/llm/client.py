@@ -3,14 +3,19 @@ LLM Client Implementation
 
 Provides unified LLM client for integration coworker nodes.
 Uses LangChain for automatic LangSmith tracing.
-Supports OpenAI, Anthropic, and mock fallback for testing.
+Supports OpenAI, Anthropic, Google Gemini, and mock fallback for testing.
 
 Supported Providers:
-- OpenAI: gpt-4, gpt-4o-mini, gpt-3.5-turbo, etc.
-- Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku, etc.
+- OpenAI: gpt-5.1, gpt-4o, gpt-4o-mini, etc.
+- Anthropic: claude-sonnet-4, claude-opus-4, etc.
+- Google: gemini-3-pro, gemini-2.0-flash, etc. (large context windows)
+
+Model Configuration:
+Models are configured per-node via archetype YAML files in config/archetypes/.
+This allows swapping providers/models without code changes.
 
 LLM Modes (LLM-003):
-- REAL: Call OpenAI/Anthropic APIs
+- REAL: Call OpenAI/Anthropic/Google APIs
 - MOCK: Return deterministic static strings
 - RECORD: Call Real APIs, save request/response to disk
 - REPLAY: Read from disk, fail if missing
@@ -40,7 +45,7 @@ from integration_coworker.llm.safety import harden_system_prompt
 logger = logging.getLogger(__name__)
 
 # Supported LLM providers
-LLMProvider = Literal["openai", "anthropic", "mock"]
+LLMProvider = Literal["openai", "anthropic", "google", "mock"]
 
 # Context variable for current run_id (set by workflow runtime)
 _current_run_id: ContextVar[Optional[str]] = ContextVar("current_run_id", default=None)
@@ -62,6 +67,66 @@ def clear_run_context() -> None:
     """Clear the run context."""
     _current_run_id.set(None)
     _current_provider.set(None)
+
+
+# =============================================================================
+# V4 Observability: Token Usage Tracking
+# =============================================================================
+
+# Aggregate token usage for current run
+_token_usage: ContextVar[Dict[str, int]] = ContextVar(
+    "token_usage",
+    default=None
+)
+
+
+def init_token_usage() -> None:
+    """Initialize token usage tracking for a run."""
+    _token_usage.set({
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    })
+
+
+def get_token_usage() -> Dict[str, int]:
+    """Get aggregated token usage for the current run."""
+    usage = _token_usage.get()
+    if usage is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return usage.copy()
+
+
+def _track_token_usage(response) -> None:
+    """
+    Extract and aggregate token usage from LangChain response.
+    
+    LangChain AIMessage includes response_metadata with token counts.
+    """
+    usage = _token_usage.get()
+    if usage is None:
+        return  # Not tracking
+    
+    try:
+        # Try response_metadata (newer LangChain)
+        if hasattr(response, 'response_metadata') and response.response_metadata:
+            token_info = response.response_metadata.get('token_usage', {})
+            if not token_info:
+                # OpenAI format
+                token_info = response.response_metadata.get('usage', {})
+            
+            usage["prompt_tokens"] += token_info.get("prompt_tokens", 0)
+            usage["completion_tokens"] += token_info.get("completion_tokens", 0)
+            usage["total_tokens"] += token_info.get("total_tokens", 0)
+        
+        # Try usage_metadata (alternative)
+        elif hasattr(response, 'usage_metadata') and response.usage_metadata:
+            usage["prompt_tokens"] += getattr(response.usage_metadata, 'input_tokens', 0)
+            usage["completion_tokens"] += getattr(response.usage_metadata, 'output_tokens', 0)
+            usage["total_tokens"] += getattr(response.usage_metadata, 'total_tokens', 0)
+            
+    except Exception as e:
+        logger.debug(f"Could not extract token usage: {e}")
 
 
 # =============================================================================
@@ -199,8 +264,15 @@ class MockLLMClient:
         """Return a mock JSON response."""
         prompt_lower = prompt.lower()
 
-        # Task understanding - return structured response
-        if "task" in prompt_lower and ("understand" in prompt_lower or "analyze" in prompt_lower or "integration task" in prompt_lower):
+        # Task understanding - return structured response (check FIRST, before workflow)
+        # V1.2: Made more specific to catch task analysis prompts that also mention "plan"
+        if any(marker in prompt_lower for marker in [
+            "analyze this integration task",
+            "task_slug",
+            "integration task",
+            "understand",
+            "target_operations",
+        ]):
             # Extract task_slug from prompt keywords
             task_slug = "mock_task"
             if "checkout" in prompt_lower and "session" in prompt_lower:
@@ -221,8 +293,9 @@ class MockLLMClient:
                 "target_operations": [],
             }
 
-        # Workflow planning - return structured flow
-        if "workflow" in prompt_lower or "flow" in prompt_lower or "plan" in prompt_lower:
+        # Workflow planning - return structured flow (nodes/edges)
+        # Only match explicit workflow structure requests
+        if ("workflow" in prompt_lower and "nodes" in prompt_lower) or "flow" in prompt_lower or "design a workflow" in prompt_lower:
             return {
                 "nodes": [
                     {"node_key": "start", "node_type": "start", "label": "Start", "position": 0},
@@ -388,6 +461,9 @@ class OpenAILLMClient:
 
             result = response.content or ""
             
+            # V4 Observability: Track token usage from response metadata
+            _track_token_usage(response)
+            
             # LLM-003: Save interaction if in RECORD mode
             if mode.should_record:
                 _save_interaction(prompt, hardened_system, self.model, result)
@@ -440,11 +516,11 @@ class AnthropicLLMClient:
     Anthropic Claude LLM client with LangSmith tracing.
     
     Uses LangChain's ChatAnthropic for automatic LangSmith integration.
-    Supports Claude 3 models (Opus, Sonnet, Haiku).
+    Supports Claude models (Opus 4.5, Sonnet 4, etc.).
     """
 
     api_key: str
-    model: str = "claude-3-sonnet-20240229"
+    model: str = "claude-sonnet-4-20250514"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
     task_type: str = "default"
@@ -580,6 +656,158 @@ class AnthropicLLMClient:
             return {"error": "Failed to parse response", "raw": response[:500]}
 
 
+@dataclass
+class GoogleLLMClient:
+    """
+    Google Gemini LLM client with LangSmith tracing.
+    
+    Uses LangChain's ChatGoogleGenerativeAI for automatic LangSmith integration.
+    Supports Gemini models (gemini-3-pro, gemini-2.0-flash, etc.).
+    
+    Gemini models offer large context windows, making them ideal for 
+    repo analysis and tasks requiring extensive context.
+    """
+
+    api_key: str
+    model: str = "gemini-3-pro"
+    default_temperature: float = 0.7
+    default_max_tokens: int = 2000
+    task_type: str = "default"
+
+    _llm: Optional[Any] = field(default=None, repr=False)
+
+    def _get_llm(self, temperature: Optional[float] = None, max_tokens: Optional[int] = None):
+        """Get or create the LangChain ChatGoogleGenerativeAI instance."""
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+        except ImportError:
+            raise ImportError(
+                "langchain-google-genai package required for Google Gemini LLM calls. "
+                "Install with: pip install langchain-google-genai"
+            )
+
+        kwargs = {
+            "google_api_key": self.api_key,
+            "model": self.model,
+            "temperature": temperature if temperature is not None else self.default_temperature,
+            "max_output_tokens": max_tokens or self.default_max_tokens,
+        }
+
+        return ChatGoogleGenerativeAI(**kwargs)
+
+    def _build_metadata(self) -> Dict[str, Any]:
+        """Build metadata for LangSmith tracing."""
+        run_id, provider_code = get_run_context()
+        metadata = {
+            "task_type": self.task_type,
+            "model": self.model,
+            "provider": "google",
+        }
+        if run_id:
+            metadata["run_id"] = run_id
+        if provider_code:
+            metadata["provider_code"] = provider_code
+        return metadata
+
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Generate a completion using LangChain ChatGoogleGenerativeAI.
+        
+        Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
+        v2: System prompts are hardened with safety preamble (SEC-001).
+        LLM-003: Supports RECORD/REPLAY modes for regression testing.
+        """
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+        except ImportError:
+            raise ImportError(
+                "langchain-core package required for LLM calls. "
+                "Install with: pip install langchain-core"
+            )
+
+        # v2: Harden system prompt (SEC-001)
+        hardened_system = harden_system_prompt(system_prompt)
+
+        # LLM-003: Check for REPLAY mode first
+        mode = get_llm_mode()
+        if mode.should_replay:
+            cached = _load_interaction(prompt, hardened_system, self.model)
+            if cached is not None:
+                return cached
+            raise RuntimeError(
+                f"REPLAY mode: No recorded interaction found for prompt. "
+                f"Run with LLM_MODE=record first to capture interactions."
+            )
+
+        llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
+
+        messages = []
+        messages.append(SystemMessage(content=hardened_system))
+        messages.append(HumanMessage(content=prompt))
+
+        metadata = self._build_metadata()
+
+        try:
+            response = llm.invoke(
+                messages,
+                config={
+                    "metadata": metadata,
+                    "tags": [f"task:{self.task_type}", f"model:{self.model}", "provider:google"],
+                }
+            )
+
+            result = response.content or ""
+            
+            # V4 Observability: Track token usage from response metadata
+            _track_token_usage(response)
+            
+            # LLM-003: Save interaction if in RECORD mode
+            if mode.should_record:
+                _save_interaction(prompt, hardened_system, self.model, result)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Google Gemini API call failed: {e}")
+            raise
+
+    def complete_json(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Generate a completion and parse as JSON."""
+        json_system = (system_prompt or "") + "\n\nRespond only with valid JSON, no markdown formatting."
+
+        response = self.complete(
+            prompt=prompt,
+            system_prompt=json_system.strip(),
+            temperature=temperature if temperature is not None else 0.3,
+            max_tokens=max_tokens,
+        )
+
+        content = response.strip()
+
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse Google Gemini response as JSON: {e}")
+            logger.debug(f"Raw response: {response}")
+            return {"error": "Failed to parse response", "raw": response[:500]}
+
+
 # Cache for client instances
 _client_cache: Dict[str, LLMClient] = {}
 
@@ -598,7 +826,11 @@ def get_llm_client(
     - RECORD: Use real API clients (recording handled in complete())
     - REPLAY: Use real API clients (replay handled in complete())
     
-    Supports multiple providers: OpenAI, Anthropic, and mock.
+    Provider Fallback Chain (when primary provider API key is missing):
+    1. Try the configured/requested provider
+    2. Try OpenAI (if not already tried)
+    3. Try Anthropic (if not already tried)
+    4. Fall back to MockLLMClient
     
     Args:
         task_type: Type of task (e.g., "planning", "extraction", "codegen")
@@ -622,7 +854,6 @@ def get_llm_client(
         return _client_cache[cache_key]
 
     config = get_llm_config(task_type)
-    settings = get_settings()
 
     # Determine provider from explicit arg, config, or default
     effective_provider = provider or config.get("provider", "openai")
@@ -635,58 +866,134 @@ def get_llm_client(
     if use_mock:
         logger.info(f"Using mock LLM client for task_type={task_type} (LLM_MODE={mode.value})")
         client = MockLLMClient(task_type=task_type)
-    elif effective_provider == "anthropic":
-        # Anthropic provider
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not anthropic_key:
-            if strict:
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY is not set and provider=anthropic was requested.\n"
-                    "Set ANTHROPIC_API_KEY in your environment or .env file."
-                )
-            else:
-                logger.warning(
-                    f"No ANTHROPIC_API_KEY set for task_type={task_type}, falling back to mock. "
-                    "Set ANTHROPIC_API_KEY for real Anthropic calls."
-                )
-                client = MockLLMClient(task_type=task_type)
-        else:
-            logger.info(f"Using LangChain ChatAnthropic client for task_type={task_type}, model={config.get('model', 'claude-3-sonnet-20240229')}")
-            client = AnthropicLLMClient(
-                api_key=anthropic_key,
-                model=config.get("model", "claude-3-sonnet-20240229"),
-                default_temperature=config.get("temperature", 0.7),
-                default_max_tokens=config.get("max_tokens", 2000),
-                task_type=task_type,
-            )
+        _client_cache[cache_key] = client
+        return client
+
+    # Build provider fallback chain based on configured provider
+    if effective_provider == "anthropic":
+        fallback_chain = ["anthropic", "openai"]
     else:
-        # OpenAI provider (default)
-        openai_key = config.get("api_key", "")
-        if openai_key:
-            logger.info(f"Using LangChain ChatOpenAI client for task_type={task_type}, model={config.get('model')}")
-            client = OpenAILLMClient(
-                api_key=openai_key,
-                model=config.get("model", "gpt-4"),
-                base_url=config.get("base_url"),
-                default_temperature=config.get("temperature", 0.7),
-                default_max_tokens=config.get("max_tokens", 2000),
-                task_type=task_type,
-            )
-        elif strict:
+        fallback_chain = ["openai", "anthropic"]
+
+    # Try each provider in order
+    client: Optional[LLMClient] = None
+    for try_provider in fallback_chain:
+        client = _try_create_client_for_provider_from_config(
+            try_provider,
+            config=config,
+            task_type=task_type,
+            is_fallback=(try_provider != effective_provider),
+        )
+        if client is not None:
+            break
+
+    # All providers failed - use mock or raise
+    if client is None:
+        if strict:
             raise RuntimeError(
-                "OPENAI_API_KEY is not set and USE_MOCK_LLM is not 'true'.\n"
-                "For real LLM calls, set OPENAI_API_KEY in your environment or .env file.\n"
-                "For testing without API key, set USE_MOCK_LLM=true."
+                "No LLM API keys configured.\n"
+                "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in your environment or .env file.\n"
+                "For testing without API keys, set USE_MOCK_LLM=true."
             )
-        else:
-            logger.warning(
-                f"No OPENAI_API_KEY set for task_type={task_type}, using mock client. "
-                "Set OPENAI_API_KEY for real LLM calls or USE_MOCK_LLM=true to suppress this warning."
-            )
-            client = MockLLMClient(task_type=task_type)
+        
+        logger.warning(
+            f"No LLM API keys available for task_type={task_type}, using mock client. "
+            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY for real LLM calls."
+        )
+        client = MockLLMClient(task_type=task_type)
 
     _client_cache[cache_key] = client
     return client
+
+
+def _try_create_client_for_provider_from_config(
+    provider: str,
+    config: Dict[str, Any],
+    task_type: str,
+    is_fallback: bool = False,
+) -> Optional[LLMClient]:
+    """
+    Try to create an LLM client for a specific provider using config dict.
+    
+    Returns None if the provider's API key is not configured.
+    """
+    temperature = config.get("temperature", 0.7)
+    max_tokens = config.get("max_tokens", 2000)
+    
+    if provider == "anthropic":
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not anthropic_key:
+            if is_fallback:
+                logger.debug(f"Anthropic fallback skipped: ANTHROPIC_API_KEY not set")
+            return None
+        
+        model = config.get("model", "claude-3-sonnet-20240229") if not is_fallback else "claude-3-sonnet-20240229"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to Anthropic for task_type={task_type}, "
+                f"model={model}"
+            )
+        else:
+            logger.info(f"Using LangChain ChatAnthropic client for task_type={task_type}, model={model}")
+        
+        return AnthropicLLMClient(
+            api_key=anthropic_key,
+            model=model,
+            default_temperature=temperature,
+            default_max_tokens=max_tokens,
+            task_type=task_type,
+        )
+    
+    elif provider == "openai":
+        openai_key = config.get("api_key", "") or os.getenv("OPENAI_API_KEY", "")
+        if not openai_key:
+            if is_fallback:
+                logger.debug(f"OpenAI fallback skipped: OPENAI_API_KEY not set")
+            return None
+        
+        model = config.get("model", "gpt-5.1") if not is_fallback else "gpt-5.1"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to OpenAI for task_type={task_type}, "
+                f"model={model}"
+            )
+        else:
+            logger.info(f"Using LangChain ChatOpenAI client for task_type={task_type}, model={model}")
+        
+        return OpenAILLMClient(
+            api_key=openai_key,
+            model=model,
+            base_url=config.get("base_url"),
+            default_temperature=temperature,
+            default_max_tokens=max_tokens,
+            task_type=task_type,
+        )
+    
+    elif provider == "google":
+        google_key = os.getenv("GOOGLE_API_KEY", "")
+        if not google_key:
+            if is_fallback:
+                logger.debug(f"Google fallback skipped: GOOGLE_API_KEY not set")
+            return None
+        
+        model = config.get("model", "gemini-3-pro") if not is_fallback else "gemini-3-pro"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to Google Gemini for task_type={task_type}, "
+                f"model={model}"
+            )
+        else:
+            logger.info(f"Using LangChain ChatGoogleGenerativeAI client for task_type={task_type}, model={model}")
+        
+        return GoogleLLMClient(
+            api_key=google_key,
+            model=model,
+            default_temperature=temperature,
+            default_max_tokens=max_tokens,
+            task_type=task_type,
+        )
+    
+    return None
 
 
 def get_llm_client_for_archetype(archetype_config: Dict[str, Any], strict: bool = False) -> LLMClient:
@@ -695,6 +1002,12 @@ def get_llm_client_for_archetype(archetype_config: Dict[str, Any], strict: bool 
     
     This is the primary entry point when using YAML archetype files.
     Reads provider and model settings from the archetype's model section.
+    
+    Provider Fallback Chain (when primary provider API key is missing):
+    1. Try the configured provider (from archetype)
+    2. Try OpenAI (if not already tried)
+    3. Try Anthropic (if not already tried)
+    4. Fall back to MockLLMClient
     
     Args:
         archetype_config: Loaded archetype configuration dict
@@ -710,31 +1023,92 @@ def get_llm_client_for_archetype(archetype_config: Dict[str, Any], strict: bool 
     max_tokens = model_config.get("max_tokens", 2000)
     task_type = archetype_config.get("role", "default")
 
-    # Check for mock mode
+    # Check for explicit mock mode
     use_mock = os.getenv("USE_MOCK_LLM", "").lower() == "true" or provider == "mock"
 
     if use_mock:
         logger.info(f"Using mock LLM client for archetype task_type={task_type} (USE_MOCK_LLM=true)")
         return MockLLMClient(task_type=task_type)
 
+    # Build provider fallback chain based on configured provider
+    # Google is included for large-context tasks, but falls back to others if key not set
     if provider == "anthropic":
-        # Anthropic provider - use archetype model config
+        fallback_chain = ["anthropic", "openai", "google"]
+    elif provider == "google":
+        fallback_chain = ["google", "openai", "anthropic"]
+    else:
+        fallback_chain = ["openai", "anthropic", "google"]
+
+    # Try each provider in order
+    for try_provider in fallback_chain:
+        client = _try_create_client_for_provider(
+            try_provider,
+            model_name=model_name if try_provider == provider else None,  # Use archetype model only for primary
+            temperature=temperature,
+            max_tokens=max_tokens,
+            task_type=task_type,
+            is_fallback=(try_provider != provider),
+        )
+        if client is not None:
+            return client
+
+    # All providers failed - use mock or raise
+    if strict:
+        raise RuntimeError(
+            "No LLM API keys configured.\n"
+            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY in your environment or .env file.\n"
+            "For testing without API keys, set USE_MOCK_LLM=true."
+        )
+    
+    logger.warning(
+        f"No LLM API keys available for task_type={task_type}, using mock client. "
+        "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY for real LLM calls."
+    )
+    return MockLLMClient(task_type=task_type)
+
+
+def _try_create_client_for_provider(
+    provider: str,
+    model_name: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    task_type: str,
+    is_fallback: bool = False,
+) -> Optional[LLMClient]:
+    """
+    Try to create an LLM client for a specific provider.
+    
+    Returns None if the provider's API key is not configured.
+    
+    Args:
+        provider: Provider name ("openai" or "anthropic")
+        model_name: Optional model name override
+        temperature: Temperature setting
+        max_tokens: Max tokens setting
+        task_type: Task type for logging
+        is_fallback: Whether this is a fallback attempt (affects logging)
+        
+    Returns:
+        LLMClient if successful, None if API key missing
+    """
+    if provider == "anthropic":
         anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
         if not anthropic_key:
-            if strict:
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY is not set and provider=anthropic was requested.\n"
-                    "Set ANTHROPIC_API_KEY in your environment or .env file."
-                )
-            else:
-                logger.warning(
-                    f"No ANTHROPIC_API_KEY set for archetype task_type={task_type}, falling back to mock. "
-                    "Set ANTHROPIC_API_KEY for real Anthropic calls."
-                )
-                return MockLLMClient(task_type=task_type)
-
-        effective_model = model_name or "claude-3-sonnet-20240229"
-        logger.info(f"Using LangChain ChatAnthropic client for archetype task_type={task_type}, model={effective_model}")
+            if is_fallback:
+                logger.debug(f"Anthropic fallback skipped: ANTHROPIC_API_KEY not set")
+            return None
+        
+        effective_model = model_name or "claude-sonnet-4-20250514"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to Anthropic for task_type={task_type}, "
+                f"model={effective_model}"
+            )
+        else:
+            logger.info(
+                f"Using LangChain ChatAnthropic client for archetype task_type={task_type}, "
+                f"model={effective_model}"
+            )
         return AnthropicLLMClient(
             api_key=anthropic_key,
             model=effective_model,
@@ -742,24 +1116,25 @@ def get_llm_client_for_archetype(archetype_config: Dict[str, Any], strict: bool 
             default_max_tokens=max_tokens,
             task_type=task_type,
         )
-    else:
-        # OpenAI provider (default) - use archetype model config
+    
+    elif provider == "openai":
         openai_key = os.getenv("OPENAI_API_KEY", "")
         if not openai_key:
-            if strict:
-                raise RuntimeError(
-                    "OPENAI_API_KEY is not set.\n"
-                    "For real LLM calls, set OPENAI_API_KEY in your environment or .env file.\n"
-                    "For testing without API key, set USE_MOCK_LLM=true."
-                )
-            else:
-                logger.warning(
-                    f"No OPENAI_API_KEY set for archetype task_type={task_type}, using mock client."
-                )
-                return MockLLMClient(task_type=task_type)
-
-        effective_model = model_name or "gpt-4"
-        logger.info(f"Using LangChain ChatOpenAI client for archetype task_type={task_type}, model={effective_model}")
+            if is_fallback:
+                logger.debug(f"OpenAI fallback skipped: OPENAI_API_KEY not set")
+            return None
+        
+        effective_model = model_name or "gpt-5.1"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to OpenAI for task_type={task_type}, "
+                f"model={effective_model}"
+            )
+        else:
+            logger.info(
+                f"Using LangChain ChatOpenAI client for archetype task_type={task_type}, "
+                f"model={effective_model}"
+            )
         return OpenAILLMClient(
             api_key=openai_key,
             model=effective_model,
@@ -768,6 +1143,36 @@ def get_llm_client_for_archetype(archetype_config: Dict[str, Any], strict: bool 
             default_max_tokens=max_tokens,
             task_type=task_type,
         )
+    
+    elif provider == "google":
+        google_key = os.getenv("GOOGLE_API_KEY", "")
+        if not google_key:
+            if is_fallback:
+                logger.debug(f"Google fallback skipped: GOOGLE_API_KEY not set")
+            return None
+        
+        effective_model = model_name or "gemini-3-pro"
+        if is_fallback:
+            logger.info(
+                f"Primary provider unavailable, falling back to Google Gemini for task_type={task_type}, "
+                f"model={effective_model}"
+            )
+        else:
+            logger.info(
+                f"Using LangChain ChatGoogleGenerativeAI client for archetype task_type={task_type}, "
+                f"model={effective_model}"
+            )
+        return GoogleLLMClient(
+            api_key=google_key,
+            model=effective_model,
+            default_temperature=temperature,
+            default_max_tokens=max_tokens,
+            task_type=task_type,
+        )
+    
+    else:
+        logger.warning(f"Unknown provider '{provider}', skipping")
+        return None
 
 
 def get_llm_client_for_node(node_name: str, strict: bool = False) -> LLMClient:
@@ -806,15 +1211,15 @@ def is_mock_llm_mode() -> bool:
     
     Returns True if:
     - USE_MOCK_LLM is explicitly set to 'true', OR
-    - OPENAI_API_KEY is not set (implicit fallback to mock)
+    - Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set
     
     Useful for runtime warnings about mock mode in non-testing contexts.
     """
-    config = get_llm_config("default")
-    use_mock = config.get("use_mock", False)
-    has_api_key = bool(config.get("api_key"))
+    use_mock = os.getenv("USE_MOCK_LLM", "").lower() == "true"
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY", ""))
+    has_anthropic_key = bool(os.getenv("ANTHROPIC_API_KEY", ""))
 
-    return use_mock or not has_api_key
+    return use_mock or (not has_openai_key and not has_anthropic_key)
 
 
 def call_llm(

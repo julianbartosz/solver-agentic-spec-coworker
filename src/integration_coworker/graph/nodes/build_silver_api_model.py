@@ -8,17 +8,150 @@ V1 Implementation:
   - Converts parsed OpenAPI (including HTML/PDF pseudo-OpenAPI) to Silver domain models
   - Multi-spec support: iterates state.openapi_specs for each source
 
+V1.1 Spec Caching (FT-001):
+  - Fast path when state.cache_hit=True: hydrate from DB instead of re-parsing
+  - Queries existing endpoints/schemas/entities linked to cached spec_document
+
 API-002: Multi-Spec Source Reference Handling
   - Links all extracted entities to their SourceRef
   - Uses state.source_refs for traceability
   - Enables multi-provider integrations with proper provenance
 """
+import logging
 from typing import Dict, Optional
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import (
     Endpoint, EndpointParameter, Schema, SchemaField, Entity, EntityRelationship, SourceRef
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _hydrate_from_cache(state: WorkflowState) -> bool:
+    """
+    V1.1 FT-001: Hydrate Silver model from DB when cache_hit=True.
+    
+    Queries endpoints, schemas, entities linked to the cached spec_document_id.
+    Returns True if hydration succeeded, False if fallback to parsing needed.
+    """
+    if not state.spec_documents or not state.spec_documents[0].id:
+        logger.debug("No cached spec_document_id, cannot hydrate")
+        return False
+    
+    spec_doc_id = state.spec_documents[0].id
+    
+    try:
+        from integration_coworker.persistence import db
+        from integration_coworker.persistence.db import get_engine_type
+        
+        db.init_schema()
+        conn = db.get_connection()
+        engine = get_engine_type()
+        cur = conn.cursor()
+        
+        # Hydrate endpoints
+        if engine == "postgres":
+            cur.execute("""
+                SELECT id, source_system_id, path, method, operation_id, summary,
+                       description, request_schema_id, response_schema_id, auth_required,
+                       pagination_style, rate_limit_bucket
+                FROM spec_silver.endpoints
+                WHERE spec_document_id = %s
+            """, (spec_doc_id,))
+        else:
+            cur.execute("""
+                SELECT id, source_system_id, path, method, operation_id, summary,
+                       description, request_schema_id, response_schema_id, auth_required,
+                       pagination_style, rate_limit_bucket
+                FROM endpoints
+                WHERE spec_document_id = ?
+            """, (spec_doc_id,))
+        
+        endpoint_rows = cur.fetchall()
+        for row in endpoint_rows:
+            endpoint = Endpoint(
+                id=row[0],
+                source_system_id=row[1],
+                spec_document_id=spec_doc_id,
+                path=row[2],
+                method=row[3],
+                operation_id=row[4],
+                summary=row[5],
+                description=row[6],
+                request_schema_id=row[7],
+                response_schema_id=row[8],
+                auth_required=row[9],
+                pagination_style=row[10],
+                rate_limit_bucket=row[11],
+            )
+            state.endpoints.append(endpoint)
+        
+        # Hydrate schemas
+        if engine == "postgres":
+            cur.execute("""
+                SELECT id, source_system_id, name, ref
+                FROM spec_silver.schemas
+                WHERE source_system_id = (
+                    SELECT source_system_id FROM spec_silver.spec_documents WHERE id = %s
+                )
+            """, (spec_doc_id,))
+        else:
+            cur.execute("""
+                SELECT id, source_system_id, name, ref
+                FROM schemas
+                WHERE source_system_id = (
+                    SELECT source_system_id FROM spec_documents WHERE id = ?
+                )
+            """, (spec_doc_id,))
+        
+        schema_rows = cur.fetchall()
+        for row in schema_rows:
+            schema = Schema(
+                id=row[0],
+                source_system_id=row[1],
+                name=row[2],
+                ref=row[3],
+            )
+            state.schemas.append(schema)
+        
+        # Hydrate entities
+        if engine == "postgres":
+            cur.execute("""
+                SELECT id, source_system_id, name, schema_id, description
+                FROM spec_silver.entities
+                WHERE source_system_id = (
+                    SELECT source_system_id FROM spec_silver.spec_documents WHERE id = %s
+                )
+            """, (spec_doc_id,))
+        else:
+            cur.execute("""
+                SELECT id, source_system_id, name, schema_id, description
+                FROM entities
+                WHERE source_system_id = (
+                    SELECT source_system_id FROM spec_documents WHERE id = ?
+                )
+            """, (spec_doc_id,))
+        
+        entity_rows = cur.fetchall()
+        for row in entity_rows:
+            entity = Entity(
+                id=row[0],
+                source_system_id=row[1],
+                name=row[2],
+                schema_id=row[3],
+                description=row[4],
+            )
+            state.entities.append(entity)
+        
+        conn.close()
+        
+        logger.info(f"Cache hydration: {len(state.endpoints)} endpoints, {len(state.schemas)} schemas, {len(state.entities)} entities")
+        return True
+        
+    except Exception as e:
+        logger.warning(f"Cache hydration failed, falling back to parsing: {e}")
+        return False
 
 
 def _get_source_ref_for_uri(state: WorkflowState, uri: str) -> Optional[SourceRef]:
@@ -197,15 +330,30 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
     """
     Build Silver API model from all parsed OpenAPI specs (primary + supporting).
 
+    V1.1 Spec Caching (FT-001):
+    - Fast path when cache_hit=True: hydrate from DB, skip expensive parsing
+    - Reduces latency for repeated specs from ~2s to ~100ms
+
     V2 Section 3.12: Multi-spec support
     - Uses pending_specs and parsed_specs for spec tracking
     - Falls back to openapi_spec/plan["openapi_specs"] for compatibility
 
     API-002: Links all extracted entities to their SourceRef for traceability.
 
-    Reads: openapi_spec, plan["openapi_specs"], pending_specs, parsed_specs, source_refs
+    Reads: openapi_spec, plan["openapi_specs"], pending_specs, parsed_specs, source_refs, cache_hit
     Writes: endpoints, endpoint_parameters, schemas, schema_fields, entities, relationships
     """
+    # V1.1 FT-001: Fast path for cache hits
+    if state.cache_hit:
+        logger.info("Cache hit detected, attempting DB hydration")
+        if _hydrate_from_cache(state):
+            logger.info("Successfully hydrated Silver model from cache")
+            state.completed_steps.append("build_silver_api_model")
+            return state
+        else:
+            logger.warning("Cache hydration failed, falling back to parsing")
+            # Continue with normal parsing below
+    
     # Get all parsed specs - V2 prefers parsed_specs, falls back to legacy
     all_specs: list[dict] = []
 

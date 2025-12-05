@@ -157,7 +157,7 @@ def get_retry_template(config: Dict[str, Any]) -> PolicyCodeSnippet:
     retryable_codes = config.get("retryable_status_codes", [429, 500, 502, 503, 504])
 
     return PolicyCodeSnippet(
-        imports=["import time", "import random", "from typing import Callable, TypeVar"],
+        imports=["import time", "import random", "import httpx", "from typing import Callable, TypeVar"],
         setup_code=f'''
         # Retry configuration
         self._max_retries = {max_attempts}

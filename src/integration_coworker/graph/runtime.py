@@ -2,7 +2,7 @@ import functools
 import logging
 import os
 import time
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, List
 from langgraph.graph import StateGraph, END
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.graph.nodes import (
@@ -33,6 +33,43 @@ from integration_coworker.graph.nodes import (
 from integration_coworker.llm.client import set_run_context, clear_run_context
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Checkpoint Wrapper (V2 Implementation Plan Section 3.5)
+# =============================================================================
+
+def _wrap_node_with_checkpoint(node_func: Callable) -> Callable:
+    """
+    Decorator that saves checkpoint after successful node execution.
+    
+    Per V2 Implementation Plan Section 3.5, this enables:
+    - Resume capability from any checkpointed node
+    - True skip with dependency analysis
+    - Recovery from process crashes
+    """
+    @functools.wraps(node_func)
+    def wrapper(state: WorkflowState, *args, **kwargs) -> WorkflowState:
+        # Execute node
+        new_state = node_func(state, *args, **kwargs)
+        
+        # Save checkpoint if we have a run_id
+        if new_state.run_id:
+            try:
+                from integration_coworker.persistence.checkpoints import save_checkpoint
+                save_checkpoint(
+                    run_id=new_state.run_id,
+                    node_name=node_func.__name__,
+                    state=new_state,
+                )
+            except Exception as e:
+                # Log but don't fail the workflow
+                logger.warning(f"Failed to save checkpoint for {node_func.__name__}: {e}")
+        
+        return new_state
+    
+    return wrapper
+
 
 # =============================================================================
 # Node Metadata Catalog
@@ -140,7 +177,122 @@ NODE_METADATA: Dict[str, Dict[str, str]] = {
 }
 
 
-def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None):
+# =============================================================================
+# Node Dependency Graph (V2.1 Section 13.2: True Skip per ADR-0009)
+# =============================================================================
+# Maps each node to the nodes that MUST complete before it can run.
+# Used for dependency-aware skip: if A is skipped, all nodes depending on A
+# must also be skipped.
+
+NODE_DEPENDENCIES: Dict[str, List[str]] = {
+    # Phase 1: Spec ingestion (linear chain)
+    "plan_run": [],
+    "ingest_spec": ["plan_run"],
+    "detect_and_parse_spec": ["ingest_spec"],
+    "build_silver_api_model": ["detect_and_parse_spec"],
+    "embed_spec_chunks": ["build_silver_api_model"],
+    "persist_silver_checkpoint": ["embed_spec_chunks"],
+    
+    # Phase 2: Task understanding (depends on Silver model)
+    "understand_task": ["persist_silver_checkpoint"],
+    "align_task_with_kg": ["understand_task"],
+    "plan_integration_flow": ["align_task_with_kg"],
+    "attach_policies_and_patterns": ["plan_integration_flow"],
+    
+    # Phase 3: Code generation (depends on flow)
+    "generate_code_and_tests": ["attach_policies_and_patterns"],
+    "persist_gold_checkpoint": ["generate_code_and_tests"],
+    "persist_kg_learning": ["persist_gold_checkpoint"],
+    
+    # Phase 4: Repo integration (optional, conditional)
+    "attach_repo_context": ["persist_kg_learning"],  # Only if use_repo
+    "analyze_repo_layout": ["attach_repo_context"],
+    "apply_repo_integration_changes": ["analyze_repo_layout"],
+    
+    # Phase 5: Validation and reporting
+    "validate_integration_design": ["persist_kg_learning"],  # OR apply_repo_integration_changes
+    "build_report": ["validate_integration_design"],
+    "persist_run_outcome": ["build_report"],
+    
+    # Error handling
+    "handle_error": [],  # Can run anytime
+}
+
+
+def get_dependent_nodes(node_name: str) -> List[str]:
+    """
+    Get all nodes that transitively depend on the given node.
+    
+    If node X is skipped, all nodes returned by this function must also be skipped.
+    
+    Args:
+        node_name: The node being skipped
+        
+    Returns:
+        List of node names that depend on the skipped node (in execution order)
+    """
+    dependents: List[str] = []
+    
+    for name, deps in NODE_DEPENDENCIES.items():
+        if node_name in deps:
+            dependents.append(name)
+            # Recursively get nodes that depend on this dependent
+            dependents.extend(get_dependent_nodes(name))
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    result: List[str] = []
+    for name in dependents:
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    
+    return result
+
+
+def get_skip_cascade(skipped_node: str) -> List[str]:
+    """
+    Get the full list of nodes to skip when a given node is skipped.
+    
+    Includes the original node plus all transitively dependent nodes.
+    
+    Args:
+        skipped_node: The node the user wants to skip
+        
+    Returns:
+        Complete list of nodes to skip, in execution order
+    """
+    cascade = [skipped_node]
+    cascade.extend(get_dependent_nodes(skipped_node))
+    
+    # Sort by execution order
+    ordered_cascade: List[str] = []
+    for node in WORKFLOW_NODE_ORDER:
+        if node in cascade:
+            ordered_cascade.append(node)
+    
+    return ordered_cascade
+
+
+def has_skipped_dependency(state, node_name: str) -> bool:
+    """
+    Check if any dependency of a node was skipped.
+    
+    Used by nodes to determine if they should auto-skip.
+    
+    Args:
+        state: WorkflowState with skipped_nodes list
+        node_name: The node to check dependencies for
+        
+    Returns:
+        True if any dependency was skipped
+    """
+    deps = set(NODE_DEPENDENCIES.get(node_name, []))
+    skipped = set(getattr(state, 'skipped_nodes', []))
+    return bool(deps & skipped)
+
+
+def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None, enable_checkpoint: bool = True):
     """
     Decorator that records node execution time and metadata into state.
     
@@ -154,9 +306,13 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None):
     - responsibility: Human-readable description
     - duration_ms: Internal timing measurement
     
+    Per V2 Implementation Plan Section 3.5, also saves checkpoints after
+    successful node execution to enable recovery.
+    
     Args:
         fn: The node function to wrap
         metadata: Optional override metadata dict with 'category' and 'responsibility'
+        enable_checkpoint: Whether to save checkpoints after this node (default True)
     """
     # Get metadata from catalog or use provided override
     node_name = fn.__name__
@@ -167,6 +323,29 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None):
 
     # Check if LangSmith tracing is enabled
     tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    
+    def _save_checkpoint_if_enabled(result: WorkflowState):
+        """Save checkpoint after node execution if enabled and run_id exists.
+        
+        Skips checkpoint saving in dry_run mode to avoid FK constraint violations
+        (run_checkpoints references run_status, which isn't created in dry_run).
+        """
+        # Skip in dry_run mode - no run_status record exists
+        is_dry_run = getattr(result.options, 'dry_run', False) if result.options else False
+        if is_dry_run:
+            return
+            
+        if enable_checkpoint and result.run_id:
+            try:
+                from integration_coworker.persistence.checkpoints import save_checkpoint
+                save_checkpoint(
+                    run_id=result.run_id,
+                    node_name=node_name,
+                    state=result,
+                )
+            except Exception as e:
+                # Log but don't fail the workflow
+                logger.warning(f"Failed to save checkpoint for {node_name}: {e}")
 
     if tracing_enabled:
         try:
@@ -199,6 +378,9 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None):
                     f"Node {node_name} completed in {duration_ms:.2f}ms "
                     f"[{node_meta.get('category', 'unknown')}]"
                 )
+                
+                # Save checkpoint after successful execution
+                _save_checkpoint_if_enabled(result)
 
                 return result
 
@@ -217,6 +399,9 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None):
         # Record into result state's timings dict
         if hasattr(result, 'node_timings'):
             result.node_timings[node_name] = duration_ms
+        
+        # Save checkpoint after successful execution
+        _save_checkpoint_if_enabled(result)
 
         return result
 
@@ -349,7 +534,11 @@ def run_workflow(state: WorkflowState) -> WorkflowState:
     
     Sets up run context for LLM client tracing, ensuring all LLM calls
     within this run are correlated with the same run_id and provider_code.
+    
+    V4 Observability: Initializes and captures token usage tracking.
     """
+    from integration_coworker.llm.client import init_token_usage, get_token_usage
+    
     app = build_graph()
 
     # Set run context for LangSmith tracing
@@ -359,10 +548,102 @@ def run_workflow(state: WorkflowState) -> WorkflowState:
 
     if run_id:
         set_run_context(run_id, provider_code)
+    
+    # V4 Observability: Initialize token tracking
+    init_token_usage()
 
     try:
         final_state_dict = app.invoke(state)
-        return WorkflowState(**final_state_dict)
+        final_state = WorkflowState(**final_state_dict)
+        
+        # V4 Observability: Copy aggregated token usage to final state
+        final_state.llm_token_usage = get_token_usage()
+        
+        return final_state
     finally:
         # Clean up run context
+        clear_run_context()
+
+
+# =============================================================================
+# Recovery Support Functions (V2 Implementation Plan Section 3.5)
+# =============================================================================
+
+# Ordered list of all node names in the workflow for recovery
+WORKFLOW_NODE_ORDER: List[str] = [
+    "plan_run",
+    "ingest_spec",
+    "detect_and_parse_spec",
+    "build_silver_api_model",
+    "embed_spec_chunks",
+    "persist_silver_checkpoint",
+    "understand_task",
+    "align_task_with_kg",
+    "plan_integration_flow",
+    "attach_policies_and_patterns",
+    "generate_code_and_tests",
+    "persist_gold_checkpoint",
+    "persist_kg_learning",
+    # Optional repo nodes (may be skipped)
+    "attach_repo_context",
+    "analyze_repo_layout",
+    "apply_repo_integration_changes",
+    # Final nodes
+    "validate_integration_design",
+    "build_report",
+    "persist_run_outcome",
+]
+
+
+def get_node_names() -> List[str]:
+    """
+    Get the list of workflow node names in execution order.
+    
+    Returns:
+        List of node names
+    """
+    return WORKFLOW_NODE_ORDER.copy()
+
+
+def run_from_node(
+    state: WorkflowState,
+    start_node: str,
+) -> WorkflowState:
+    """
+    Execute the workflow starting from a specific node.
+    
+    Used for recovery/resume operations.
+    
+    Note: This is a simplified implementation. Full support would require
+    LangGraph's interrupt/resume features.
+    
+    Args:
+        state: The workflow state to resume from
+        start_node: The node to start execution from
+        
+    Returns:
+        Final workflow state
+        
+    Raises:
+        ValueError: If start_node is not a valid node name
+    """
+    if start_node not in WORKFLOW_NODE_ORDER:
+        raise ValueError(f"Unknown node: {start_node}")
+    
+    # For now, we rebuild and run the full graph
+    # LangGraph doesn't have a simple "start from node X" API
+    # We mark the completed steps so nodes can detect they should be skipped
+    
+    # Set run context for LangSmith tracing
+    run_id = state.run_id or state.plan.get("run_id", "")
+    provider_code = state.provider_code
+    
+    if run_id:
+        set_run_context(run_id, provider_code)
+    
+    try:
+        app = build_graph()
+        final_state_dict = app.invoke(state)
+        return WorkflowState(**final_state_dict)
+    finally:
         clear_run_context()

@@ -10,8 +10,11 @@ Per design doc Section 5.5:
 - Strategy: chain_of_thought with best-of-n sampling
 """
 import logging
+from collections import deque
+from typing import List, Tuple
 
 from integration_coworker.graph.state import WorkflowState
+from integration_coworker.domain.models import IntegrationFlowNode, IntegrationFlowEdge
 from integration_coworker.domain.models import EndpointBinding
 from integration_coworker.llm import get_llm_client_for_node
 from integration_coworker.llm.toon import from_toon
@@ -21,6 +24,106 @@ from integration_coworker.codegen.field_mappings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_dag_structure(
+    nodes: List[IntegrationFlowNode],
+    edges: List[IntegrationFlowEdge],
+) -> Tuple[bool, List[str]]:
+    """
+    Validate that workflow nodes and edges form a valid DAG.
+    
+    Checks performed:
+    1. Exactly one start node
+    2. At least one end node
+    3. All nodes are reachable from start
+    4. All nodes can reach an end node
+    5. No cycles (topological sort)
+    
+    Returns:
+        Tuple of (is_valid, list of error messages)
+    """
+    errors = []
+    
+    if not nodes:
+        return False, ["No workflow nodes defined"]
+    
+    # Check 1: Exactly one start node
+    start_nodes = [n for n in nodes if n.node_type == "start"]
+    if len(start_nodes) != 1:
+        errors.append(f"Flow must have exactly one start node, found {len(start_nodes)}")
+    
+    # Check 2: At least one end node
+    end_nodes = [n for n in nodes if n.node_type == "end"]
+    if len(end_nodes) < 1:
+        errors.append("Flow must have at least one end node")
+    
+    if errors:
+        # Can't proceed with graph checks without valid start/end
+        return False, errors
+    
+    # Build adjacency maps
+    node_keys = {n.node_key for n in nodes}
+    outgoing = {key: [] for key in node_keys}  # node -> [successors]
+    incoming = {key: [] for key in node_keys}  # node -> [predecessors]
+    
+    for edge in edges:
+        if edge.from_node_key in node_keys and edge.to_node_key in node_keys:
+            outgoing[edge.from_node_key].append(edge.to_node_key)
+            incoming[edge.to_node_key].append(edge.from_node_key)
+    
+    start_key = start_nodes[0].node_key
+    end_keys = {n.node_key for n in end_nodes}
+    
+    # Check 3: All nodes reachable from start (forward BFS)
+    reachable_from_start = set()
+    queue = deque([start_key])
+    while queue:
+        current = queue.popleft()
+        if current in reachable_from_start:
+            continue
+        reachable_from_start.add(current)
+        for successor in outgoing.get(current, []):
+            if successor not in reachable_from_start:
+                queue.append(successor)
+    
+    unreachable = node_keys - reachable_from_start
+    for key in unreachable:
+        errors.append(f"Node '{key}' is not reachable from start")
+    
+    # Check 4: All nodes can reach an end (reverse BFS from all end nodes)
+    can_reach_end = set()
+    queue = deque(end_keys)
+    while queue:
+        current = queue.popleft()
+        if current in can_reach_end:
+            continue
+        can_reach_end.add(current)
+        for predecessor in incoming.get(current, []):
+            if predecessor not in can_reach_end:
+                queue.append(predecessor)
+    
+    dead_ends = node_keys - can_reach_end
+    for key in dead_ends:
+        errors.append(f"Node '{key}' cannot reach any end node")
+    
+    # Check 5: No cycles (Kahn's algorithm for topological sort)
+    in_degree = {key: len(incoming.get(key, [])) for key in node_keys}
+    queue = deque([key for key, deg in in_degree.items() if deg == 0])
+    sorted_count = 0
+    
+    while queue:
+        current = queue.popleft()
+        sorted_count += 1
+        for successor in outgoing.get(current, []):
+            in_degree[successor] -= 1
+            if in_degree[successor] == 0:
+                queue.append(successor)
+    
+    if sorted_count != len(node_keys):
+        errors.append("Cycle detected in workflow graph")
+    
+    return len(errors) == 0, errors
 
 # Node name for archetype loading
 NODE_NAME = "plan_integration_flow"
@@ -72,41 +175,16 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
         state.completed_steps.append("plan_integration_flow")
         return state
 
-    # 1. Validate flow structure per Appendix H.5
-    start_nodes = [n for n in state.workflow_nodes if n.node_type == "start"]
-    end_nodes = [n for n in state.workflow_nodes if n.node_type == "end"]
-
-    if len(start_nodes) != 1:
-        error = f"Flow must have exactly one start node, found {len(start_nodes)}"
-        state.errors.append(error)
-        raise ValueError(error)
-
-    if len(end_nodes) < 1:
-        error = "Flow must have at least one end node"
-        state.errors.append(error)
-        raise ValueError(error)
-
-    # Check connectivity (simplified: assumes linear flow for M3)
-    edge_map = {}  # from_key -> [to_keys]
-    reverse_edge_map = {}  # to_key -> [from_keys]
-
-    for edge in state.workflow_edges:
-        edge_map.setdefault(edge.from_node_key, []).append(edge.to_node_key)
-        reverse_edge_map.setdefault(edge.to_node_key, []).append(edge.from_node_key)
-
-    # All non-start nodes must have incoming edges
-    for node in state.workflow_nodes:
-        if node.node_type != "start" and node.node_key not in reverse_edge_map:
-            error = f"Node {node.node_key} has no incoming edges"
+    # 1. Validate DAG structure (V2: proper cycle detection + reachability)
+    is_valid, validation_errors = _validate_dag_structure(
+        state.workflow_nodes,
+        state.workflow_edges,
+    )
+    
+    if not is_valid:
+        for error in validation_errors:
             state.errors.append(error)
-            raise ValueError(error)
-
-    # All non-end nodes must have outgoing edges
-    for node in state.workflow_nodes:
-        if node.node_type != "end" and node.node_key not in edge_map:
-            error = f"Node {node.node_key} has no outgoing edges"
-            state.errors.append(error)
-            raise ValueError(error)
+        raise ValueError(f"Invalid workflow DAG: {validation_errors[0]}")
 
     # Check position increases along paths (simple check for linear flows)
     node_positions = {n.node_key: n.position for n in state.workflow_nodes}
@@ -174,7 +252,9 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
                 prompt = _build_binding_prompt(state, api_node, matched_endpoint)
                 llm_response_text = client.complete(prompt)
 
-                if llm_response_text and not llm_response_text.startswith("Mock response"):
+                # V2: Removed string-based mock detection (LLM-006)
+                # If LLM returns invalid TOON, the parse will fail and we keep schema mappings
+                if llm_response_text:
                     try:
                         llm_response = from_toon(llm_response_text)
                         llm_request = llm_response.get("request_mapping", {})

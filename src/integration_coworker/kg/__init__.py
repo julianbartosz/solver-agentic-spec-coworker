@@ -4,6 +4,8 @@ GraphRAG Retrieval Module
 Implements graph-first retrieval with embeddings for ranking.
 Used by align_task_with_kg to find matching workflow templates.
 
+V2.1: Uses LangChain OpenAIEmbeddings for automatic LangSmith tracing.
+
 ================================================================================
 GRAPHRAG SCORING STRATEGY (per design doc Section 5.5)
 ================================================================================
@@ -24,12 +26,17 @@ This module implements a "graph-first, embeddings-second" approach:
    - Compute cosine similarity between task_description and template embedding
    - Falls back to 0.5 default if embeddings unavailable
 
-4. **Exact Match Bonus (20% weight)**:
-   - +0.3 if task_slug appears in template key
-   - +0.15 for partial/fuzzy match
+4. **Confidence Scoring (10% weight)**:
+   - Use learned confidence_score from feedback aggregation
+   - Default 1.0 for templates with no feedback yet
+   - Updated by feedback sync from LangSmith
+
+5. **Exact Match Bonus (10% weight)**:
+   - +0.2 if task_slug appears in template key
+   - +0.1 for partial/fuzzy match
 
 Combined formula:
-  final_score = (graph_score * 0.4) + (embedding_score * 0.4) + exact_match_bonus + 0.1
+  final_score = (graph_score * 0.4) + (embedding_score * 0.4) + (confidence * 0.1) + exact_match_bonus + 0.05
 
 The 0.1 base score ensures templates that pass graph filtering are considered
 even when both graph and embedding scores are low.
@@ -79,17 +86,14 @@ from integration_coworker.domain.models import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Fallback flag: Set USE_IN_MEMORY_KG_FALLBACK=1 to enable legacy in-memory
-# templates when the KG is empty. This should NEVER be enabled on demo path.
-# ---------------------------------------------------------------------------
-def _check_fallback_enabled() -> bool:
-    """Check if in-memory KG fallback is enabled (evaluated at call time)."""
-    return os.environ.get("USE_IN_MEMORY_KG_FALLBACK", "0") == "1"
 
-# For backwards compatibility, also expose as a constant (evaluated at import)
-# but the _check_fallback_enabled() function should be used for dynamic checks
-USE_IN_MEMORY_KG_FALLBACK = _check_fallback_enabled()
+# Import LangChain embeddings for LangSmith tracing
+try:
+    from langchain_openai import OpenAIEmbeddings
+    HAS_LANGCHAIN_EMBEDDINGS = True
+except ImportError:
+    HAS_LANGCHAIN_EMBEDDINGS = False
+    OpenAIEmbeddings = None
 
 
 @dataclass
@@ -107,20 +111,48 @@ class KGTemplateMatch:
     final_score: float  # Combined score
 
 
+def _get_embedding_client():
+    """
+    Get LangChain OpenAIEmbeddings client for automatic LangSmith tracing.
+    
+    Returns an embeddings client or None if unavailable.
+    """
+    if not HAS_LANGCHAIN_EMBEDDINGS:
+        return None
+    
+    settings = get_settings()
+    if not settings.llm.api_key or settings.llm.use_mock:
+        return None
+    
+    try:
+        model = settings.llm.embedding_model or "text-embedding-3-small"
+        return OpenAIEmbeddings(
+            api_key=settings.llm.api_key,
+            model=model,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create LangChain OpenAIEmbeddings client: {e}")
+        return None
+
+
 def _compute_embedding(text: str) -> Optional[List[float]]:
-    """Compute embedding for text using OpenAI API (if available)."""
+    """
+    Compute embedding for text using LangChain OpenAIEmbeddings.
+    
+    Uses LangChain for automatic LangSmith tracing of embedding calls.
+    """
     settings = get_settings()
     if not settings.llm.api_key or settings.llm.use_mock:
         return None
 
+    client = _get_embedding_client()
+    if not client:
+        return None
+
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.llm.api_key)
-        response = client.embeddings.create(
-            model=settings.llm.embedding_model or "text-embedding-3-small",
-            input=text[:8000],
-        )
-        return response.data[0].embedding
+        # Use LangChain's embed_query for single text (traced in LangSmith)
+        truncated_text = text[:8000]  # Truncate to avoid token limits
+        return client.embed_query(truncated_text)
     except Exception as e:
         logger.warning(f"Failed to compute embedding: {e}")
         return None
@@ -275,7 +307,7 @@ def query_kg_templates(
         # =====================================================================
         if is_postgres:
             cur.execute("""
-                SELECT id, key, name, description, properties, embedding
+                SELECT id, key, name, description, properties, embedding, confidence_score
                 FROM kg.nodes
                 WHERE node_type = %s
                 AND (provider_code = %s OR provider_code IS NULL)
@@ -284,7 +316,7 @@ def query_kg_templates(
             """, (KGNodeType.WORKFLOW_TEMPLATE.value, provider_code, top_k * 2))
         else:
             cur.execute("""
-                SELECT id, key, name, description, properties, embedding
+                SELECT id, key, name, description, properties, embedding, confidence_score
                 FROM kg_nodes
                 WHERE node_type = ?
                 AND (provider_code = ? OR provider_code IS NULL)
@@ -308,13 +340,14 @@ def query_kg_templates(
         # =====================================================================
         for row in candidates:
             # Both Postgres and SQLite now return tuple rows
-            # SELECT id, key, name, description, properties, embedding
+            # SELECT id, key, name, description, properties, embedding, confidence_score
             node_id = row[0]
             key = row[1]
             name = row[2]
             description = row[3]
             properties_raw = row[4]
             candidate_embedding_raw = row[5]
+            confidence_score = row[6] if len(row) > 6 and row[6] is not None else 1.0
 
             properties = properties_raw if isinstance(properties_raw, dict) else json.loads(properties_raw or "{}")
             candidate_embedding = candidate_embedding_raw
@@ -353,18 +386,20 @@ def query_kg_templates(
             exact_match_bonus = 0.0
             if task_slug:
                 if task_slug in key:
-                    exact_match_bonus = 0.3
+                    exact_match_bonus = 0.2
                 elif task_slug.replace("_", "") in key.replace("_", ""):
-                    exact_match_bonus = 0.15
+                    exact_match_bonus = 0.1
 
-            # Combined score: 40% graph, 40% embedding, 20% exact match bonus + base
+            # Combined score: 40% graph, 40% embedding, 10% confidence, 10% exact match + base
             # This implements graph-first by weighting graph equally with embeddings
             # but graph filtering already happened (Step 1), so graph has implicit priority
+            # Confidence score is learned from feedback (LangSmith + implicit signals)
             final_score = (
-                graph_score * 0.4 +       # Graph structure weight
-                similarity_score * 0.4 +   # Embedding similarity weight
-                exact_match_bonus +        # Exact match bonus (up to 0.3)
-                0.1                        # Base score for passing graph filter
+                graph_score * 0.4 +           # Graph structure weight
+                similarity_score * 0.4 +       # Embedding similarity weight
+                confidence_score * 0.1 +       # Learned confidence from feedback
+                exact_match_bonus +            # Exact match bonus (up to 0.2)
+                0.05                           # Base score for passing graph filter
             )
 
             # Get workflow steps
@@ -436,7 +471,7 @@ def query_workflow_templates(
     known_entities: Optional[List[str]] = None,
     known_endpoints: Optional[List[str]] = None,
     top_k: int = 5,
-    similarity_threshold: float = 0.6,
+    similarity_threshold: float = 0.3,
 ) -> List[KGWorkflowTemplate]:
     """
     Query the KG for matching workflow templates.
@@ -455,7 +490,9 @@ def query_workflow_templates(
         known_entities: Optional list of entity names to boost score for
         known_endpoints: Optional list of endpoint paths to boost score for
         top_k: Maximum number of templates to return
-        similarity_threshold: Minimum similarity score (0-1) to include
+        similarity_threshold: Minimum similarity score (0-1) to include.
+            Default is 0.3 to allow matches even when embeddings are unavailable
+            (which gives a base score ~0.4-0.5 from graph + default similarity).
     
     Returns:
         List of KGWorkflowTemplate domain models, ordered by score descending
@@ -471,6 +508,8 @@ def query_workflow_templates(
     )
 
     # Filter by similarity threshold
+    # Note: When embeddings are unavailable, default similarity_score is 0.5,
+    # and final_score combines 40% graph + 40% similarity + base = ~0.4-0.6
     filtered = [m for m in matches if m.final_score >= similarity_threshold]
 
     # Convert to domain models
@@ -674,7 +713,7 @@ def infer_pattern_from_task(
                 pattern_name=pattern["name"],
                 description=pattern["description"],
                 confidence=min(confidence, 1.0),
-                steps=pattern["steps"],
+                steps=[dict(s) for s in pattern["steps"]],  # Copy to prevent mutation
                 source="builtin",
                 provider_examples=[],
             ))
@@ -1400,3 +1439,47 @@ def get_kg_node_count() -> Dict[str, int]:
     except Exception as e:
         logger.error(f"Failed to get node counts: {e}")
         return {}
+
+
+def get_node_edge_count(node_id: int) -> int:
+    """
+    Get the count of edges connected to a node.
+    
+    V2: Used for graph-based scoring - nodes with more connections
+    are considered more relevant/established.
+    
+    Args:
+        node_id: The ID of the node to count edges for
+        
+    Returns:
+        Total count of edges (both incoming and outgoing)
+    """
+    try:
+        db.init_schema()
+        conn = db.get_connection()
+        is_postgres = db.get_engine_type() == "postgres"
+        cur = conn.cursor()
+
+        if is_postgres:
+            cur.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT id FROM kg.edges WHERE src_node_id = %s
+                    UNION ALL
+                    SELECT id FROM kg.edges WHERE dst_node_id = %s
+                ) AS edges
+            """, (node_id, node_id))
+        else:
+            cur.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT id FROM kg_edges WHERE src_node_id = ?
+                    UNION ALL
+                    SELECT id FROM kg_edges WHERE dst_node_id = ?
+                ) AS edges
+            """, (node_id, node_id))
+
+        result = cur.fetchone()
+        return result[0] if result else 0
+
+    except Exception as e:
+        logger.debug(f"Failed to get edge count for node {node_id}: {e}")
+        return 0

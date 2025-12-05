@@ -7,9 +7,10 @@ role: planning
 inherits: _base
 
 model:
-  # Claude excels at complex planning and reasoning
-  provider: anthropic
-  name: claude-sonnet-4-20250514
+  # GPT-5.1 for complex planning and reasoning
+  # Change provider/name here to swap models without code changes
+  provider: openai
+  name: gpt-5.1
   temperature: 0.2
   max_tokens: 4096
 

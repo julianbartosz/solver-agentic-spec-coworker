@@ -44,6 +44,12 @@ VERY_LOW_CONFIDENCE_THRESHOLD = 0.3
 # =============================================================================
 # KNOWN ARCHETYPES - Framework-specific layouts and hooks
 # =============================================================================
+#
+# .. deprecated:: 2.1
+#     KNOWN_ARCHETYPES and FrameworkArchetypeConfig are deprecated per ADR-0002.
+#     Prefer using .integration-coworker.yaml config files for repo-aware integration.
+#     These archetypes will be removed in v3.0.
+#
 
 @dataclass
 class FrameworkArchetypeConfig:
@@ -55,6 +61,11 @@ class FrameworkArchetypeConfig:
     - Integration hooks (files to update)
     - Naming conventions
     - Framework-specific patterns
+    
+    .. deprecated:: 2.1
+        This class is deprecated per ADR-0002. Prefer using 
+        IntegrationCoworkerConfig from config_schema.py instead.
+        Will be removed in v3.0.
     """
     name: str
     framework: str
@@ -86,6 +97,7 @@ class FrameworkArchetypeConfig:
 
 
 # Known framework archetypes with their configurations
+# DEPRECATED: See ADR-0002 for config-first approach. Will be removed in v3.0.
 KNOWN_ARCHETYPES: Dict[str, FrameworkArchetypeConfig] = {
     "fastapi": FrameworkArchetypeConfig(
         name="fastapi",
@@ -624,13 +636,35 @@ def build_effective_repo_profile(
     # Case 4: Very uncertain and LLM refinement enabled
     if use_llm_refinement and detected.confidence < VERY_LOW_CONFIDENCE_THRESHOLD:
         logger.info("Confidence very low, attempting LLM-assisted refinement")
-        return _refine_profile_with_llm(inferred_profile, repo_root, detected)
+        refined_profile = _refine_profile_with_llm(inferred_profile, repo_root, detected)
+        
+        # ADR-0002: Persist LLM-refined profile as config file for future runs
+        if refined_profile.profile_source == "llm" and repo_root:
+            _persist_profile_as_config(refined_profile, Path(repo_root))
+        
+        return refined_profile
 
     return inferred_profile
 
 
 def _build_profile_from_archetype(detected: DetectedProfile) -> RepoProfile:
-    """Build RepoProfile from archetype defaults."""
+    """
+    Build RepoProfile from archetype defaults.
+    
+    .. deprecated:: 2.1
+        Archetype-based detection is deprecated per ADR-0002.
+        Prefer using .integration-coworker.yaml config files.
+        Archetypes will be removed in v3.0.
+    """
+    import warnings
+    warnings.warn(
+        "Archetype-based detection is deprecated per ADR-0002. "
+        "Consider creating a .integration-coworker.yaml config file. "
+        "Archetypes will be removed in v3.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    
     arch_config = KNOWN_ARCHETYPES.get(detected.archetype_name)
 
     if not arch_config:
@@ -902,6 +936,60 @@ def _parse_llm_layout_response(response: str) -> Optional[Dict[str, str]]:
             result[key.strip()] = value.strip()
 
     return result if result else None
+
+
+def _persist_profile_as_config(profile: RepoProfile, repo_root: Path) -> bool:
+    """
+    Persist a RepoProfile as .integration-coworker.yaml config file.
+    
+    Per ADR-0002: After LLM inference, save the config so future runs
+    can skip LLM inference and use the cached config.
+    
+    Args:
+        profile: The RepoProfile to persist
+        repo_root: Path to the repository root
+        
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    try:
+        from integration_coworker.repo.config_schema import (
+            profile_to_config,
+            save_config,
+            validate_config,
+        )
+        
+        # Convert profile to config
+        config = profile_to_config(profile, detection_method=profile.profile_source)
+        
+        # Validate before saving
+        validation = validate_config(config, repo_root, check_paths_exist=True)
+        if not validation.is_valid:
+            logger.warning(
+                f"Config validation failed, not persisting: {validation.errors}"
+            )
+            return False
+        
+        if validation.warnings:
+            logger.debug(f"Config validation warnings: {validation.warnings}")
+        
+        # Save to .integration-coworker.yaml
+        config_path = repo_root / ".integration-coworker.yaml"
+        success = save_config(config, config_path)
+        
+        if success:
+            logger.info(
+                f"Persisted LLM-refined profile as config: {config_path}"
+            )
+        
+        return success
+        
+    except ImportError as e:
+        logger.warning(f"Cannot persist profile (missing dependency): {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to persist profile as config: {e}")
+        return False
 
 
 # =============================================================================

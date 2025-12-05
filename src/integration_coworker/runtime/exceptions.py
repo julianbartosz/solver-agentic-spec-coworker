@@ -42,3 +42,18 @@ class AuthIntegrationError(IntegrationError):
     These typically require human intervention to fix credentials.
     """
     pass
+
+
+class EmbeddingUnavailableError(IntegrationError):
+    """
+    V2: Exception raised when embeddings are required but unavailable.
+    
+    Examples:
+    - OPENAI_API_KEY not set
+    - Embedding API call failed
+    - Mock LLM mode with strict embeddings required
+    
+    In strict mode (production), this error should be raised.
+    In relaxed mode (development/testing), code may fall back to 0.0 score.
+    """
+    pass

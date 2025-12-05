@@ -2,11 +2,77 @@
 Predefined repository profiles for common frameworks.
 
 Profiles define where to place generated code in different project types.
+
+DEPRECATION NOTICE (ADR-0002):
+===============================
+Archetype-based profiles are deprecated as of ADR-0002.
+The preferred approach is config-first with LLM fallback:
+
+1. Check for .integration-coworker.yaml config file
+2. If not found, use LLM to infer and cache config
+3. Fall back to these profiles only as last resort
+
+To migrate:
+- Create a .integration-coworker.yaml in your repo root
+- Or let the system auto-generate one via LLM inference
+
+See: docs/decisions/adr-0002-repo-aware-integration-config-first.md
 """
+import logging
+import warnings
+from pathlib import Path
+from typing import Optional
+
 from integration_coworker.repo.models import RepoProfile
 
+logger = logging.getLogger(__name__)
 
-# Mock profile for testing (per Appendix D spec)
+# Flag to suppress deprecation warnings during tests
+_SUPPRESS_DEPRECATION_WARNINGS = False
+
+
+def _mark_deprecated(profile: RepoProfile, reason: str = "archetype") -> RepoProfile:
+    """Mark a profile as deprecated for tracking."""
+    profile.profile_source = f"{reason}_deprecated"
+    return profile
+
+
+# =============================================================================
+# Generic Fallback Profiles (V2 - replaces SUBATOMIC_MOCK_PROFILE fallbacks)
+# =============================================================================
+
+GENERIC_PYTHON_PROFILE = RepoProfile(
+    name="generic-python",
+    framework="generic",
+    language="python",
+    integrations_root="src/integrations",
+    tests_root="tests/integrations",
+    conventions={
+        "client_module_pattern": "clients/{provider}.py",
+        "flow_module_pattern": "flows/{provider}_{task}.py",
+        "test_module_pattern": "test_{provider}_{task}.py",
+    },
+)
+
+GENERIC_TYPESCRIPT_PROFILE = RepoProfile(
+    name="generic-typescript",
+    framework="generic",
+    language="typescript",
+    integrations_root="src/integrations",
+    tests_root="tests/integrations",
+    conventions={
+        "client_module_pattern": "clients/{provider}.ts",
+        "flow_module_pattern": "flows/{provider}/{task}.ts",
+        "test_module_pattern": "{provider}/{task}.test.ts",
+    },
+)
+
+
+# =============================================================================
+# Framework-Specific Profiles (DEPRECATED per ADR-0002)
+# =============================================================================
+
+# Mock profile for testing (per Appendix D spec) - legacy, prefer GENERIC_PYTHON_PROFILE
 SUBATOMIC_MOCK_PROFILE = RepoProfile(
     name="subatomic_mock_service",
     archetype="fastapi_service",  # P2.1: High-level classification
@@ -148,6 +214,8 @@ REPO_PROFILES = {
     "flask": FLASK_PROFILE,
     "express": EXPRESS_PROFILE,
     "nestjs": NESTJS_PROFILE,
+    "generic-python": GENERIC_PYTHON_PROFILE,
+    "generic-typescript": GENERIC_TYPESCRIPT_PROFILE,
 }
 
 
@@ -167,34 +235,97 @@ def get_profile_by_name(name: str) -> RepoProfile:
     return REPO_PROFILES[name]
 
 
+def _load_profile_from_config(config_path: Path) -> Optional[RepoProfile]:
+    """
+    Load profile from .integration-coworker.yaml config file.
+    
+    Per ADR-0002 Phase 2: Explicit config files take precedence.
+    Uses the IntegrationCoworkerConfig schema for structured parsing.
+    
+    Args:
+        config_path: Path to the config file
+    
+    Returns:
+        RepoProfile if successfully loaded, None if parsing fails
+    """
+    from integration_coworker.repo.config_schema import (
+        load_config,
+        config_to_profile,
+    )
+    
+    config = load_config(config_path)
+    if config is None:
+        return None
+    
+    profile = config_to_profile(config)
+    profile.profile_source = "config_file"
+    return profile
+
+
 def detect_profile_from_repo(repo_root) -> RepoProfile:
     """
     Detect the appropriate profile from a repository's structure.
     
-    Uses marker file heuristics to identify framework:
-    - Next.js: package.json + next.config.* (js/mjs/ts)
-    - Django: manage.py + settings.py (or settings/ directory)
-    - FastAPI: pyproject.toml or requirements.txt with "fastapi" dependency
-    - Default: SUBATOMIC_MOCK_PROFILE
+    DEPRECATED (ADR-0002): This function uses archetype detection which is deprecated.
+    Use get_repo_profile_config_first() from repo/llm_inference.py instead, which:
+    1. Checks for .integration-coworker.yaml config file first
+    2. Uses LLM inference as fallback
+    3. Falls back to this function only as last resort
+    
+    Detection hierarchy:
+    1. Explicit config file (.integration-coworker.yaml)
+    2. Framework-specific markers (package.json deps, pyproject.toml, etc.)
+    3. Language detection (fallback to generic profiles)
+    4. Generic Python profile (ultimate fallback)
     
     Args:
         repo_root: Path to repository root (can be None)
     
     Returns:
-        Detected RepoProfile, or SUBATOMIC_MOCK_PROFILE as default
+        Detected RepoProfile
     """
-    from pathlib import Path
-
+    import json
+    
     if repo_root is None:
-        return SUBATOMIC_MOCK_PROFILE
+        return GENERIC_PYTHON_PROFILE
 
     repo_path = Path(repo_root)
 
     if not repo_path.exists():
-        return SUBATOMIC_MOCK_PROFILE
+        return GENERIC_PYTHON_PROFILE
 
     # -------------------------------------------------------------------------
-    # Next.js detection: package.json + next.config.* file
+    # Priority 1: Explicit config file (ADR-0002 Phase 1)
+    # -------------------------------------------------------------------------
+    config_file = repo_path / ".integration-coworker.yaml"
+    if config_file.exists():
+        profile = _load_profile_from_config(config_file)
+        if profile:
+            logger.info(f"Loaded profile from config file: {config_file}")
+            return profile
+    
+    # Also check for .yml extension
+    config_file_yml = repo_path / ".integration-coworker.yml"
+    if config_file_yml.exists():
+        profile = _load_profile_from_config(config_file_yml)
+        if profile:
+            logger.info(f"Loaded profile from config file: {config_file_yml}")
+            return profile
+
+    # -------------------------------------------------------------------------
+    # Emit deprecation warning for archetype-based detection
+    # -------------------------------------------------------------------------
+    if not _SUPPRESS_DEPRECATION_WARNINGS:
+        warnings.warn(
+            "Archetype-based profile detection is deprecated per ADR-0002. "
+            "Create a .integration-coworker.yaml config file for better accuracy. "
+            "See: docs/decisions/adr-0002-repo-aware-integration-config-first.md",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    # -------------------------------------------------------------------------
+    # Priority 2: Next.js detection: package.json + next.config.* file
     # -------------------------------------------------------------------------
     package_json = repo_path / "package.json"
     next_config_patterns = [
@@ -204,12 +335,13 @@ def detect_profile_from_repo(repo_root) -> RepoProfile:
     ]
 
     if package_json.exists() and any(p.exists() for p in next_config_patterns):
-        return NEXTJS_APP_ROUTER_PROFILE
+        profile = NEXTJS_APP_ROUTER_PROFILE
+        profile.profile_source = "archetype_deprecated"
+        return profile
 
     # Check package.json for Node.js frameworks
     if package_json.exists():
         try:
-            import json
             pkg_data = json.loads(package_json.read_text())
             deps = pkg_data.get("dependencies", {})
             dev_deps = pkg_data.get("devDependencies", {})
@@ -217,21 +349,32 @@ def detect_profile_from_repo(repo_root) -> RepoProfile:
 
             # Next.js
             if "next" in all_deps:
-                return NEXTJS_APP_ROUTER_PROFILE
+                profile = NEXTJS_APP_ROUTER_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
 
             # NestJS (M5 WS3-T3)
             if "@nestjs/core" in all_deps or "@nestjs/common" in all_deps:
-                return NESTJS_PROFILE
+                profile = NESTJS_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
 
             # Express.js (M5 WS3-T3)
             if "express" in all_deps:
-                return EXPRESS_PROFILE
+                profile = EXPRESS_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
+
+            # If package.json exists but no framework detected, use TypeScript generic
+            profile = GENERIC_TYPESCRIPT_PROFILE
+            profile.profile_source = "generic_fallback"
+            return profile
 
         except (json.JSONDecodeError, IOError):
             pass
 
     # -------------------------------------------------------------------------
-    # Django detection: manage.py + settings.py or settings/ directory
+    # Priority 3: Django detection: manage.py + settings.py or settings/ directory
     # -------------------------------------------------------------------------
     manage_py = repo_path / "manage.py"
     settings_py = repo_path / "settings.py"
@@ -245,10 +388,12 @@ def detect_profile_from_repo(repo_root) -> RepoProfile:
             break
 
     if manage_py.exists() and (settings_py.exists() or settings_dir.exists() or has_nested_settings):
-        return DJANGO_REST_PROFILE
+        profile = DJANGO_REST_PROFILE
+        profile.profile_source = "archetype_deprecated"
+        return profile
 
     # -------------------------------------------------------------------------
-    # FastAPI detection: pyproject.toml or requirements.txt with "fastapi"
+    # Priority 4: FastAPI/Flask detection via pyproject.toml or requirements.txt
     # -------------------------------------------------------------------------
     pyproject_toml = repo_path / "pyproject.toml"
     requirements_txt = repo_path / "requirements.txt"
@@ -258,10 +403,17 @@ def detect_profile_from_repo(repo_root) -> RepoProfile:
         try:
             content = pyproject_toml.read_text().lower()
             if "fastapi" in content:
-                return FASTAPI_PROFILE
-            # Flask detection (M5 WS3-T3)
+                profile = FASTAPI_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
             if "flask" in content:
-                return FLASK_PROFILE
+                profile = FLASK_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
+            # Has pyproject.toml -> Python project
+            profile = GENERIC_PYTHON_PROFILE
+            profile.profile_source = "generic_fallback"
+            return profile
         except IOError:
             pass
 
@@ -269,34 +421,65 @@ def detect_profile_from_repo(repo_root) -> RepoProfile:
     if requirements_txt.exists():
         try:
             content = requirements_txt.read_text().lower()
-            # Look for "fastapi" as a line or with version specifier
             for line in content.splitlines():
                 line = line.strip()
                 if line.startswith("fastapi") or line.startswith("fastapi["):
-                    return FASTAPI_PROFILE
-                # Flask detection (M5 WS3-T3)
+                    profile = FASTAPI_PROFILE
+                    profile.profile_source = "archetype_deprecated"
+                    return profile
                 if line.startswith("flask") or line.startswith("flask["):
-                    return FLASK_PROFILE
+                    profile = FLASK_PROFILE
+                    profile.profile_source = "archetype_deprecated"
+                    return profile
+            # Has requirements.txt -> Python project
+            profile = GENERIC_PYTHON_PROFILE
+            profile.profile_source = "generic_fallback"
+            return profile
         except IOError:
             pass
 
     # -------------------------------------------------------------------------
-    # Flask detection via app.py (M5 WS3-T3)
+    # Priority 5: Flask detection via app.py
     # -------------------------------------------------------------------------
     app_py = repo_path / "app.py"
     wsgi_py = repo_path / "wsgi.py"
 
     if app_py.exists() or wsgi_py.exists():
-        # Check if it contains Flask imports
         check_file = app_py if app_py.exists() else wsgi_py
         try:
             content = check_file.read_text()
             if "from flask import" in content or "import flask" in content.lower():
-                return FLASK_PROFILE
+                profile = FLASK_PROFILE
+                profile.profile_source = "archetype_deprecated"
+                return profile
         except IOError:
             pass
 
     # -------------------------------------------------------------------------
-    # Default fallback
+    # Priority 6: Language detection via common files
     # -------------------------------------------------------------------------
-    return SUBATOMIC_MOCK_PROFILE
+    setup_py = repo_path / "setup.py"
+    
+    if setup_py.exists():
+        profile = GENERIC_PYTHON_PROFILE
+        profile.profile_source = "generic_fallback"
+        return profile
+    
+    # Check for any .py files at root level
+    if any(repo_path.glob("*.py")):
+        profile = GENERIC_PYTHON_PROFILE
+        profile.profile_source = "generic_fallback"
+        return profile
+    
+    # Check for any .ts files at root or src level
+    if any(repo_path.glob("*.ts")) or (repo_path / "src").exists() and any((repo_path / "src").glob("*.ts")):
+        profile = GENERIC_TYPESCRIPT_PROFILE
+        profile.profile_source = "generic_fallback"
+        return profile
+
+    # -------------------------------------------------------------------------
+    # Ultimate fallback: Generic Python profile
+    # -------------------------------------------------------------------------
+    profile = GENERIC_PYTHON_PROFILE
+    profile.profile_source = "generic_fallback"
+    return profile

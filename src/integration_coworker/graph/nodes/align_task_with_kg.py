@@ -7,19 +7,16 @@ This node queries the persistent Knowledge Graph (kg schema) for workflow
 templates that match the current provider + task. It uses graph-first filtering
 (provider_code, known entities) and embedding similarity for ranking.
 
-**M5 Architecture**:
-- Legacy templates are DEPRECATED (gated behind USE_LEGACY_TEMPLATES=1, default: OFF)
+**V2 Architecture**:
+- Legacy templates REMOVED (per ADR-0004)
 - System uses smarter generic fallback based on HTTP method when KG is empty
 - First run uses inference; subsequent runs benefit from KG learning
+- Run 'scripts/bootstrap_kg.py' to seed initial templates
 
 **V1 Hybrid GraphRAG Enhancement**:
 - Uses retrieval.semantic_search for embedding-based scoring
 - Combines graph score (40%) + embedding score (40%) + exact-match bonus (20%)
 - Preserves KG BFS/DFS for structural queries; semantic search augments, not replaces
-
-The in-memory fallback is only used if USE_IN_MEMORY_KG_FALLBACK=1 is set,
-allowing tests to run without a populated KG. On the demo path, this should
-fail loudly if the KG is empty/broken.
 """
 
 import os
@@ -34,32 +31,63 @@ from integration_coworker.domain.models import (
     KGWorkflowTemplate,
     Endpoint,
 )
-from integration_coworker.kg import query_workflow_templates, _check_fallback_enabled
+from integration_coworker.kg import (
+    query_workflow_templates,
+    query_templates_with_pattern_fallback,
+    STANDARD_PATTERNS,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# V1 Hybrid GraphRAG Scoring Functions
+# V2 Hybrid GraphRAG Scoring Functions
 # Per V1_GAP_CLOSURE_PLAN.md P0: 40% graph + 40% embedding + 20% exact-match
+# V2: Uses configurable weights per provider (ADR-0006)
 # ---------------------------------------------------------------------------
 
-def _compute_embedding_score(task_description: str, template: dict) -> float:
+def _compute_embedding_score(
+    task_description: str,
+    template: dict,
+    strict_mode: bool = False,
+) -> float:
     """
     Compute semantic similarity between task description and template.
     
     Uses the retrieval module's embedding functions.
     Returns score in [0, 1] range.
+    
+    V2 Changes:
+    - Returns 0.0 on failure instead of 0.5 (per ADR-0006)
+    - Supports strict_mode to raise EmbeddingUnavailableError
+    
+    Args:
+        task_description: The task to match against template
+        template: Template dict with optional "embedding" field
+        strict_mode: If True, raise error when embeddings unavailable
+        
+    Returns:
+        Score in [0, 1] range
+        
+    Raises:
+        EmbeddingUnavailableError: If strict_mode and embeddings unavailable
     """
     try:
         from integration_coworker.retrieval.semantic_search import (
             compute_embedding,
             cosine_similarity,
         )
+        from integration_coworker.runtime.exceptions import EmbeddingUnavailableError
 
         task_emb = compute_embedding(task_description)
         if not task_emb:
-            return 0.5  # Fallback when embeddings unavailable
+            if strict_mode:
+                raise EmbeddingUnavailableError(
+                    "Failed to compute task embedding. "
+                    "Check OPENAI_API_KEY or disable strict mode."
+                )
+            logger.debug("Embedding unavailable for task; using 0.0 score")
+            return 0.0  # V2: Return 0.0 on failure
 
         # Get template text for embedding
         template_text = f"{template.get('name', '')} {template.get('description', '')}"
@@ -71,25 +99,151 @@ def _compute_embedding_score(task_description: str, template: dict) -> float:
 
         if task_emb and template_emb:
             return max(0.0, cosine_similarity(task_emb, template_emb))
-        return 0.5  # Fallback
+        
+        if strict_mode:
+            from integration_coworker.runtime.exceptions import EmbeddingUnavailableError
+            raise EmbeddingUnavailableError("Template embedding unavailable")
+        return 0.0  # V2: Return 0.0 on failure
+        
     except Exception as e:
+        # Re-raise EmbeddingUnavailableError in strict mode
+        if "EmbeddingUnavailableError" in type(e).__name__:
+            raise
         logger.debug(f"Embedding score computation failed: {e}")
-        return 0.5  # Fallback
+        if strict_mode:
+            from integration_coworker.runtime.exceptions import EmbeddingUnavailableError
+            raise EmbeddingUnavailableError(str(e)) from e
+        return 0.0  # V2: Return 0.0 on failure
 
 
-def _compute_graph_score(template: dict, entities: List[str]) -> float:
+def _compute_graph_score(
+    template: dict,
+    entities: List[str],
+    provider_code: Optional[str] = None,
+) -> float:
     """
-    Compute graph-derived score based on structural matching.
+    Compute graph-based relevance score using actual KG edges.
     
-    Factors:
-    - Entity coverage: how many known entities are referenced in template
-    - Provider match: templates with matching provider score higher
+    V2.1 (Section 13.8): Queries kg_edges table for real relationship data.
+    
+    Scoring factors:
+    - Edge density: More edges to relevant entities = higher score
+    - Edge types: uses_endpoint (1.0), references_entity (0.7), belongs_to (0.3)
+    - Provider match: Bonus if template is from same provider
+    
+    Args:
+        template: Template dict with node_id field
+        entities: List of entity names from task understanding
+        provider_code: Current provider for bonus scoring
+        
+    Returns:
+        Score in [0, 1] range
     """
-    score = 0.3  # Base score
+    template_node_id = template.get("node_id")
+    if not template_node_id:
+        # Fall back to text matching if no node_id
+        return _compute_graph_score_fallback(template, entities, provider_code)
+    
+    try:
+        from integration_coworker.persistence import db
+        
+        # Edge type weights per ADR-0004
+        EDGE_WEIGHTS = {
+            "uses_endpoint": 1.0,
+            "references_entity": 0.7,
+            "has_step": 0.5,
+            "belongs_to_provider": 0.3,
+            "similar_to": 0.2,
+        }
+        
+        db.init_schema()
+        conn = db.get_connection()
+        is_postgres = db.get_engine_type() == "postgres"
+        cur = conn.cursor()
+        
+        # Count edges by type from template node
+        if is_postgres:
+            cur.execute("""
+                SELECT e.relation_type, COUNT(*) as cnt
+                FROM kg.edges e
+                WHERE e.src_node_id = %s OR e.dst_node_id = %s
+                GROUP BY e.relation_type
+            """, (template_node_id, template_node_id))
+        else:
+            cur.execute("""
+                SELECT relation_type, COUNT(*) as cnt
+                FROM kg_edges
+                WHERE src_node_id = ? OR dst_node_id = ?
+                GROUP BY relation_type
+            """, (template_node_id, template_node_id))
+        
+        edge_counts = {row[0]: row[1] for row in cur.fetchall()}
+        
+        # Count edges to entity nodes if we have entities
+        entity_edge_count = 0
+        if entities and is_postgres:
+            # Only do this for Postgres which has proper node lookup
+            entity_placeholders = ','.join(['%s'] * len(entities))
+            cur.execute(f"""
+                SELECT COUNT(*) FROM kg.edges e
+                JOIN kg.nodes n ON e.dst_node_id = n.id
+                WHERE e.src_node_id = %s
+                AND lower(n.key) IN ({entity_placeholders})
+            """, [template_node_id] + [e.lower() for e in entities])
+            entity_edge_count = cur.fetchone()[0]
+        
+        if not is_postgres:
+            conn.close()
+        
+        # Calculate weighted score
+        total_weight = 0.0
+        for edge_type, count in edge_counts.items():
+            weight = EDGE_WEIGHTS.get(edge_type, 0.1)
+            total_weight += count * weight
+        
+        # Add entity relevance bonus
+        if entities:
+            entity_bonus = min(1.0, entity_edge_count / len(entities))
+            total_weight += entity_bonus * 2.0
+        
+        # Normalize to [0, 1] - assuming max reasonable score is 10
+        normalized_score = min(1.0, total_weight / 10.0)
+        
+        # Provider match bonus
+        template_provider = template.get("provider_code")
+        if provider_code and template_provider == provider_code:
+            normalized_score = min(1.0, normalized_score + 0.1)
+        
+        return normalized_score
+        
+    except Exception as e:
+        logger.warning(f"KG edge query failed, falling back to text match: {e}")
+        return _compute_graph_score_fallback(template, entities, provider_code)
+
+
+def _compute_graph_score_fallback(
+    template: dict,
+    entities: List[str],
+    provider_code: Optional[str] = None,
+) -> float:
+    """
+    Fallback graph score using text matching.
+    
+    V2.1: Used when KG edge query fails or template has no node_id.
+    """
+    score = 0.0
+
+    # Provider match bonus
+    template_provider = template.get("provider_code")
+    if template_provider and template_provider == provider_code:
+        score += 0.3
+    elif provider_code:
+        score += 0.1
 
     template_name = template.get("name", "").lower()
     template_desc = template.get("description", "").lower()
-    template_text = f"{template_name} {template_desc}"
+    template_steps = " ".join(s.get("label", "") for s in template.get("steps", []))
+    template_text = f"{template_name} {template_desc} {template_steps}".lower()
 
     # Entity coverage bonus
     if entities:
@@ -138,146 +292,40 @@ def _compute_combined_score(
     template: dict,
     task_description: str,
     entities: List[str],
+    provider_code: Optional[str] = None,
+    strict_embeddings: bool = False,
 ) -> float:
     """
-    Compute combined score using Hybrid GraphRAG formula.
+    Compute combined score using configurable Hybrid GraphRAG formula.
     
-    Formula: 40% graph + 40% embedding + exact-match bonus (up to 20%)
+    V2: Uses per-provider weights from config instead of hardcoded 40/40/20.
+    
+    Args:
+        template: Template dict to score
+        task_description: Task description to match against
+        entities: List of known entity names for graph scoring
+        provider_code: Optional provider for weight lookup and graph scoring
+        strict_embeddings: If True, raise error when embeddings unavailable
+        
+    Returns:
+        Combined score in [0, 1] range
     """
-    graph_score = _compute_graph_score(template, entities)
-    embedding_score = _compute_embedding_score(task_description, template)
+    from integration_coworker.config import get_scoring_weights
+    
+    weights = get_scoring_weights(provider_code)
+    
+    graph_score = _compute_graph_score(template, entities, provider_code)
+    embedding_score = _compute_embedding_score(
+        task_description, template, strict_mode=strict_embeddings
+    )
     exact_match_bonus = _compute_exact_match_bonus(template, task_description)
 
-    combined = (graph_score * 0.4) + (embedding_score * 0.4) + exact_match_bonus
+    combined = (
+        graph_score * weights["graph"] +
+        embedding_score * weights["embedding"] +
+        exact_match_bonus * weights["exact_match"]
+    )
     return min(1.0, combined)
-
-
-def _check_legacy_templates_enabled() -> bool:
-    """
-    Check if legacy hardcoded templates are enabled.
-    
-    M5 Architecture: Legacy templates are DEPRECATED.
-    Default is OFF (0). Set USE_LEGACY_TEMPLATES=1 to enable for backwards compat.
-    """
-    return os.environ.get("USE_LEGACY_TEMPLATES", "0") == "1"
-
-
-# ---------------------------------------------------------------------------
-# Legacy in-memory fallback (DEPRECATED - gated by USE_LEGACY_TEMPLATES env var)
-# M5: This is only kept for backwards compatibility. New code should use
-# _infer_workflow_from_endpoint() for dynamic pattern inference.
-# ---------------------------------------------------------------------------
-_LEGACY_WORKFLOW_TEMPLATES = {
-    # -------------------------------------------------------------------------
-    # Stripe Payment Intents Templates
-    # -------------------------------------------------------------------------
-    ("stripe", "create_payment_intent"): {
-        "template_id": "stripe_payment_intent_v1",
-        "name": "Stripe Create Payment Intent",
-        "description": "Standard flow for creating a Stripe PaymentIntent",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate amount, currency, and payment method types"},
-            {"key": "call_create_intent", "type": "api_call", "label": "Create PaymentIntent",
-             "description": "POST to /v1/payment_intents"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract id, client_secret, and status"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "confirm_payment_intent"): {
-        "template_id": "stripe_confirm_intent_v1",
-        "name": "Stripe Confirm Payment Intent",
-        "description": "Flow for confirming a PaymentIntent with payment method",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate payment_intent_id and payment_method"},
-            {"key": "call_confirm", "type": "api_call", "label": "Confirm PaymentIntent",
-             "description": "POST to /v1/payment_intents/{id}/confirm"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract status and next_action if required"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "get_payment_intent"): {
-        "template_id": "stripe_get_intent_v1",
-        "name": "Stripe Get Payment Intent",
-        "description": "Retrieve an existing PaymentIntent by ID",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Ensure payment_intent_id is provided"},
-            {"key": "call_get_intent", "type": "api_call", "label": "Get PaymentIntent",
-             "description": "GET /v1/payment_intents/{id}"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Return full PaymentIntent object"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    ("stripe", "cancel_payment_intent"): {
-        "template_id": "stripe_cancel_intent_v1",
-        "name": "Stripe Cancel Payment Intent",
-        "description": "Cancel a PaymentIntent",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate payment_intent_id and cancellation_reason"},
-            {"key": "call_cancel", "type": "api_call", "label": "Cancel PaymentIntent",
-             "description": "POST to /v1/payment_intents/{id}/cancel"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Confirm cancellation status"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    # Legacy Stripe checkout template (kept for backwards compatibility)
-    ("stripe", "create_checkout_session"): {
-        "template_id": "stripe_checkout_v1",
-        "name": "Stripe Checkout Session Creation",
-        "description": "Standard flow for creating a Stripe checkout session",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input",
-             "description": "Validate amount, currency, and URLs"},
-            {"key": "call_create_session", "type": "api_call", "label": "Call Create Session",
-             "description": "POST to /v1/checkout/sessions"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract session_id and checkout_url"},
-            {"key": "end", "type": "end", "label": "Return Result"},
-        ],
-    },
-    # -------------------------------------------------------------------------
-    # Mock Payments Templates
-    # -------------------------------------------------------------------------
-    ("mock_payments", "create_checkout_session"): {
-        "template_id": "mock_checkout_v1",
-        "name": "Mock Payments Checkout Session",
-        "description": "Standard checkout flow for mock payment provider",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Input"},
-            {"key": "call_create_session", "type": "api_call", "label": "API Call"},
-            {"key": "transform_response", "type": "transform", "label": "Transform"},
-            {"key": "end", "type": "end", "label": "End"},
-        ],
-    },
-    ("mock_payments", "get_checkout_session"): {
-        "template_id": "mock_get_session_v1",
-        "name": "Mock Payments Get Checkout Session",
-        "description": "Retrieve existing checkout session by ID from mock provider",
-        "steps": [
-            {"key": "start", "type": "start", "label": "Start"},
-            {"key": "validate_input", "type": "validation", "label": "Validate Session ID",
-             "description": "Ensure session_id is provided and valid format"},
-            {"key": "call_get_session", "type": "api_call", "label": "GET Session",
-             "description": "GET /checkout/sessions/{session_id}"},
-            {"key": "transform_response", "type": "transform", "label": "Transform Response",
-             "description": "Extract and normalize session details"},
-            {"key": "end", "type": "end", "label": "Return Session"},
-        ],
-    },
-}
 
 
 def _query_kg_templates(
@@ -286,28 +334,36 @@ def _query_kg_templates(
     task_description: str,
     known_endpoints: Optional[List[str]] = None,
     known_entities: Optional[List[str]] = None,
-) -> List[dict]:
+    primary_http_method: Optional[str] = None,
+) -> Tuple[List[dict], List[dict], str]:
     """
-    Query the persistent KG for workflow templates.
-    Returns list of template dicts (matching legacy format for backwards compat).
+    Query the persistent KG for workflow templates with pattern fallback.
     
-    V1 Enhancement: Templates include _combined_score field computed via hybrid GraphRAG.
+    V1.1 FT-005: Cross-provider pattern matching
+    - First queries provider-specific templates
+    - Falls back to cross-provider patterns if no templates found
+    - Returns (templates, patterns, source) tuple
+    
+    Returns:
+        Tuple of:
+        - template dicts (matching legacy format)
+        - pattern dicts (from pattern matching)
+        - source: "exact", "pattern", or "combined"
     """
-    # Attempt GraphRAG query against persistent KG
-    # Note: similarity_threshold is set low (0.2) to work with mock LLM mode
-    # where embeddings are unavailable. With real embeddings, scores will be higher.
-    kg_templates: List[KGWorkflowTemplate] = query_workflow_templates(
+    # Use the enhanced API with pattern fallback
+    templates, patterns, source = query_templates_with_pattern_fallback(
         provider_code=provider,
         task_description=task_description,
         known_entities=known_entities,
         known_endpoints=known_endpoints,
-        top_k=10,  # Fetch more candidates for scoring
+        http_method=primary_http_method,
+        top_k=10,
         similarity_threshold=0.1,  # Lower threshold, let hybrid scoring rank
     )
-
+    
     # Convert KGWorkflowTemplate domain models to legacy dict format
-    results = []
-    for tmpl in kg_templates:
+    template_dicts = []
+    for tmpl in templates:
         steps = []
         for step in (tmpl.steps or []):
             steps.append({
@@ -322,48 +378,39 @@ def _query_kg_templates(
             "name": tmpl.name,
             "description": tmpl.description or "",
             "steps": steps,
-            "embedding": tmpl.embedding if hasattr(tmpl, 'embedding') else None,
+            "embedding": getattr(tmpl, 'embedding', None),
+            "provider_code": provider,
+            "node_id": getattr(tmpl, 'node_id', None),
         }
 
-        # Compute hybrid score
+        # Compute hybrid score with configurable weights
         template_dict["_combined_score"] = _compute_combined_score(
             template_dict,
             task_description,
             known_entities or [],
+            provider_code=provider,
         )
 
-        results.append(template_dict)
+        template_dicts.append(template_dict)
 
     # Sort by combined score (highest first)
-    results.sort(key=lambda t: t.get("_combined_score", 0), reverse=True)
+    template_dicts.sort(key=lambda t: t.get("_combined_score", 0), reverse=True)
 
-    # Return top 5
-    return results[:5]
+    # Convert patterns to dict format
+    pattern_dicts = []
+    for pattern in patterns:
+        pattern_dict = {
+            "template_id": pattern.pattern_key,
+            "name": pattern.pattern_name,
+            "description": pattern.description,
+            "steps": pattern.steps,
+            "_combined_score": pattern.confidence,
+            "source": pattern.source,
+            "provider_examples": pattern.provider_examples,
+        }
+        pattern_dicts.append(pattern_dict)
 
-
-def _legacy_in_memory_lookup(provider: str, task_slug: str) -> List[dict]:
-    """
-    Fallback to in-memory templates.
-    
-    M5: DEPRECATED - Gated behind USE_LEGACY_TEMPLATES=1 (default: OFF).
-    Only used for backwards compatibility during migration.
-    """
-    if not _check_legacy_templates_enabled():
-        logger.debug("Legacy templates disabled (USE_LEGACY_TEMPLATES=0)")
-        return []
-
-    # Exact match
-    template_key = (provider, task_slug)
-    if template_key in _LEGACY_WORKFLOW_TEMPLATES:
-        return [_LEGACY_WORKFLOW_TEMPLATES[template_key]]
-
-    # Partial match by keyword overlap
-    matches = []
-    for (p, t), tmpl in _LEGACY_WORKFLOW_TEMPLATES.items():
-        if p == provider and any(word in t for word in task_slug.split("_")):
-            matches.append(tmpl)
-
-    return matches
+    return template_dicts[:5], pattern_dicts[:5], source
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +575,13 @@ def _infer_multi_endpoint_workflow(
     """
     Infer a multi-step workflow from multiple endpoints.
     
-    Creates a workflow with multiple api_call nodes connected by data flow.
+    V2.1 Fix: Generates proper DAG with start/end nodes and canonical types.
+    
+    Creates a workflow with:
+    - Single "start" node
+    - One "api_call" node per matched endpoint
+    - Transform nodes between API calls for data mapping
+    - Single "end" node
     
     Args:
         endpoints: Available endpoints
@@ -536,60 +589,99 @@ def _infer_multi_endpoint_workflow(
         action_sequence: List of normalized actions in order
         
     Returns:
-        List of workflow step dictionaries
+        List of workflow step dictionaries with proper structure
     """
     steps: List[dict] = []
-    prev_step_id: Optional[str] = None
-
+    
+    # Step 1: Add start node
+    steps.append({
+        "key": "start",
+        "type": "start",
+        "label": "Start",
+        "description": "Entry point for multi-endpoint workflow",
+    })
+    
+    # Step 2: Add input validation
+    steps.append({
+        "key": "validate_input",
+        "type": "validation",
+        "label": "Validate Input",
+        "description": "Validate request parameters and authorization",
+    })
+    
+    api_call_count = 0
+    
+    # Step 3: Add API call nodes for each action
     for i, action in enumerate(action_sequence):
         endpoint = _find_endpoint_for_action(endpoints, action, task_description)
-
+        
         if endpoint is None:
             logger.warning(f"No endpoint found for action '{action}' in multi-step flow")
             continue
-
-        step_id = f"step_{i+1}_{action}"
-
-        # Determine step type based on action
-        if action in ("validate", "check"):
-            step_type = "validate_input"
-        elif action in ("get", "list"):
-            step_type = "api_call_fetch"
-        elif action in ("create",):
-            step_type = "api_call_create"
-        elif action in ("update",):
-            step_type = "api_call_update"
-        elif action in ("delete",):
-            step_type = "api_call_delete"
-        elif action in ("send",):
-            step_type = "api_call_notify"
-        else:
-            step_type = "api_call"
-
-        step = {
-            "id": step_id,
-            "type": step_type,
-            "action": action,
+        
+        api_call_count += 1
+        step_key = f"api_call_{api_call_count}"
+        
+        # Create API call node (use canonical "api_call" type)
+        steps.append({
+            "key": step_key,
+            "type": "api_call",  # Always use canonical type
+            "label": f"{action.capitalize()}: {endpoint.method} {endpoint.path}",
+            "description": endpoint.summary or f"{action.capitalize()} via {endpoint.method} {endpoint.path}",
             "endpoint_path": endpoint.path,
             "endpoint_method": endpoint.method,
             "endpoint_operation_id": endpoint.operation_id,
-            "depends_on": [prev_step_id] if prev_step_id else [],
-            "description": f"{action.capitalize()} via {endpoint.method} {endpoint.path}",
-        }
-
-        steps.append(step)
-        prev_step_id = step_id
-
-    # Add final response step if we have any steps
-    if steps:
-        steps.append({
-            "id": "return_response",
-            "type": "return_result",
-            "depends_on": [prev_step_id] if prev_step_id else [],
-            "description": "Return final result from multi-step workflow",
+            "action": action,
         })
-
+    
+    # Step 4: Add final transform if we have API calls
+    if api_call_count > 0:
+        steps.append({
+            "key": "transform_response",
+            "type": "transform",
+            "label": "Transform Response",
+            "description": "Combine and format results from multi-step flow",
+        })
+    
+    # Step 5: Add end node
+    steps.append({
+        "key": "end",
+        "type": "end",
+        "label": "End",
+        "description": "Return final result from multi-endpoint workflow",
+    })
+    
     return steps
+
+
+def _build_edges_for_multi_endpoint_flow(steps: List[dict]) -> List[dict]:
+    """
+    Build edges for multi-endpoint workflow steps.
+    
+    Creates linear edge chain with proper connectivity:
+    start → validate → api_call_1 → api_call_2 → ... → transform → end
+    
+    Args:
+        steps: List of step dicts from _infer_multi_endpoint_workflow
+        
+    Returns:
+        List of edge dicts with from_node_key and to_node_key
+    """
+    edges = []
+    
+    # Filter to get ordered step keys
+    step_keys = [s["key"] for s in steps]
+    
+    # Create linear edge chain
+    for i in range(len(step_keys) - 1):
+        edges.append({
+            "from_node_key": step_keys[i],
+            "to_node_key": step_keys[i + 1],
+            "edge_type": "default",
+            "condition": None,
+        })
+    
+    return edges
 
 
 def _infer_workflow_from_endpoint(
@@ -842,16 +934,14 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
     Reads: integration_task, provider_code, endpoints
     Writes: plan["candidate_templates"], workflow_nodes, workflow_edges
 
-    Contract per Appendix C.3.7:
-    - Queries KG (graph-first, then embedding similarity) for matching templates
-    - Falls back to legacy in-memory ONLY if USE_LEGACY_TEMPLATES=1
-    - Falls back to in-memory KG fallback if USE_IN_MEMORY_KG_FALLBACK=1
+    V2 Architecture (per ADR-0004):
+    - Queries KG exclusively (no hardcoded legacy templates)
+    - Uses HTTP-method-based inference when KG is empty
     - Populates plan["candidate_templates"] (may be empty, not an error)
-    - Builds initial workflow nodes and edges from best template
+    - Builds initial workflow nodes and edges from best template or inference
+    - KG learns from each run for future improvement
     
-    M5 Enhancement:
-    - Uses smarter generic fallback based on HTTP method when no templates found
-    - Infers workflow pattern from endpoint structure (POST→create, GET→fetch, etc.)
+    Run 'scripts/bootstrap_kg.py' to seed common workflow templates.
     """
     if not state.integration_task:
         state.errors.append("No integration_task from understand_task")
@@ -874,50 +964,55 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
 
     # ---------------------------------------------------------------------------
     # GraphRAG query: graph-first filtering, then hybrid scoring (V1 enhancement)
+    # V1.1 FT-005: Now uses pattern fallback for cross-provider learning
     # ---------------------------------------------------------------------------
     logger.info(
         "align_task_with_kg: querying KG for provider=%s, task=%s",
         provider,
         task_slug,
     )
-    candidate_templates = _query_kg_templates(
+    
+    # Determine primary HTTP method from task description for pattern matching
+    primary_http_method = None
+    task_lower = task_description.lower()
+    if any(word in task_lower for word in ["create", "add", "new", "post"]):
+        primary_http_method = "POST"
+    elif any(word in task_lower for word in ["update", "modify", "edit", "patch"]):
+        primary_http_method = "PUT"
+    elif any(word in task_lower for word in ["delete", "remove"]):
+        primary_http_method = "DELETE"
+    elif any(word in task_lower for word in ["get", "fetch", "list", "retrieve"]):
+        primary_http_method = "GET"
+    
+    candidate_templates, candidate_patterns, template_source = _query_kg_templates(
         provider=provider,
         task_slug=task_slug,
         task_description=task_description,
         known_endpoints=known_endpoints,
         known_entities=known_entities,
+        primary_http_method=primary_http_method,
     )
 
     # ---------------------------------------------------------------------------
-    # Fallback hierarchy:
-    # 1. KG templates (from GraphRAG)
-    # 2. Legacy in-memory templates (if USE_LEGACY_TEMPLATES=1)
-    # 3. In-memory KG fallback (if USE_IN_MEMORY_KG_FALLBACK=1)
-    # 4. Smart generic fallback based on HTTP method (M5 default)
+    # V2 Architecture: KG-only with smart inference fallback
+    # V1.1 FT-005: Cross-provider pattern matching for knowledge transfer
+    # 
+    # On first run (KG empty), use smart inference from endpoint structure
+    # OR cross-provider patterns. KG learns from each run.
+    # Run 'scripts/bootstrap_kg.py' to seed initial templates if desired.
     # ---------------------------------------------------------------------------
-    template_source = "kg"
-
-    if not candidate_templates and _check_legacy_templates_enabled():
+    if not candidate_templates and candidate_patterns:
+        # V1.1 FT-005: Use cross-provider pattern when no provider-specific templates
         logger.info(
-            "align_task_with_kg: KG empty; trying legacy templates (USE_LEGACY_TEMPLATES=1)"
+            "align_task_with_kg: No provider-specific templates for provider=%s. "
+            "Using cross-provider pattern matching. Found %d patterns.",
+            provider,
+            len(candidate_patterns),
         )
-        candidate_templates = _legacy_in_memory_lookup(provider, task_slug)
-        if candidate_templates:
-            template_source = "legacy"
-
-    if not candidate_templates and _check_fallback_enabled():
-        logger.warning(
-            "align_task_with_kg: KG returned no templates; using in-memory fallback "
-            "(USE_IN_MEMORY_KG_FALLBACK=1). This should NOT happen on demo path."
-        )
-        candidate_templates = _legacy_in_memory_lookup(provider, task_slug)
-        if candidate_templates:
-            template_source = "fallback"
-
-    if not candidate_templates:
-        # M5: Expected on first run - use smart inference from endpoint
+    elif not candidate_templates:
+        # No templates or patterns - will use smart inference from endpoint
         logger.info(
-            "align_task_with_kg: No templates for provider=%s. "
+            "align_task_with_kg: No templates or patterns for provider=%s. "
             "Using smart HTTP-method-based inference. "
             "KG will learn from this run for future use.",
             provider,
@@ -925,12 +1020,17 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
         template_source = "inferred"
 
     state.plan["candidate_templates"] = candidate_templates
-    state.plan["template_source"] = template_source  # M5: Track where template came from
+    state.plan["candidate_patterns"] = candidate_patterns  # V1.1: Store patterns too
+    state.plan["template_source"] = template_source  # Track where template came from
 
     # ---------------------------------------------------------------------------
-    # Build workflow nodes/edges from best template or smart fallback
+    # Build workflow nodes/edges from best template, pattern, or smart fallback
+    # V1.1 FT-005: Now considers cross-provider patterns as intermediate option
     # ---------------------------------------------------------------------------
+    steps = None
+    
     if candidate_templates:
+        # Best case: provider-specific template found
         best = candidate_templates[0]
         steps = best.get("steps", [])
         logger.info(
@@ -939,7 +1039,25 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
             len(steps),
             template_source,
         )
-    else:
+        # V1.1: Track matched pattern for learning
+        if best.get("template_id"):
+            state.plan["matched_template_id"] = best.get("template_id")
+    
+    elif candidate_patterns:
+        # V1.1 FT-005: Use cross-provider pattern
+        best_pattern = candidate_patterns[0]
+        steps = best_pattern.get("steps", [])
+        logger.info(
+            "align_task_with_kg: selected pattern=%s with %d steps (source=%s, examples=%s)",
+            best_pattern.get("template_id", "?"),
+            len(steps),
+            best_pattern.get("source", "builtin"),
+            best_pattern.get("provider_examples", []),
+        )
+        # V1.1: Track matched pattern for learning
+        state.plan["matched_pattern_id"] = best_pattern.get("template_id")
+    
+    if not steps:
         # M5: Use smarter fallback that infers from endpoint structure
         # P1: First check for multi-step patterns ("create X and send Y")
         is_multi_step, action_sequence = _detect_multi_step_pattern(task_description)
@@ -979,6 +1097,19 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
             else:
                 logger.info("align_task_with_kg: no matching endpoint; using basic fallback")
                 steps = _build_fallback_steps()
+
+    # Guard: Ensure steps have start and end nodes (templates/patterns may not include them)
+    if steps:
+        has_start = any(s.get("type") == "start" or s.get("key") == "start" for s in steps)
+        has_end = any(s.get("type") == "end" or s.get("key") == "end" for s in steps)
+        
+        if not has_start:
+            steps.insert(0, {"key": "start", "type": "start", "label": "Start"})
+            logger.debug("align_task_with_kg: added missing start node")
+        
+        if not has_end:
+            steps.append({"key": "end", "type": "end", "label": "End"})
+            logger.debug("align_task_with_kg: added missing end node")
 
     # Create IntegrationFlowNode list
     # Note: Multi-step workflows use "id" while legacy uses "key"

@@ -385,3 +385,64 @@ class KGWorkflowTemplate:
     task_type: Optional[str] = None
     steps: Optional[List["KGWorkflowStep"]] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+# ============================================================================
+# Feedback and Learning Models
+# ============================================================================
+
+class FeedbackType(str, Enum):
+    """Types of feedback that can be recorded for KG learning."""
+    THUMBS = "thumbs"  # Binary: 0 or 1 (thumbs down/up)
+    SCORE = "score"  # Numeric: 0.0 to 1.0
+    AUTO_COMPILE = "auto_compile"  # 0 (fail) or 1 (success)
+    AUTO_TEST = "auto_test"  # 0 (fail) or 1 (success)
+    AUTO_LINT = "auto_lint"  # 0-1 based on lint score
+
+
+class FeedbackSource(str, Enum):
+    """Source of feedback for attribution."""
+    LANGSMITH = "langsmith"  # Synced from LangSmith feedback API
+    CLI = "cli"  # Submitted via CLI command
+    AUTO = "auto"  # Automatic signals (compile, test, lint)
+    API = "api"  # Submitted via API
+
+
+@dataclass
+class FeedbackRecord:
+    """
+    A feedback record for quality-based KG learning.
+    
+    Links run outcomes to template quality scores, enabling the KG to
+    learn which templates produce good outputs vs bad outputs.
+    
+    Per docs/decisions/FEEDBACK_LEARNING_IMPLEMENTATION.md
+    """
+    id: Optional[int] = None
+    run_id: str = ""  # Our run_id (maps to LangSmith trace_id)
+    template_key: Optional[str] = None  # kg.nodes key for template used
+    pattern_key: Optional[str] = None  # kg.nodes key for pattern used
+    feedback_type: FeedbackType = FeedbackType.THUMBS
+    score: float = 0.0  # Normalized 0-1
+    comment: Optional[str] = None
+    source: FeedbackSource = FeedbackSource.LANGSMITH
+    langsmith_feedback_id: Optional[str] = None  # Original LangSmith ID
+    created_at: Optional[str] = None
+    synced_at: Optional[str] = None
+
+
+@dataclass
+class ConfidenceUpdate:
+    """
+    Tracks a confidence score update for audit trail.
+    
+    Stored in kg.confidence_history for analysis of how
+    templates improve or degrade over time.
+    """
+    id: Optional[int] = None
+    node_key: str = ""
+    old_confidence: Optional[float] = None
+    new_confidence: float = 0.5
+    feedback_count: int = 0
+    reason: Optional[str] = None
+    created_at: Optional[str] = None

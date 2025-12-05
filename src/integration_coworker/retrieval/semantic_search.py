@@ -8,7 +8,7 @@ Functions:
 - cosine_similarity(a: List[float], b: List[float]) -> float
 
 Implementation:
-- Uses same embedding client as embed_spec_chunks (OpenAIEmbeddings)
+- Uses LangChain OpenAIEmbeddings for automatic LangSmith tracing (V2.1)
 - For **SQLite backend**: computes query embedding, then calculates cosine similarity in Python.
 - For **Postgres+pgvector backend**: pushes similarity computation into the DB using native
   pgvector operators (<=> for cosine distance, <-> for L2 distance).
@@ -351,8 +351,16 @@ def _search_kg_templates_pgvector(
                 matches = []
                 for row in rows:
                     semantic_score = float(row[4]) if row[4] else 0.0
-                    graph_score = 0.5 if provider_code else 0.3
-                    combined_score = (graph_score * 0.4) + (semantic_score * 0.6)
+                    # V2: Use configurable weights from config
+                    from integration_coworker.config import get_scoring_weights
+                    weights = get_scoring_weights(provider_code)
+                    
+                    # V2: Graph score based on provider match
+                    graph_score = 0.5 if provider_code else 0.0
+                    combined_score = (
+                        graph_score * weights["graph"] +
+                        semantic_score * weights["embedding"]
+                    )
 
                     matches.append(TemplateMatch(
                         node_id=row[0],
@@ -381,6 +389,8 @@ def _search_kg_templates_python(
 ) -> List[TemplateMatch]:
     """
     Search KG templates using Python-based cosine similarity (SQLite fallback).
+    
+    V2: Uses configurable scoring weights from config.
     """
     try:
         conn = db.get_connection()
@@ -403,6 +413,10 @@ def _search_kg_templates_python(
 
         rows = cur.fetchall()
 
+        # V2: Get configurable weights
+        from integration_coworker.config import get_scoring_weights
+        weights = get_scoring_weights(provider_code)
+
         matches = []
         for row in rows:
             node_id, key, name, description, embedding_json = row
@@ -418,12 +432,14 @@ def _search_kg_templates_python(
                 # Fallback: keyword matching
                 semantic_score = _keyword_similarity(query, name, description)
 
-            # Graph score placeholder - can be enhanced with actual graph traversal
-            # For now, use provider match as a simple graph signal
-            graph_score = 0.5 if provider_code else 0.3
+            # V2: Graph score based on provider match
+            graph_score = 0.5 if provider_code else 0.0
 
-            # Combined score: 40% graph + 60% semantic (semantic-heavy for query matching)
-            combined_score = (graph_score * 0.4) + (semantic_score * 0.6)
+            # V2: Combined score using configurable weights
+            combined_score = (
+                graph_score * weights["graph"] +
+                semantic_score * weights["embedding"]
+            )
 
             matches.append(TemplateMatch(
                 node_id=node_id,

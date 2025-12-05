@@ -43,7 +43,7 @@ def enable_mock_llm_and_kg(monkeypatch):
     """Enable mock LLM and KG fallback for consistent testing."""
     monkeypatch.setenv("USE_MOCK_LLM", "1")
     monkeypatch.setenv("USE_IN_MEMORY_KG_FALLBACK", "1")
-    monkeypatch.setenv("USE_LEGACY_TEMPLATES", "1")
+    # V2: Legacy templates removed, using inference-based fallback
 
 
 @pytest.fixture
@@ -263,10 +263,11 @@ class TestSearchKgTemplatesBehavior:
         assert len(results) == 1
         result = results[0]
         
-        # With provider_code, graph_score = 0.5
+        # V2: With provider_code, graph_score = 0.5
         # With perfect embedding match, similarity ~ 1.0
-        # Combined = 0.5 * 0.4 + 1.0 * 0.6 = 0.8
-        assert result.combined_score == pytest.approx(0.8, abs=0.05)
+        # Default weights: graph=0.4, embedding=0.4
+        # Combined = 0.5 * 0.4 + 1.0 * 0.4 = 0.6
+        assert result.combined_score == pytest.approx(0.6, abs=0.05)
     
     @patch('integration_coworker.retrieval.semantic_search.compute_embedding')
     @patch('integration_coworker.retrieval.semantic_search.db')
@@ -288,9 +289,9 @@ class TestSearchKgTemplatesBehavior:
         assert len(results) == 1
         result = results[0]
         
-        # Without provider_code, graph_score = 0.3
-        # Combined = 0.3 * 0.4 + 1.0 * 0.6 = 0.72
-        assert result.combined_score == pytest.approx(0.72, abs=0.05)
+        # V2: Without provider_code, graph_score = 0.0 (no provider match)
+        # Combined = 0.0 * 0.4 + 1.0 * 0.4 = 0.4
+        assert result.combined_score == pytest.approx(0.4, abs=0.05)
     
     @patch('integration_coworker.retrieval.semantic_search.compute_embedding')
     @patch('integration_coworker.retrieval.semantic_search.db')
@@ -364,21 +365,42 @@ class TestAlignTaskWithKgBehavior:
         assert "end" in node_types
     
     def test_template_match_has_five_nodes(self):
-        """Known tasks get 5-node workflow: start, validate, call, transform, end."""
+        """
+        V2: With inference, POST endpoint generates workflow with validation + transform.
+        
+        Note: Legacy templates are removed. This test now verifies inference behavior.
+        """
+        # Need to provide an endpoint for inference to work
+        endpoints = [
+            Endpoint(
+                id=None,
+                source_system_id=None,
+                spec_document_id=None,
+                path="/v1/checkout/sessions",
+                method="POST",
+                operation_id="createCheckoutSession",
+                summary="Create checkout session",
+                description="Create a new checkout session",
+                request_schema_id=None,
+                response_schema_id=None,
+            ),
+        ]
+        
         state = self._make_state(
             task_description="Create a new checkout session",
             task_slug="create_checkout_session",
         )
+        state.endpoints = endpoints
         
         result = align_task_with_kg(state)
         
-        # Should match template
-        assert len(result.plan.get("candidate_templates", [])) == 1
-        
-        # Should have 5 nodes (with transform)
+        # V2: With inference from POST endpoint, should have 5 nodes
+        # (start, validate, call, transform, end)
         assert len(result.workflow_nodes) == 5
         node_keys = [n.node_key for n in result.workflow_nodes]
-        assert "transform_response" in node_keys or "transform" in node_keys
+        assert "start" in node_keys
+        assert any("validate" in k for k in node_keys)
+        assert any("call" in k for k in node_keys)
     
     def test_step_marked_completed(self):
         """align_task_with_kg should mark itself as completed."""

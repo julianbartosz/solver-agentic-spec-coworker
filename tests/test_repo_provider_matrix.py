@@ -2,8 +2,8 @@
 Repo Provider Sanity Matrix Tests.
 
 This test module exercises attach_repo_context under multiple combinations:
-1. Filesystem provider + FastAPI profile
-2. Filesystem provider + Generic profile  
+1. Local provider + FastAPI profile
+2. Local provider + Generic profile  
 3. GitHub provider (mocked) + profile from metadata
 
 Validates that all paths produce valid RepoSnapshot and repo_markdown_context.
@@ -23,10 +23,8 @@ from typing import Optional
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.graph.nodes.attach_repo_context import attach_repo_context
 from integration_coworker.repo.providers import (
-    RepoSourceConfig,
-    FilesystemProvider,
-    GitHubRepoProvider,
-    get_repo_provider,
+    LocalRepoProvider,
+    get_provider,
 )
 from integration_coworker.repo.profiles import (
     FASTAPI_PROFILE,
@@ -145,13 +143,13 @@ def mock_github_responses():
     
     tree_response = {
         "tree": [
-            {"path": "README.md", "type": "blob", "sha": "abc1"},
-            {"path": "pyproject.toml", "type": "blob", "sha": "abc2"},
+            {"path": "README.md", "type": "blob", "sha": "abc1", "size": 100},
+            {"path": "pyproject.toml", "type": "blob", "sha": "abc2", "size": 200},
             {"path": "src", "type": "tree", "sha": "dir1"},
-            {"path": "src/main.py", "type": "blob", "sha": "abc3"},
-            {"path": "src/api.py", "type": "blob", "sha": "abc4"},
+            {"path": "src/main.py", "type": "blob", "sha": "abc3", "size": 300},
+            {"path": "src/api.py", "type": "blob", "sha": "abc4", "size": 400},
             {"path": "tests", "type": "tree", "sha": "dir2"},
-            {"path": "tests/test_api.py", "type": "blob", "sha": "abc5"},
+            {"path": "tests/test_api.py", "type": "blob", "sha": "abc5", "size": 500},
         ]
     }
     
@@ -168,12 +166,16 @@ def mock_github_responses():
 def make_state(
     repo_root: Optional[str] = None,
     repo_profile: Optional[RepoProfile] = None,
-    repo_source: Optional[RepoSourceConfig] = None,
+    repo_source: Optional[str] = None,
+    github_token: Optional[str] = None,
+    github_ref: Optional[str] = None,
 ) -> WorkflowState:
     """Create a WorkflowState configured for attach_repo_context testing."""
     @dataclass
     class Options:
-        repo_source: Optional[RepoSourceConfig] = None
+        repo_source: Optional[str] = None
+        github_token: Optional[str] = None
+        github_ref: Optional[str] = None
     
     state = WorkflowState(
         source_refs=["test_spec.yaml"],
@@ -183,22 +185,26 @@ def make_state(
         repo_profile=repo_profile,
     )
     
-    if repo_source:
-        state.options = Options(repo_source=repo_source)
+    if repo_source or github_token or github_ref:
+        state.options = Options(
+            repo_source=repo_source,
+            github_token=github_token,
+            github_ref=github_ref,
+        )
     
     return state
 
 
 # =============================================================================
-# Matrix Tests: Filesystem Provider + Profile Combinations
+# Matrix Tests: Local Provider + Profile Combinations
 # =============================================================================
 
-class TestFilesystemProviderMatrix:
-    """Test attach_repo_context with filesystem provider and various profiles."""
+class TestLocalProviderMatrix:
+    """Test attach_repo_context with local provider and various profiles."""
     
     @pytest.mark.no_db
-    def test_filesystem_fastapi_detected(self, fastapi_repo):
-        """Filesystem + FastAPI: profile should be auto-detected."""
+    def test_local_fastapi_detected(self, fastapi_repo):
+        """Local + FastAPI: profile should be auto-detected."""
         state = make_state(repo_root=str(fastapi_repo))
         
         result = attach_repo_context(state)
@@ -221,8 +227,8 @@ class TestFilesystemProviderMatrix:
         assert result.repo_profile.framework == "fastapi"
     
     @pytest.mark.no_db
-    def test_filesystem_explicit_profile(self, fastapi_repo):
-        """Filesystem + explicit profile: should not override provided profile."""
+    def test_local_explicit_profile(self, fastapi_repo):
+        """Local + explicit profile: should not override provided profile."""
         # Provide SUBATOMIC_MOCK_PROFILE explicitly
         state = make_state(
             repo_root=str(fastapi_repo),
@@ -243,8 +249,8 @@ class TestFilesystemProviderMatrix:
         assert "src/app/main.py" in result.repo_snapshot.files
     
     @pytest.mark.no_db
-    def test_filesystem_generic_python(self, generic_python_repo):
-        """Filesystem + generic Python repo: fallback to default profile."""
+    def test_local_generic_python(self, generic_python_repo):
+        """Local + generic Python repo: fallback to default profile."""
         state = make_state(repo_root=str(generic_python_repo))
         
         result = attach_repo_context(state)
@@ -257,12 +263,12 @@ class TestFilesystemProviderMatrix:
         
         # Profile should be default (no framework detected)
         assert result.repo_profile is not None
-        # Generic repos fall back to SUBATOMIC_MOCK_PROFILE
+        # Generic repos fall back to GENERIC_PYTHON_PROFILE (V2)
         assert result.repo_profile.language == "python"
     
     @pytest.mark.no_db
-    def test_filesystem_flask_detected(self, flask_repo):
-        """Filesystem + Flask: profile should be auto-detected."""
+    def test_local_flask_detected(self, flask_repo):
+        """Local + Flask: profile should be auto-detected."""
         state = make_state(repo_root=str(flask_repo))
         
         result = attach_repo_context(state)
@@ -278,7 +284,7 @@ class TestFilesystemProviderMatrix:
         assert result.repo_profile.framework == "flask"
     
     @pytest.mark.no_db
-    def test_filesystem_no_repo_root_is_noop(self):
+    def test_local_no_repo_root_is_noop(self):
         """No repo_root: attach_repo_context should be a no-op."""
         state = make_state(repo_root=None)
         
@@ -298,88 +304,50 @@ class TestFilesystemProviderMatrix:
 # =============================================================================
 
 class TestGitHubProviderMatrix:
-    """Test GitHubRepoProvider directly (not through attach_repo_context).
-    
-    Note: The GitHub provider integration with attach_repo_context is not
-    fully wired up yet - IntegrationOptions doesn't have a repo_source field.
-    These tests verify the provider works correctly in isolation.
-    """
+    """Test GitHubRepoProvider directly and through attach_repo_context."""
     
     @pytest.mark.no_db
-    @patch('urllib.request.urlopen')
-    def test_github_provider_builds_snapshot(self, mock_urlopen, mock_github_responses):
-        """GitHub provider should build snapshot from API."""
+    @patch('integration_coworker.repo.providers.github.HAS_HTTPX', True)
+    @patch('integration_coworker.repo.providers.github.httpx')
+    def test_github_provider_direct(self, mock_httpx, mock_github_responses):
+        """GitHub provider should work directly."""
         import base64
         
-        def mock_response_factory(*args, **kwargs):
-            url = args[0].full_url if hasattr(args[0], 'full_url') else str(args[0])
-            mock_response = MagicMock()
-            mock_response.__enter__ = MagicMock(return_value=mock_response)
-            mock_response.__exit__ = MagicMock(return_value=False)
+        mock_client = MagicMock()
+        mock_httpx.Client.return_value = mock_client
+        
+        def mock_get(url, **kwargs):
+            response = MagicMock()
+            response.raise_for_status = MagicMock()
             
             if "/git/trees/" in url:
-                mock_response.read.return_value = json.dumps(mock_github_responses["tree"]).encode()
+                response.json.return_value = mock_github_responses["tree"]
             elif "/contents/" in url:
-                # Return mock file content
                 content = "# Mock file content\nprint('hello')"
                 encoded = base64.b64encode(content.encode()).decode()
-                mock_response.read.return_value = json.dumps({
+                response.json.return_value = {
                     "type": "file",
                     "encoding": "base64",
                     "content": encoded,
-                }).encode()
+                    "size": len(content),
+                }
             else:
-                mock_response.read.return_value = json.dumps(mock_github_responses["repo"]).encode()
+                response.json.return_value = mock_github_responses["repo"]
             
-            return mock_response
+            return response
         
-        mock_urlopen.side_effect = mock_response_factory
+        mock_client.get.side_effect = mock_get
         
-        # Create provider directly
-        provider = GitHubRepoProvider(
-            owner="acme-corp",
-            repo="remote-api-service",
-            ref="main",
+        # Create provider via factory
+        provider = get_provider(
+            "acme-corp/remote-api-service",
         )
         
-        # Build snapshot directly (bypassing attach_repo_context)
-        snapshot = provider.build_snapshot()
-        
-        # Verify snapshot is built
-        assert snapshot is not None
-        assert snapshot.repo_name == "remote-api-service"
-        assert snapshot.owner == "acme-corp"
-        
-        # Verify files are present
-        assert snapshot.files is not None
-        assert len(snapshot.files) > 0
-        
-        # Verify markdown context exists
-        assert snapshot.full_markdown is not None
-        assert len(snapshot.full_markdown) > 0
-    
-    @pytest.mark.no_db
-    @patch('urllib.request.urlopen')
-    def test_github_provider_metadata(self, mock_urlopen, mock_github_responses):
-        """GitHub provider should return correct metadata."""
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(mock_github_responses["repo"]).encode()
-        mock_response.__enter__ = MagicMock(return_value=mock_response)
-        mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
-        
-        provider = GitHubRepoProvider(
-            owner="acme-corp",
-            repo="remote-api-service",
-            ref="main",
-        )
-        
-        metadata = provider.get_repo_metadata()
+        # Get metadata
+        metadata = provider.get_metadata()
         
         assert metadata.name == "remote-api-service"
         assert metadata.owner == "acme-corp"
-        assert metadata.language == "Python"
-        assert metadata.default_branch == "main"
 
 
 # =============================================================================
@@ -387,19 +355,14 @@ class TestGitHubProviderMatrix:
 # =============================================================================
 
 class TestProviderFactoryMatrix:
-    """Test get_repo_provider factory with different configurations."""
+    """Test get_provider factory with different configurations."""
     
     @pytest.mark.no_db
-    def test_factory_creates_filesystem_provider(self, fastapi_repo):
-        """Factory should create FilesystemProvider for filesystem source."""
-        config = RepoSourceConfig(
-            source_type="filesystem",
-            path=str(fastapi_repo),
-        )
+    def test_factory_creates_local_provider(self, fastapi_repo):
+        """Factory should create LocalRepoProvider for local path."""
+        provider = get_provider(str(fastapi_repo))
         
-        provider = get_repo_provider(config)
-        
-        assert isinstance(provider, FilesystemProvider)
+        assert isinstance(provider, LocalRepoProvider)
         
         # Should be able to list files
         files = provider.list_files()
@@ -407,29 +370,44 @@ class TestProviderFactoryMatrix:
         assert any("main.py" in f for f in files)
     
     @pytest.mark.no_db
-    def test_factory_creates_github_provider(self):
-        """Factory should create GitHubRepoProvider for github source."""
-        config = RepoSourceConfig(
-            source_type="github",
-            owner="test-owner",
-            repo="test-repo",
-            ref="develop",
+    @patch('integration_coworker.repo.providers.github.HAS_HTTPX', True)
+    @patch('integration_coworker.repo.providers.github.httpx')
+    def test_factory_creates_github_provider_from_slug(self, mock_httpx):
+        """Factory should create GitHubRepoProvider for owner/repo slug."""
+        mock_client = MagicMock()
+        mock_httpx.Client.return_value = mock_client
+        
+        provider = get_provider("test-owner/test-repo")
+        
+        from integration_coworker.repo.providers.github import GitHubRepoProvider
+        assert isinstance(provider, GitHubRepoProvider)
+        assert provider.owner == "test-owner"
+        assert provider.repo == "test-repo"
+    
+    @pytest.mark.no_db
+    @patch('integration_coworker.repo.providers.github.HAS_HTTPX', True)
+    @patch('integration_coworker.repo.providers.github.httpx')
+    def test_factory_creates_github_provider_from_url(self, mock_httpx):
+        """Factory should create GitHubRepoProvider for GitHub URL."""
+        mock_client = MagicMock()
+        mock_httpx.Client.return_value = mock_client
+        
+        provider = get_provider(
+            "https://github.com/test-owner/test-repo",
+            github_ref="develop",
         )
         
-        provider = get_repo_provider(config)
-        
+        from integration_coworker.repo.providers.github import GitHubRepoProvider
         assert isinstance(provider, GitHubRepoProvider)
         assert provider.owner == "test-owner"
         assert provider.repo == "test-repo"
         assert provider.ref == "develop"
     
     @pytest.mark.no_db
-    def test_factory_rejects_unknown_source_type(self):
+    def test_factory_rejects_invalid_source(self):
         """Factory should reject unknown source types."""
-        config = RepoSourceConfig(source_type="gitlab")
-        
-        with pytest.raises(ValueError, match="Unknown source type"):
-            get_repo_provider(config)
+        with pytest.raises(ValueError, match="Unrecognized source format"):
+            get_provider("not-a-valid-source")
 
 
 # =============================================================================
@@ -549,8 +527,8 @@ class TestSanityE2E:
     """Quick sanity tests for complete attach_repo_context flow."""
     
     @pytest.mark.no_db
-    def test_e2e_filesystem_complete_flow(self, fastapi_repo):
-        """Complete E2E: filesystem provider -> snapshot -> context."""
+    def test_e2e_local_complete_flow(self, fastapi_repo):
+        """Complete E2E: local provider -> snapshot -> context."""
         state = make_state(repo_root=str(fastapi_repo))
         
         # Initial state

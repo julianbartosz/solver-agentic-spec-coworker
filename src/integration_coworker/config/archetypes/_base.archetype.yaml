@@ -5,9 +5,17 @@
 version: "1.0"
 
 # Default model configuration
+# Each node archetype should override based on its role.
+# Models are configurable via YAML - no code changes needed to swap providers.
+#
+# Recommended by role:
+# - Planning nodes: OpenAI GPT-5.1
+# - Code generation: Anthropic Claude Opus 4.5
+# - Extraction: OpenAI GPT-4o-mini (smaller, faster)
+# - Large context: Google Gemini 3 Pro
 model:
   provider: openai
-  name: gpt-4
+  name: gpt-5.1
   temperature: 0.7
   max_tokens: 2000
 

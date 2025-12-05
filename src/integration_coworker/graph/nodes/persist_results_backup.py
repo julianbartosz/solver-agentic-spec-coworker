@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import json
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
@@ -25,7 +25,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 "code_artifacts": len(state.code_artifacts),
             },
             "run_status": "completed_dry_run",
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state.persisted_ids = summary
     else:
@@ -207,7 +207,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 "schema_count": len(state.schemas),
                 "run_status": "completed" if not state.errors else "completed_with_errors",
                 "error_count": len(state.errors),
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
         except Exception as e:
@@ -215,7 +215,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             state.persisted_ids = {
                 "run_status": "persistence_failed",
                 "error": str(e),
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
     state.completed_steps.append("persist_results")

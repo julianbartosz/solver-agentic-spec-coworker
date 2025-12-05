@@ -90,6 +90,33 @@ def run_integration(
     repo_root: Optional[Path] = typer.Option(None, "--repo-root", "-r", help="Path to the target repository"),
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Run without persisting to database"),
     provider_code: Optional[str] = typer.Option(None, "--provider", "-p", help="Override provider code"),
+    policy_mode: str = typer.Option(
+        "inline",
+        "--policy-mode",
+        "-m",
+        help=(
+            "Code generation style:\n"
+            "  'inline' (default) - FULLY standalone code (~200 LOC), only needs httpx. "
+            "No external dependencies beyond stdlib + httpx.\n"
+            "  'runtime' - Thin clients (~30 LOC) using integration-coworker-runtime package. "
+            "Must pip install integration-coworker-runtime in target project."
+        ),
+    ),
+    standalone: bool = typer.Option(
+        False,
+        "--standalone",
+        help="Alias for --policy-mode inline. Generate fully self-contained code with no runtime dependencies.",
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="V1.1: Disable spec caching - always re-fetch and re-parse specs even if unchanged",
+    ),
+    strict_codegen: bool = typer.Option(
+        False,
+        "--strict-codegen",
+        help="V1.1: Enable strict code generation mode - apply auto-formatting and fail on validation errors",
+    ),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose debug logging"),
 ):
@@ -106,21 +133,50 @@ def run_integration(
         # With repo integration
         integration-coworker run -s ./api.yaml -t "Add payment flow" -r ./my-project
         
+        # With runtime-based code generation (V2.1)
+        integration-coworker run -s ./api.yaml -t "Create payment" --policy-mode runtime
+        
         # With verbose debug logging
         integration-coworker run -s ./api.yaml -t "Create payment" --verbose
     """
     # Setup logging based on verbose flag
     _setup_logging(verbose)
 
+    # V4 Observability: Show LangSmith trace URL early for real-time monitoring
+    langsmith_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    langsmith_project = os.getenv("LANGCHAIN_PROJECT", "default")
+    if langsmith_enabled and not json_output:
+        typer.echo(f"🔗 LangSmith: https://smith.langchain.com (project: {langsmith_project})")
+        typer.echo("   Trace will appear once run starts...")
+        typer.echo("")
+
     if verbose:
         _logger.debug(f"Starting integration run with {len(spec_ref)} spec(s)")
         _logger.debug(f"Task: {task}")
         _logger.debug(f"Dry run: {dry_run}")
+        _logger.debug(f"Policy mode: {policy_mode}")
+        _logger.debug(f"Standalone flag: {standalone}")
+        _logger.debug(f"No cache: {no_cache}")
+        _logger.debug(f"Strict codegen: {strict_codegen}")
+
+    # Handle --standalone as alias for --policy-mode inline
+    if standalone:
+        policy_mode = "inline"
+        if verbose:
+            _logger.debug("Standalone mode enabled - using inline policy mode")
+
+    # Validate policy_mode
+    if policy_mode not in ("inline", "runtime"):
+        typer.echo(f"✗ Invalid --policy-mode: {policy_mode}. Must be 'inline' or 'runtime'.", err=True)
+        raise typer.Exit(code=1)
 
     options = IntegrationOptions(
         dry_run=dry_run,
         repo_integration_enabled=repo_root is not None,
-        override_provider_code=provider_code
+        override_provider_code=provider_code,
+        policy_mode=policy_mode,  # V2.1 (GAP-02)
+        no_cache=no_cache,  # V1.1 (FT-001)
+        strict_codegen=strict_codegen,  # V1.1 (FT-008)
     )
 
     try:
@@ -234,9 +290,15 @@ def run_demo(
         typer.echo(f"   Looked in: {[str(p) for p in possible_paths]}", err=True)
         raise typer.Exit(code=1)
 
+    # V4 Observability: Show LangSmith info for demo
+    langsmith_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    langsmith_project = os.getenv("LANGCHAIN_PROJECT", "default")
+
     typer.echo("🚀 Running demo with mock payments API...")
     typer.echo(f"   Spec: {mock_spec}")
     typer.echo(f"   Mode: {'dry-run' if dry_run else 'persist to database'}")
+    if langsmith_enabled:
+        typer.echo(f"   🔗 LangSmith: https://smith.langchain.com (project: {langsmith_project})")
     typer.echo("")
 
     # Run the integration
@@ -1442,6 +1504,412 @@ def kg_query(
 
     except Exception as e:
         typer.echo(f"✗ Error querying KG: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("feedback")
+def record_feedback(
+    run_id: str = typer.Argument(..., help="Run ID to provide feedback for"),
+    score: Optional[float] = typer.Option(None, "--score", "-s", help="Numeric score (0.0 to 1.0)"),
+    thumbs_up: bool = typer.Option(False, "--thumbs-up", "--up", help="Positive feedback (score=1.0)"),
+    thumbs_down: bool = typer.Option(False, "--thumbs-down", "--down", help="Negative feedback (score=0.0)"),
+    comment: Optional[str] = typer.Option(None, "--comment", "-c", help="Optional feedback comment"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Record human feedback for a completed run.
+    
+    Feedback is stored locally and synced to LangSmith (if configured).
+    The feedback is used to update Knowledge Graph confidence scores.
+    
+    Use one of: --score, --thumbs-up, or --thumbs-down.
+    
+    Examples:
+        # Positive feedback with thumbs up
+        integration-coworker feedback run-abc123 --thumbs-up
+        
+        # Negative feedback with thumbs down
+        integration-coworker feedback run-abc123 --thumbs-down
+        
+        # Numeric score with comment
+        integration-coworker feedback run-abc123 --score 0.8 --comment "Generated code worked well"
+    """
+    from integration_coworker.feedback.langsmith_sync import create_feedback
+    from integration_coworker.domain.models import FeedbackSource
+
+    # Validate score options
+    options_count = sum([score is not None, thumbs_up, thumbs_down])
+    if options_count == 0:
+        typer.echo("✗ Error: Specify one of --score, --thumbs-up, or --thumbs-down", err=True)
+        raise typer.Exit(code=1)
+    if options_count > 1:
+        typer.echo("✗ Error: Specify only one of --score, --thumbs-up, or --thumbs-down", err=True)
+        raise typer.Exit(code=1)
+
+    # Determine final score
+    if thumbs_up:
+        final_score = 1.0
+        feedback_type = "thumbs_up"
+    elif thumbs_down:
+        final_score = 0.0
+        feedback_type = "thumbs_down"
+    else:
+        if score < 0.0 or score > 1.0:
+            typer.echo("✗ Error: Score must be between 0.0 and 1.0", err=True)
+            raise typer.Exit(code=1)
+        final_score = score
+        feedback_type = "score"
+
+    try:
+        record = create_feedback(
+            run_id=run_id,
+            score=final_score,
+            feedback_type=feedback_type,
+            source=FeedbackSource.HUMAN,
+            comment=comment,
+        )
+
+        if json_output:
+            output = {
+                "status": "created",
+                "feedback_id": record.id,
+                "run_id": run_id,
+                "score": final_score,
+                "feedback_type": record.feedback_type.value,
+                "source": record.source.value,
+                "langsmith_synced": record.langsmith_id is not None,
+            }
+            typer.echo(json.dumps(output, indent=2))
+        else:
+            typer.echo(f"✓ Feedback recorded for run {run_id}")
+            typer.echo(f"   Score: {final_score}")
+            typer.echo(f"   Type: {feedback_type}")
+            if record.langsmith_id:
+                typer.echo(f"   LangSmith: synced ({record.langsmith_id})")
+            else:
+                typer.echo("   LangSmith: not synced (tracing disabled or error)")
+            if comment:
+                typer.echo(f"   Comment: {comment}")
+
+    except Exception as e:
+        if json_output:
+            typer.echo(json.dumps({"error": str(e), "status": "failed"}), err=True)
+        else:
+            typer.echo(f"✗ Error recording feedback: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("feedback-sync")
+def sync_feedback(
+    days: int = typer.Option(7, "--days", "-d", help="Sync feedback from the last N days"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Filter by provider code"),
+    update_confidence: bool = typer.Option(True, "--update-confidence/--no-update-confidence", help="Update KG confidence scores after sync"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed sync progress"),
+):
+    """
+    Sync feedback from LangSmith to local database.
+    
+    Fetches human feedback from LangSmith for recent runs and stores it
+    locally. Optionally updates Knowledge Graph confidence scores based
+    on aggregated feedback.
+    
+    Requires LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY set.
+    
+    Examples:
+        # Sync last 7 days of feedback
+        integration-coworker feedback-sync
+        
+        # Sync last 30 days
+        integration-coworker feedback-sync --days 30
+        
+        # Sync without updating confidence scores
+        integration-coworker feedback-sync --no-update-confidence
+        
+        # Filter to specific provider
+        integration-coworker feedback-sync --provider stripe
+    """
+    from integration_coworker.feedback.langsmith_sync import sync_langsmith_feedback
+    from integration_coworker.feedback.confidence import update_all_confidences
+
+    _setup_logging(verbose)
+
+    # Check LangSmith configuration
+    tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    langchain_key = os.getenv("LANGCHAIN_API_KEY", "") or os.getenv("LANGSMITH_API_KEY", "")
+
+    if not tracing_enabled:
+        typer.echo("✗ Error: LangSmith tracing not enabled", err=True)
+        typer.echo("   Set LANGCHAIN_TRACING_V2=true to enable", err=True)
+        raise typer.Exit(code=1)
+
+    if not langchain_key:
+        typer.echo("✗ Error: LangSmith API key not set", err=True)
+        typer.echo("   Set LANGCHAIN_API_KEY or LANGSMITH_API_KEY", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        if not json_output:
+            typer.echo(f"🔄 Syncing feedback from LangSmith (last {days} days)...")
+            if provider:
+                typer.echo(f"   Provider filter: {provider}")
+
+        # Sync feedback from LangSmith
+        synced_count, error_count = sync_langsmith_feedback(
+            days_back=days,
+            provider_filter=provider,
+        )
+
+        if not json_output:
+            if synced_count > 0:
+                typer.echo(f"   ✓ Synced {synced_count} feedback record(s)")
+            else:
+                typer.echo("   No new feedback to sync")
+            if error_count > 0:
+                typer.echo(f"   ⚠ {error_count} error(s) during sync")
+
+        # Optionally update confidence scores
+        nodes_updated = 0
+        if update_confidence and synced_count > 0:
+            if not json_output:
+                typer.echo("\n📊 Updating KG confidence scores...")
+            
+            nodes_updated = update_all_confidences(provider_filter=provider)
+            
+            if not json_output:
+                if nodes_updated > 0:
+                    typer.echo(f"   ✓ Updated {nodes_updated} node(s)")
+                else:
+                    typer.echo("   No confidence updates needed")
+
+        if json_output:
+            output = {
+                "status": "completed",
+                "synced_count": synced_count,
+                "error_count": error_count,
+                "nodes_updated": nodes_updated if update_confidence else None,
+            }
+            typer.echo(json.dumps(output, indent=2))
+        else:
+            typer.echo("")
+            typer.echo("✓ Feedback sync completed")
+
+    except Exception as e:
+        if json_output:
+            typer.echo(json.dumps({"error": str(e), "status": "failed"}), err=True)
+        else:
+            typer.echo(f"✗ Error syncing feedback: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("kg-confidence")
+def show_kg_confidence(
+    template_key: Optional[str] = typer.Argument(None, help="Specific template key to show confidence for"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Filter by provider code"),
+    threshold: Optional[float] = typer.Option(None, "--threshold", "-t", help="Only show templates with confidence below threshold"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Maximum number of templates to show"),
+    history: bool = typer.Option(False, "--history", "-h", help="Show confidence history for template"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Show Knowledge Graph confidence scores for workflow templates.
+    
+    Displays the learned confidence scores based on aggregated feedback.
+    Use this to identify high-performing vs low-performing templates.
+    
+    Examples:
+        # Show all template confidence scores
+        integration-coworker kg-confidence
+        
+        # Show confidence for specific template
+        integration-coworker kg-confidence template.stripe.create_payment
+        
+        # Show templates with low confidence
+        integration-coworker kg-confidence --threshold 0.5
+        
+        # Show confidence history for a template
+        integration-coworker kg-confidence template.stripe.create_payment --history
+        
+        # Filter by provider
+        integration-coworker kg-confidence --provider stripe
+    """
+    from integration_coworker.feedback.confidence import get_confidence_for_template
+    from integration_coworker.persistence.db import get_connection, get_engine_type
+
+    reset_settings()
+    engine = get_engine_type()
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        if template_key:
+            # Single template mode
+            confidence = get_confidence_for_template(template_key)
+            
+            if json_output:
+                output = {
+                    "template_key": template_key,
+                    "confidence_score": confidence,
+                    "history": [],
+                }
+                
+                if history:
+                    # Get confidence history
+                    if engine == "postgres":
+                        cur.execute("""
+                            SELECT created_at, old_confidence, new_confidence, feedback_count, reason
+                            FROM kg.confidence_history
+                            WHERE node_key = %s
+                            ORDER BY created_at DESC
+                            LIMIT 20
+                        """, (template_key,))
+                    else:
+                        cur.execute("""
+                            SELECT created_at, old_confidence, new_confidence, feedback_count, reason
+                            FROM kg_confidence_history
+                            WHERE node_key = ?
+                            ORDER BY created_at DESC
+                            LIMIT 20
+                        """, (template_key,))
+                    
+                    for row in cur.fetchall():
+                        output["history"].append({
+                            "timestamp": str(row[0]),
+                            "old_score": row[1],
+                            "new_score": row[2],
+                            "feedback_count": row[3],
+                            "trigger": row[4],
+                        })
+                
+                typer.echo(json.dumps(output, indent=2))
+            else:
+                typer.echo(f"Template: {template_key}")
+                typer.echo(f"Confidence: {confidence:.3f}")
+                
+                if history:
+                    typer.echo("\n📈 Confidence History:")
+                    typer.echo("-" * 60)
+                    
+                    if engine == "postgres":
+                        cur.execute("""
+                            SELECT created_at, old_confidence, new_confidence, feedback_count, reason
+                            FROM kg.confidence_history
+                            WHERE node_key = %s
+                            ORDER BY created_at DESC
+                            LIMIT 10
+                        """, (template_key,))
+                    else:
+                        cur.execute("""
+                            SELECT created_at, old_confidence, new_confidence, feedback_count, reason
+                            FROM kg_confidence_history
+                            WHERE node_key = ?
+                            ORDER BY created_at DESC
+                            LIMIT 10
+                        """, (template_key,))
+                    
+                    rows = cur.fetchall()
+                    if rows:
+                        for row in rows:
+                            ts, old_s, new_s, fc, trigger = row
+                            delta = new_s - old_s if old_s else 0
+                            delta_str = f"+{delta:.3f}" if delta >= 0 else f"{delta:.3f}"
+                            typer.echo(f"  {ts}: {old_s:.3f} → {new_s:.3f} ({delta_str}) [{trigger}]")
+                    else:
+                        typer.echo("  No history recorded yet")
+        else:
+            # List mode - show all templates
+            where_clauses = ["node_type = ?"]
+            params = ["workflow_template"]
+
+            if provider:
+                where_clauses.append("provider_code = ?")
+                params.append(provider)
+
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+            # Query templates with confidence scores
+            if engine == "postgres":
+                query = f"""
+                    SELECT key, provider_code, name, confidence_score, usage_count
+                    FROM kg.nodes
+                    {where_sql.replace('?', '%s')}
+                    ORDER BY confidence_score ASC, usage_count DESC
+                    LIMIT %s
+                """
+            else:
+                query = f"""
+                    SELECT key, provider_code, name, confidence_score, usage_count
+                    FROM kg_nodes
+                    {where_sql}
+                    ORDER BY confidence_score ASC, usage_count DESC
+                    LIMIT ?
+                """
+            
+            params.append(limit)
+            cur.execute(query, params)
+            templates = cur.fetchall()
+
+            # Apply threshold filter in Python (for flexibility)
+            if threshold is not None:
+                templates = [t for t in templates if t[3] and t[3] < threshold]
+
+            if json_output:
+                output = {
+                    "filter": {"provider": provider, "threshold": threshold},
+                    "templates": [],
+                }
+                for t in templates:
+                    key, prov, name, conf, usage = t
+                    output["templates"].append({
+                        "key": key,
+                        "provider_code": prov,
+                        "name": name,
+                        "confidence_score": conf,
+                        "usage_count": usage,
+                    })
+                typer.echo(json.dumps(output, indent=2))
+            else:
+                typer.echo("Knowledge Graph Confidence Scores")
+                typer.echo("=" * 60)
+                if provider:
+                    typer.echo(f"Provider filter: {provider}")
+                if threshold:
+                    typer.echo(f"Threshold filter: < {threshold}")
+                typer.echo("")
+
+                if not templates:
+                    typer.echo("No workflow templates found.")
+                    typer.echo("")
+                    typer.echo("Hint: Run 'integration-coworker kg-dump --type workflow_template'")
+                    return
+
+                typer.echo(f"{'Template Key':<40} {'Confidence':>10} {'Usage':>7}")
+                typer.echo("-" * 60)
+
+                for t in templates:
+                    key, prov, name, conf, usage = t
+                    conf_str = f"{conf:.3f}" if conf else "1.000"
+                    usage_str = str(usage) if usage else "0"
+                    
+                    # Color coding hint (for terminals that support it)
+                    if conf and conf < 0.5:
+                        indicator = "⚠"
+                    elif conf and conf > 0.8:
+                        indicator = "✓"
+                    else:
+                        indicator = " "
+                    
+                    typer.echo(f"{indicator} {key:<38} {conf_str:>10} {usage_str:>7}")
+
+                typer.echo("")
+                typer.echo("Legend: ⚠ = low confidence (<0.5), ✓ = high confidence (>0.8)")
+
+    except Exception as e:
+        if json_output:
+            typer.echo(json.dumps({"error": str(e), "status": "failed"}), err=True)
+        else:
+            typer.echo(f"✗ Error querying confidence: {e}", err=True)
         raise typer.Exit(code=1)
 
 

@@ -99,7 +99,8 @@ def test_end_to_end_with_repo_integration(mock_payments_spec, temp_repo):
     client_content = client_path.read_text()
     assert "MockPaymentsClient" in client_content or "Mockpayments" in client_content
     assert "create_checkout_session" in client_content
-    assert "IntegrationHttpClient" in client_content
+    # Both inline mode (httpx.Client) and runtime mode (IntegrationHttpClient) are valid
+    assert "httpx" in client_content or "IntegrationHttpClient" in client_content
 
 
 def test_provider_code_inference(mock_payments_spec):

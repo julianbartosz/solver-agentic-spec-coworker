@@ -21,10 +21,22 @@ try:
 except ImportError:
     STREAMLIT_AVAILABLE = False
 
+# Check if typer is installed (needed for CLI tests)
+try:
+    import typer
+    TYPER_AVAILABLE = True
+except ImportError:
+    TYPER_AVAILABLE = False
+
 
 streamlit_required = pytest.mark.skipif(
     not STREAMLIT_AVAILABLE,
     reason="streamlit not installed (install with: pip install -e '.[ui]')"
+)
+
+typer_required = pytest.mark.skipif(
+    not TYPER_AVAILABLE,
+    reason="typer not installed (install with: pip install typer)"
 )
 
 
@@ -130,9 +142,11 @@ class TestRecoveryModuleSmoke:
         
         # Should be able to create an instance
         ctx = RecoveryContext(
+            run_id="test-run-id",
             spec_refs=["test.yaml"],
             task_description="Test task",
         )
+        assert ctx.run_id == "test-run-id"
         assert ctx.spec_refs == ["test.yaml"]
         assert ctx.task_description == "Test task"
         assert ctx.dry_run is True  # default
@@ -182,6 +196,7 @@ class TestRecoveryModuleSmoke:
 class TestCLIUICommand:
     """Tests for the CLI ui command."""
 
+    @typer_required
     def test_cli_app_has_ui_command(self):
         """Test that the CLI app includes the ui command."""
         from integration_coworker.cli import app
@@ -191,6 +206,7 @@ class TestCLIUICommand:
         
         assert "ui" in command_names
 
+    @typer_required
     def test_launch_ui_function_exists(self):
         """Test that the launch_ui function exists."""
         from integration_coworker.cli import launch_ui

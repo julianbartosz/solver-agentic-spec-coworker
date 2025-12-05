@@ -1,19 +1,24 @@
 """
 Recovery helpers for integration workflow failures.
 
-Provides thin wrappers around re-running the workflow with different
-strategies:
-- retry: Re-run with the same inputs
-- skip: (Future) Skip the failing step and continue
-- restart: Clear state and start fresh
+V2 Implementation (per V2 Implementation Plan Section 3.5):
+- Checkpoint-based recovery with database persistence
+- Resume capability from any checkpointed node
+- True skip with dependency analysis
 
-Per UX plan Step 5.3.1, these are simple helpers that wrap
-design_and_generate_integration with appropriate options.
+Provides recovery strategies:
+- retry: Re-run with the same inputs
+- resume: Resume from last checkpoint
+- skip: Skip the failing step and continue
+- restart: Clear state and start fresh
 """
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
+import logging
 
 from integration_coworker.api.types import IntegrationOptions, IntegrationResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,8 +26,9 @@ class RecoveryContext:
     """
     Captured context from a failed run for recovery attempts.
     
-    Stores the original inputs so they can be reused in retry/restart.
+    V2: Added run_id for checkpoint-based recovery.
     """
+    run_id: str
     spec_refs: List[str]
     task_description: str
     provider_code: Optional[str] = None
@@ -66,27 +72,161 @@ def retry_from_last_failure(context: RecoveryContext) -> IntegrationResult:
     )
 
 
+def resume_run(run_id: str) -> IntegrationResult:
+    """
+    Resume a run from its last checkpoint.
+    
+    V2 Implementation:
+    1. Load the last checkpoint state
+    2. Determine which nodes are remaining
+    3. Re-execute from that point
+    
+    Args:
+        run_id: The run_id to resume
+        
+    Returns:
+        IntegrationResult from the resumed run
+        
+    Raises:
+        ValueError: If no checkpoint found for run_id
+    """
+    from integration_coworker.graph.runtime import get_node_names, run_from_node
+    from integration_coworker.persistence.checkpoints import (
+        load_checkpoint,
+        get_completed_nodes,
+        delete_checkpoints,
+    )
+    
+    # Load last checkpoint
+    state = load_checkpoint(run_id)
+    if not state:
+        raise ValueError(f"No checkpoint found for run_id: {run_id}")
+    
+    # Get completed nodes
+    completed = set(get_completed_nodes(run_id))
+    
+    # Determine next node
+    all_nodes = get_node_names()
+    
+    next_node = None
+    for node in all_nodes:
+        if node not in completed:
+            next_node = node
+            break
+    
+    if not next_node:
+        # All nodes completed, just return final state
+        return _state_to_result(state)
+    
+    # Resume from next node
+    logger.info(f"Resuming run {run_id} from node {next_node}")
+    final_state = run_from_node(state, next_node)
+    
+    # Clean up checkpoints on success
+    if not final_state.errors:
+        delete_checkpoints(run_id)
+    
+    return _state_to_result(final_state)
+
+
 def skip_failing_step(context: RecoveryContext) -> IntegrationResult:
     """
-    Skip the failing step and continue with remaining workflow.
+    Skip the failing step and all dependent steps, then continue.
     
-    Note: This is a placeholder for future implementation.
-    Full skip support requires:
-    - Workflow checkpointing (save state at each node)
-    - Step-level error boundaries
-    - Conditional edge routing based on skip markers
+    V2.1 Implementation (Section 13.2 per ADR-0009):
+    1. Load checkpoint at failed node
+    2. Compute skip cascade (failed node + all dependents)
+    3. Mark all skipped nodes in state.skipped_nodes
+    4. Continue from first non-skipped node
     
-    For V1, this falls back to a simple retry.
+    This ensures that if we skip a node, all nodes that depend on its
+    output are also skipped (avoiding failures from missing data).
+    
+    Requires: failed_step to be set in context
     
     Args:
         context: Recovery context with failed_step information
         
     Returns:
-        IntegrationResult (currently same as retry)
+        IntegrationResult from the resumed run
     """
-    # TODO: Implement proper skip logic with workflow checkpointing
-    # For now, this is equivalent to retry
-    return retry_from_last_failure(context)
+    if not context.failed_step:
+        raise ValueError("failed_step required for skip recovery")
+    
+    from integration_coworker.graph.runtime import (
+        get_node_names,
+        run_from_node,
+        get_skip_cascade,
+    )
+    from integration_coworker.persistence.checkpoints import load_checkpoint
+    
+    # Load checkpoint before failed step
+    state = load_checkpoint(context.run_id)
+    if not state:
+        # No checkpoint, fall back to retry
+        logger.warning("No checkpoint for skip; falling back to retry")
+        return retry_from_last_failure(context)
+    
+    # V2.1: Compute the full skip cascade (failed node + all dependents)
+    skip_cascade = get_skip_cascade(context.failed_step)
+    logger.info(f"Skip cascade for {context.failed_step}: {skip_cascade}")
+    
+    # Mark all nodes in cascade as skipped
+    if not hasattr(state, 'skipped_nodes'):
+        state.skipped_nodes = []
+    state.skipped_nodes.extend(skip_cascade)
+    
+    # Also mark as completed (so workflow doesn't try to run them)
+    for node in skip_cascade:
+        if node not in state.completed_steps:
+            state.completed_steps.append(node)
+            state.warnings.append(f"Skipped step (dependency cascade): {node}")
+    
+    # Determine next node after skip cascade
+    all_nodes = get_node_names()
+    skip_set = set(skip_cascade)
+    completed_set = set(state.completed_steps)
+    
+    next_node = None
+    for node in all_nodes:
+        if node not in skip_set and node not in completed_set:
+            next_node = node
+            break
+    
+    if not next_node:
+        # All remaining nodes are skipped or completed
+        logger.info("No more nodes to run after skip cascade")
+        return _state_to_result(state)
+    
+    # Continue from next node
+    logger.info(f"Skipped {len(skip_cascade)} nodes, resuming from {next_node}")
+    final_state = run_from_node(state, next_node)
+    return _state_to_result(final_state)
+
+
+def _state_to_result(state) -> IntegrationResult:
+    """Convert final WorkflowState to IntegrationResult."""
+    return IntegrationResult(
+        run_id=state.run_id or "",
+        task=state.integration_task,
+        code_artifacts=state.code_artifacts or [],
+        repo_changes=state.repo_changes,
+        report_markdown=state.report_markdown or "",
+        persisted_ids=state.persisted_ids,
+        endpoints=state.endpoints or [],
+        schemas=state.schemas or [],
+        entities=state.entities or [],
+        workflow_nodes=state.workflow_nodes or [],
+        workflow_edges=state.workflow_edges or [],
+        endpoint_bindings=state.endpoint_bindings or [],
+        policies=state.policies or [],  # V2.1: Expose inferred policies
+        spec_documents=state.spec_documents or [],
+        doc_chunks=state.doc_chunks or [],
+        plan=state.plan or {},
+        errors=state.errors or [],
+        completed_steps=state.completed_steps or [],
+        provider_code=state.provider_code,
+    )
 
 
 def restart_fresh() -> None:
@@ -106,19 +246,24 @@ def create_recovery_context(
     inputs: Dict[str, Any],
     error: Optional[str] = None,
     failed_step: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> RecoveryContext:
     """
     Create a RecoveryContext from captured run inputs.
+    
+    V2: Added run_id parameter for checkpoint-based recovery.
     
     Args:
         inputs: Dictionary of original run inputs
         error: The error message from the failure
         failed_step: The step/node that failed (if known)
+        run_id: The run_id for checkpoint lookup
         
     Returns:
         RecoveryContext ready for recovery attempts
     """
     return RecoveryContext(
+        run_id=run_id or inputs.get("run_id", ""),
         spec_refs=inputs.get("spec_refs", []),
         task_description=inputs.get("task_description", ""),
         provider_code=inputs.get("provider_code"),
@@ -127,3 +272,4 @@ def create_recovery_context(
         last_error=error,
         failed_step=failed_step,
     )
+

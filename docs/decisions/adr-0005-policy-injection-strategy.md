@@ -505,7 +505,7 @@ class IntegrationOptions:
 2. **Reduced scope**: Avoided designing policy interfaces upfront
 3. **Immediate results**: Generated working code quickly for demos
 
-### Why Runtime Middleware for v2+?
+### Why Runtime Middleware for v2?
 
 1. **Scalability**: O(1) maintenance vs O(n) client regeneration
 2. **Reliability**: Single well-tested library vs N copies of template code

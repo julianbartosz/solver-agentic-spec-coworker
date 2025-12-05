@@ -3,10 +3,14 @@ Repo integration models.
 
 Defines structures for repository profiles, snapshots, and change sets.
 """
+import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, TYPE_CHECKING
 from pathlib import Path
 from enum import Enum
+
+if TYPE_CHECKING:
+    from integration_coworker.repo.providers.base import SourceFile
 
 
 class FrameworkArchetype(str, Enum):
@@ -99,9 +103,24 @@ class RepoProfile:
 
 @dataclass
 class MockFile:
-    """A simplified representation of a file for repo analysis."""
+    """
+    A simplified representation of a file for repo analysis.
+    
+    .. deprecated:: 2.1
+        Use :class:`SourceFile` from ``integration_coworker.repo.providers`` instead.
+        MockFile will be removed in v3.0.
+    """
     path: str  # Relative path from repo root
     content: str  # File contents
+    
+    def __post_init__(self):
+        """V2.1: Emit deprecation warning per GAP-06."""
+        warnings.warn(
+            "MockFile is deprecated and will be removed in v3.0. "
+            "Use SourceFile from integration_coworker.repo.providers instead.",
+            DeprecationWarning,
+            stacklevel=3,  # Point to caller's caller (past dataclass machinery)
+        )
 
 
 @dataclass
@@ -113,7 +132,8 @@ class RepoSnapshot:
     """
     repo_name: str
     owner: str
-    files: Dict[str, MockFile] = field(default_factory=dict)  # Maps rel_path -> MockFile
+    # Files: accepts MockFile (deprecated) or SourceFile
+    files: Dict[str, Union["MockFile", "SourceFile"]] = field(default_factory=dict)
     stats: Dict[str, Any] = field(default_factory=dict)  # Stats like total_files, total_size
     tree_markdown: Optional[str] = None  # Tree structure as markdown
     full_markdown: Optional[str] = None  # Full context including file samples

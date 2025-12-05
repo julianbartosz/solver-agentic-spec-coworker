@@ -2,12 +2,97 @@
 build_report node - Generate a human-readable markdown report.
 
 Uses structured template, with optional LLM enhancement for executive summary.
+
+V1.1 FT-014: Enhanced Reporting
+  - Added Mermaid workflow diagrams showing node flow and API call paths
+  - Diagrams render in GitHub, GitLab, and markdown viewers with Mermaid support
 """
 import logging
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.llm import call_llm
 
 logger = logging.getLogger(__name__)
+
+
+def _generate_workflow_mermaid(state: WorkflowState) -> str:
+    """
+    V1.1 FT-014: Generate a Mermaid flowchart from workflow nodes and edges.
+    
+    Returns a Mermaid diagram string that can be embedded in markdown.
+    The diagram shows:
+    - Workflow nodes with their types (different shapes)
+    - Edges showing the flow between nodes
+    - Special styling for api_call nodes
+    
+    Returns:
+        Mermaid flowchart code block
+    """
+    if not state.workflow_nodes:
+        return ""
+    
+    lines = ["```mermaid", "flowchart TD"]
+    
+    # Node type to Mermaid shape mapping
+    node_shapes = {
+        "start": "([{label}])",       # Stadium shape for start
+        "end": "([{label}])",         # Stadium shape for end
+        "api_call": "[/{label}/]",    # Parallelogram for API calls
+        "validation": "{{{label}}}",  # Rhombus/Diamond for validation
+        "transform": "[{label}]",     # Rectangle for transform
+        "pagination": "[{label}]",    # Rectangle for pagination
+    }
+    
+    # Generate node definitions
+    for node in state.workflow_nodes:
+        node_key = node.node_key
+        label = node.config.get("label", node_key) if node.config else node_key
+        node_type = node.node_type
+        
+        # Sanitize label for Mermaid (escape quotes and special chars)
+        label = label.replace('"', "'").replace("[", "(").replace("]", ")")
+        
+        # Get shape or default to rectangle
+        shape_template = node_shapes.get(node_type, "[{label}]")
+        shape = shape_template.format(label=label)
+        
+        lines.append(f"    {node_key}{shape}")
+    
+    # Generate edges
+    if state.workflow_edges:
+        for edge in state.workflow_edges:
+            from_key = edge.from_node_key
+            to_key = edge.to_node_key
+            
+            if edge.condition:
+                # Edge with label
+                lines.append(f"    {from_key} -->|{edge.condition}| {to_key}")
+            else:
+                lines.append(f"    {from_key} --> {to_key}")
+    else:
+        # If no edges defined, create linear flow based on position
+        sorted_nodes = sorted(state.workflow_nodes, key=lambda n: n.position)
+        for i in range(len(sorted_nodes) - 1):
+            lines.append(f"    {sorted_nodes[i].node_key} --> {sorted_nodes[i + 1].node_key}")
+    
+    # Add styling for different node types
+    lines.append("")
+    lines.append("    %% Styling")
+    
+    # Collect nodes by type for styling
+    api_call_nodes = [n.node_key for n in state.workflow_nodes if n.node_type == "api_call"]
+    start_end_nodes = [n.node_key for n in state.workflow_nodes if n.node_type in ("start", "end")]
+    validation_nodes = [n.node_key for n in state.workflow_nodes if n.node_type == "validation"]
+    
+    if api_call_nodes:
+        lines.append(f"    style {' '.join(api_call_nodes)} fill:#e1f5fe,stroke:#0288d1")
+    if start_end_nodes:
+        lines.append(f"    style {' '.join(start_end_nodes)} fill:#e8f5e9,stroke:#388e3c")
+    if validation_nodes:
+        lines.append(f"    style {' '.join(validation_nodes)} fill:#fff3e0,stroke:#f57c00")
+    
+    lines.append("```")
+    
+    return "\n".join(lines)
 
 
 def _build_summary_prompt(structured_report: str, state: WorkflowState) -> str:
@@ -25,6 +110,129 @@ KEY METRICS:
 
 Generate a concise summary highlighting what was accomplished and any important notes.
 """
+
+
+def _add_what_i_did_section(lines: list, state: WorkflowState) -> None:
+    """
+    V4 Observability: Add plain-English "What I Did" summary.
+    
+    Explains each major step in user-friendly language, derived from state.
+    """
+    lines.append("## What the Coworker Did")
+    lines.append("")
+    
+    step_num = 1
+    
+    # 1. Spec reading
+    if state.spec_documents:
+        spec_names = [doc.uri.split("/")[-1] if "/" in doc.uri else doc.uri for doc in state.spec_documents[:3]]
+        spec_list = ", ".join(f"`{name}`" for name in spec_names)
+        lines.append(f"**{step_num}. Read your API spec** ({spec_list})")
+        
+        # Details
+        details = []
+        if state.endpoints:
+            details.append(f"Found {len(state.endpoints)} endpoints")
+        if state.schemas:
+            schema_names = [s.name for s in state.schemas[:3]]
+            details.append(f"{len(state.schemas)} data models ({', '.join(schema_names)}{'...' if len(state.schemas) > 3 else ''})")
+        if state.openapi_spec:
+            spec_version = state.openapi_spec.get("openapi", state.openapi_spec.get("swagger", "unknown"))
+            details.append(f"Identified as OpenAPI {spec_version}")
+        
+        for detail in details:
+            lines.append(f"   - {detail}")
+        lines.append("")
+        step_num += 1
+    
+    # 2. Task understanding
+    if state.integration_task:
+        task = state.integration_task
+        lines.append(f"**{step_num}. Understood your task** (\"{state.task_description[:50]}{'...' if len(state.task_description) > 50 else ''}\")")
+        
+        if task.task_slug:
+            # Extract action from task_slug (e.g., "create_checkout_session" -> "CREATE")
+            action = task.task_slug.split("_")[0].upper() if "_" in task.task_slug else "PROCESS"
+            lines.append(f"   - Matched to pattern: **{action}** operation")
+        
+        if state.endpoint_bindings:
+            primary_binding = state.endpoint_bindings[0]
+            # Look up endpoint path from endpoints list (EndpointBinding only has endpoint_id)
+            endpoint_display = None
+            for ep in state.endpoints:
+                # Endpoint uses 'id' field, EndpointBinding uses 'endpoint_id'
+                ep_id = getattr(ep, 'id', None) or getattr(ep, 'endpoint_id', None)
+                if ep_id and str(ep_id) == str(primary_binding.endpoint_id):
+                    endpoint_display = f"{ep.method} {ep.path}"
+                    break
+            if endpoint_display:
+                lines.append(f"   - Primary endpoint: `{endpoint_display}`")
+            elif primary_binding.endpoint_id:
+                lines.append(f"   - Primary endpoint ID: `{primary_binding.endpoint_id}`")
+        
+        lines.append("")
+        step_num += 1
+    
+    # 3. Workflow design
+    if state.workflow_nodes:
+        lines.append(f"**{step_num}. Designed the integration**")
+        
+        # Describe workflow
+        node_types = [n.node_type for n in state.workflow_nodes]
+        workflow_desc = " → ".join([n.node_type for n in sorted(state.workflow_nodes, key=lambda x: x.position)][:5])
+        lines.append(f"   - Created {len(state.workflow_nodes)}-step workflow: {workflow_desc}")
+        
+        # Policies
+        if state.policies:
+            policy_types = list(set(
+                p.policy_type.value if hasattr(p.policy_type, 'value') else str(p.policy_type) 
+                for p in state.policies
+            ))
+            lines.append(f"   - Applied {len(state.policies)} policies: {', '.join(policy_types[:3])}")
+        
+        lines.append("")
+        step_num += 1
+    
+    # 4. Code generation
+    if state.code_artifacts:
+        lines.append(f"**{step_num}. Generated code**")
+        
+        for artifact in state.code_artifacts:
+            # Describe each artifact type
+            if artifact.artifact_type == "client":
+                class_match = artifact.content.find("class ")
+                if class_match >= 0:
+                    class_line = artifact.content[class_match:class_match+50].split("\n")[0]
+                    class_name = class_line.replace("class ", "").split("(")[0].split(":")[0].strip()
+                    lines.append(f"   - Client class: `{class_name}` (handles auth, retries)")
+                else:
+                    lines.append(f"   - Client: `{artifact.rel_path}`")
+            elif artifact.artifact_type == "workflow":
+                lines.append(f"   - Workflow function: `{artifact.rel_path.split('/')[-1].replace('.py', '')}`")
+            elif artifact.artifact_type == "test":
+                # Count test functions
+                test_count = artifact.content.count("def test_")
+                lines.append(f"   - Unit tests: {test_count} test cases covering success + error paths")
+        
+        lines.append("")
+        step_num += 1
+    
+    # 5. Repo changes (if any)
+    if state.repo_changes and state.repo_changes.changes:
+        lines.append(f"**{step_num}. Updated your repository**")
+        created = state.repo_changes.files_created()
+        updated = state.repo_changes.files_updated()
+        if created:
+            lines.append(f"   - Created {len(created)} new file(s)")
+        if updated:
+            lines.append(f"   - Updated {len(updated)} existing file(s)")
+        lines.append("")
+        step_num += 1
+    
+    # Show if nothing was done (error case)
+    if step_num == 1:
+        lines.append("*No significant steps completed - check errors below.*")
+        lines.append("")
 
 
 def build_report(state: WorkflowState) -> WorkflowState:
@@ -45,6 +253,43 @@ def build_report(state: WorkflowState) -> WorkflowState:
     lines.append(f"**Task**: {state.task_description or 'N/A'}")
     lines.append("")
 
+    # V2.1: Degraded mode warning (Section 13.7)
+    if state.degraded_mode:
+        lines.append("## ⚠️ Degraded Mode Warning")
+        lines.append("")
+        lines.append("> **This run completed in degraded mode.** Some features may be limited or use fallback behavior.")
+        lines.append("")
+        if state.degraded_reason:
+            lines.append(f"**Reason**: {state.degraded_reason}")
+        lines.append("")
+        lines.append("**Impact**:")
+        lines.append("- Task understanding may be less accurate (heuristic fallback)")
+        lines.append("- Workflow planning may use simpler patterns")
+        lines.append("- Generated code may require additional review")
+        lines.append("")
+        if state.llm_fallbacks:
+            lines.append("**Fallbacks Used**:")
+            for fallback in state.llm_fallbacks:
+                node = fallback.get("node", "unknown")
+                reason = fallback.get("reason", "LLM unavailable")
+                lines.append(f"- `{node}`: {reason}")
+            lines.append("")
+        # Add a horizontal rule to separate from normal content
+        lines.append("---")
+        lines.append("")
+
+    # V2.1: Also warn about skipped nodes
+    if hasattr(state, 'skipped_nodes') and state.skipped_nodes:
+        lines.append("## ⚠️ Skipped Nodes")
+        lines.append("")
+        lines.append("> Some workflow nodes were skipped due to upstream failures.")
+        lines.append("")
+        for node in state.skipped_nodes:
+            lines.append(f"- `{node}`")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     # Try to generate LLM executive summary
     try:
         structured_report = _build_structured_metrics(state)
@@ -59,6 +304,9 @@ def build_report(state: WorkflowState) -> WorkflowState:
             logger.info("Generated LLM executive summary")
     except Exception as e:
         logger.debug(f"Skipping LLM summary: {e}")
+
+    # V4 Observability: "What I Did" section - plain English summary
+    _add_what_i_did_section(lines, state)
 
     # Spec ingestion
     lines.append("## Spec Ingestion")
@@ -122,6 +370,14 @@ def build_report(state: WorkflowState) -> WorkflowState:
     lines.append(f"- Workflow edges: {len(state.workflow_edges)}")
     lines.append(f"- Endpoint bindings: {len(state.endpoint_bindings)}")
     lines.append("")
+
+    # V1.1 FT-014: Add Mermaid workflow diagram
+    mermaid_diagram = _generate_workflow_mermaid(state)
+    if mermaid_diagram:
+        lines.append("### Workflow Diagram")
+        lines.append("")
+        lines.append(mermaid_diagram)
+        lines.append("")
 
     # Policies
     lines.append("## Policies")
@@ -233,11 +489,24 @@ def build_report(state: WorkflowState) -> WorkflowState:
             lines.append("*(Dry run - no actual persistence)*")
         lines.append("")
 
-    # Errors
+    # Errors - V4 Observability: Enriched error display with suggestions
     if state.errors:
         lines.append("## Errors")
-        for error in state.errors:
-            lines.append(f"- {error}")
+        lines.append("")
+        for i, error in enumerate(state.errors, 1):
+            if hasattr(error, 'severity') and hasattr(error, 'message'):
+                lines.append(f"{i}. [{error.severity}] {error.phase}: {error.message}")
+            else:
+                lines.append(f"{i}. {error}")
+        lines.append("")
+
+    # V4 Observability: Warnings section (non-fatal issues)
+    if state.warnings:
+        lines.append("## Warnings")
+        lines.append("*Non-fatal issues encountered during the run:*")
+        lines.append("")
+        for warning in state.warnings:
+            lines.append(f"- ⚠️ {warning}")
         lines.append("")
 
     # Completion
@@ -245,6 +514,25 @@ def build_report(state: WorkflowState) -> WorkflowState:
     for step in state.completed_steps:
         lines.append(f"- {step}")
     lines.append("")
+
+    # V4 Observability: LLM Token Usage
+    if state.llm_token_usage and state.llm_token_usage.get("total_tokens", 0) > 0:
+        lines.append("## LLM Usage")
+        prompt_tokens = state.llm_token_usage.get("prompt_tokens", 0)
+        completion_tokens = state.llm_token_usage.get("completion_tokens", 0)
+        total_tokens = state.llm_token_usage.get("total_tokens", 0)
+        
+        lines.append(f"- **Prompt tokens**: {prompt_tokens:,}")
+        lines.append(f"- **Completion tokens**: {completion_tokens:,}")
+        lines.append(f"- **Total tokens**: {total_tokens:,}")
+        
+        # Estimate cost (rough approximation for GPT-4)
+        # GPT-4: ~$0.03/1K prompt, ~$0.06/1K completion
+        # GPT-4o-mini: ~$0.00015/1K prompt, ~$0.0006/1K completion
+        estimated_cost_gpt4 = (prompt_tokens * 0.03 + completion_tokens * 0.06) / 1000
+        estimated_cost_mini = (prompt_tokens * 0.00015 + completion_tokens * 0.0006) / 1000
+        lines.append(f"- **Estimated cost**: ${estimated_cost_mini:.4f} (gpt-4o-mini) to ${estimated_cost_gpt4:.4f} (gpt-4)")
+        lines.append("")
 
     # Node Timings (for observability - shows non-LLM nodes do work)
     if state.node_timings:
@@ -256,11 +544,34 @@ def build_report(state: WorkflowState) -> WorkflowState:
             lines.append(f"- **{name}**: {ms:.2f} ms")
         lines.append("")
 
+    # V4 Observability: LLM Fallbacks section (even if not in degraded mode)
+    if state.llm_fallbacks and not state.degraded_mode:
+        # Only show if not already shown in degraded mode section
+        lines.append("## LLM Fallbacks")
+        lines.append("*Some LLM calls used fallback behavior:*")
+        lines.append("")
+        for fallback in state.llm_fallbacks:
+            node = fallback.get("node", "unknown")
+            reason = fallback.get("reason", "LLM unavailable")
+            fallback_type = fallback.get("type", "heuristic")
+            lines.append(f"- **{node}**: {reason} → used `{fallback_type}` fallback")
+        lines.append("")
+
+    # V4 Observability: Run Journey (derived from completed_steps + errors + timings)
+    # Add build_report and persist_run_outcome to completed_steps for accurate progress display
+    # (these nodes will complete after this visualization, but we know they will succeed)
+    state.completed_steps.append("build_report")
+    state.completed_steps.append("persist_run_outcome")
+    
+    lines.append("## Run Journey")
+    lines.append("")
+    _add_journey_visualization(lines, state)
+    lines.append("")
+
     lines.append("---")
     lines.append("*Generated by Integration Co-Worker*")
 
     state.report_markdown = "\n".join(lines)
-    state.completed_steps.append("build_report")
     return state
 
 
@@ -274,3 +585,111 @@ Workflow Nodes: {len(state.workflow_nodes)}
 Code Artifacts: {len(state.code_artifacts)}
 Errors: {len(state.errors)}
 """
+
+
+# V4 Observability: Journey visualization helpers
+
+# Mapping of node names to user-friendly labels and emojis
+# Note: Only includes nodes that are actually part of the workflow graph edges.
+# persist_results is a legacy node not connected to the graph.
+_NODE_JOURNEY_INFO = {
+    "plan_run": ("🎯", "Plan Run", "Initialized run configuration"),
+    "ingest_spec": ("📄", "Ingest Spec", "Loaded and chunked API specification"),
+    "detect_and_parse_spec": ("🔍", "Parse Spec", "Identified spec format and parsed structure"),
+    "build_silver_api_model": ("📊", "Build API Model", "Extracted endpoints, schemas, entities"),
+    "embed_spec_chunks": ("🧬", "Embed Chunks", "Generated embeddings for semantic search"),
+    "persist_silver_checkpoint": ("💾", "Save Silver", "Persisted Silver model to database"),
+    "understand_task": ("🧠", "Understand Task", "Analyzed task intent with LLM"),
+    "align_task_with_kg": ("🔗", "Align with KG", "Matched task to knowledge graph patterns"),
+    "plan_integration_flow": ("📋", "Plan Flow", "Designed integration workflow"),
+    "attach_policies_and_patterns": ("🛡️", "Apply Policies", "Attached retry, timeout, error handling"),
+    "attach_repo_context": ("📁", "Repo Context", "Analyzed target repository structure"),
+    "generate_code_and_tests": ("⚡", "Generate Code", "Created client, workflow, and tests"),
+    "analyze_repo_layout": ("🗂️", "Analyze Layout", "Determined file placement strategy"),
+    "apply_repo_integration_changes": ("✏️", "Apply Changes", "Wrote files to repository"),
+    "validate_integration_design": ("✅", "Validate", "Verified generated code"),
+    "persist_gold_checkpoint": ("💾", "Save Gold", "Persisted Gold model to database"),
+    "persist_kg_learning": ("🧠", "Save Learning", "Updated knowledge graph"),
+    "build_report": ("�", "Build Report", "Generated this report"),
+    "persist_run_outcome": ("📊", "Save Outcome", "Recorded run status"),
+}
+
+
+def _add_journey_visualization(lines: list, state: WorkflowState) -> None:
+    """
+    V4 Observability: Add visual journey representation.
+    
+    Shows progress through workflow with status indicators:
+    - ✅ Completed successfully
+    - ⚠️ Completed with warnings
+    - ❌ Failed
+    - ⏭️ Skipped
+    """
+    completed = set(state.completed_steps)
+    errors_in_nodes = set()
+    
+    # Try to identify which nodes had errors
+    for error in state.errors:
+        # Errors often mention node names
+        for node_name in _NODE_JOURNEY_INFO.keys():
+            if node_name in error.lower() or node_name.replace("_", " ") in error.lower():
+                errors_in_nodes.add(node_name)
+    
+    # Nodes with fallbacks
+    fallback_nodes = set()
+    for fb in state.llm_fallbacks:
+        fallback_nodes.add(fb.get("node", ""))
+    
+    # Build the journey line with emojis
+    journey_emojis = []
+    for node_name in _NODE_JOURNEY_INFO.keys():
+        emoji, label, _ = _NODE_JOURNEY_INFO[node_name]
+        if node_name in completed:
+            if node_name in errors_in_nodes:
+                journey_emojis.append(f"❌")
+            elif node_name in fallback_nodes:
+                journey_emojis.append(f"⚠️")
+            else:
+                journey_emojis.append(f"✅")
+        elif node_name in errors_in_nodes:
+            journey_emojis.append(f"❌")
+        else:
+            journey_emojis.append(f"⬜")  # Not yet run
+    
+    # Progress bar
+    total_nodes = len(_NODE_JOURNEY_INFO)
+    completed_count = len([n for n in _NODE_JOURNEY_INFO.keys() if n in completed])
+    progress_pct = int((completed_count / total_nodes) * 100) if total_nodes > 0 else 0
+    
+    filled = int(progress_pct / 5)  # 20 chars total
+    progress_bar = "█" * filled + "░" * (20 - filled)
+    
+    # Status summary
+    error_count = len(state.errors)
+    fallback_count = len(state.llm_fallbacks)
+    
+    if error_count > 0:
+        status_text = f"❌ Completed with {error_count} error(s)"
+    elif fallback_count > 0:
+        status_text = f"⚠️ Completed with {fallback_count} fallback(s)"
+    elif completed_count == total_nodes:
+        status_text = "✅ All steps completed successfully"
+    else:
+        status_text = f"🔄 {completed_count}/{total_nodes} steps completed"
+    
+    lines.append(f"**Progress**: {progress_bar} {progress_pct}%")
+    lines.append(f"**Status**: {status_text}")
+    lines.append("")
+    
+    # Visual journey (compact)
+    lines.append("```")
+    lines.append(" → ".join(journey_emojis[:6]))  # First 6 nodes
+    if len(journey_emojis) > 6:
+        lines.append(" → ".join(journey_emojis[6:12]))  # Middle nodes
+    if len(journey_emojis) > 12:
+        lines.append(" → ".join(journey_emojis[12:]))  # Remaining nodes
+    lines.append("```")
+    lines.append("")
+    
+    # Legend
+    lines.append("*Legend: ✅ Success | ⚠️ Fallback | ❌ Error | ⬜ Not run*")

@@ -315,6 +315,74 @@ Store Silver and Gold as nested JSON documents.
 - **ADR-0001**: Initial Architecture — Established medallion model
 - **ADR-0007**: Single DB Writer Pattern — How data flows to these schemas
 
+## v1 Constraints
+
+The following limitations apply to the current medallion implementation.
+
+### In-Memory Embeddings
+
+Embeddings are computed per-run but not persisted to pgvector.
+
+```
+Currently stores embeddings in memory; future phases will write to pgvector
+for cross-run retrieval.
+```
+
+| Constraint | v1 Behavior | v2 Target |
+|------------|-------------|-----------|
+| Embedding persistence | Not written to DB | Persist `spec_chunks.embedding` to pgvector |
+| Cross-run retrieval | Cold start each run | Semantic search across historical specs |
+| Vector index | None | `CREATE INDEX USING hnsw (embedding vector_cosine_ops)` |
+
+**Impact**: Each run recomputes embeddings for spec chunks. This adds latency (~2-5 seconds for typical specs) and cost (~$0.01-0.02 per run).
+
+### SQLite Fallback for Tests
+
+Unit tests use SQLite to avoid PostgreSQL dependency.
+
+```python
+- FALLBACK: SQLite for tests (USE_SQLITE=true)
+# Postgres is configured - must succeed or fail, no silent fallback
+```
+
+| SQLite Limitation | Impact on Tests |
+|-------------------|-----------------|
+| No pgvector | Embeddings stored as JSON text |
+| No `JSONB` operators | Some queries simplified |
+| Different FK behavior | Cascade deletes may differ |
+| No schemas | Tables prefixed instead (`spec_silver_endpoints`) |
+
+**v2 Target**: Keep SQLite for unit tests. Require PostgreSQL for integration tests via CI matrix.
+
+### Deferred Bronze Layer
+
+Raw spec bytes are not persisted.
+
+| What's Missing | Consequence |
+|----------------|-------------|
+| Original spec files | Cannot replay parsing with improved logic |
+| Fetch timestamps | No audit trail of spec changes |
+| Content hashes | Cannot detect spec drift |
+
+**v2 Target**: Add `spec_bronze.raw_specs` table when audit requirements justify the storage overhead.
+
+### Source Refs Reserved
+
+Multi-source ingestion is stubbed.
+
+```python
+source_refs=[],  # v1: reserved for future use
+```
+
+| Source Type | v1 Status | v2 Target |
+|-------------|-----------|-----------|
+| OpenAPI (HTTP) | Supported | Supported |
+| AsyncAPI (events) | Not supported | Add `message_specs` table |
+| CSV/EDI schemas | Not supported | Add `file_specs` table |
+| Database schemas | Not supported | Add `db_specs` table |
+
+---
+
 ## Future Considerations
 
 ### Adding Bronze Layer

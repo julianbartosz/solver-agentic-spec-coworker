@@ -68,9 +68,10 @@ def get_pool() -> "ConnectionPool":
         settings = get_settings()
         _pool = ConnectionPool(
             settings.database.url,
-            min_size=1,
-            max_size=10,
-            timeout=1.0,  # Shorter timeout for faster cleanup
+            min_size=2,
+            max_size=20,  # V1.1: Increased from 10 for headroom
+            timeout=5.0,  # V1.1: Increased from 1.0 for reliability
+            open=True,  # V1.2: Explicit open=True to fix psycopg_pool deprecation warning
             # No row_factory - use default tuple rows for consistency with SQLite
         )
 
@@ -109,6 +110,7 @@ SPEC_SILVER_DDL = """
 -- Per design doc Appendix B.2
 
 CREATE SCHEMA IF NOT EXISTS spec_silver;
+CREATE SCHEMA IF NOT EXISTS spec_bronze;
 
 -- Enable pgvector extension for embeddings
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -120,6 +122,21 @@ CREATE TABLE IF NOT EXISTS spec_silver.source_systems (
     display_name TEXT NOT NULL,
     base_url     TEXT
 );
+
+-- raw_specs: Bronze layer - raw ingested spec content
+-- Per V2 Implementation Plan Section 5.1
+CREATE TABLE IF NOT EXISTS spec_bronze.raw_specs (
+    id               BIGSERIAL PRIMARY KEY,
+    source_system_id BIGINT NOT NULL REFERENCES spec_silver.source_systems(id) ON DELETE CASCADE,
+    uri              TEXT NOT NULL,
+    raw_content      BYTEA NOT NULL,
+    content_type     TEXT NOT NULL,
+    fetched_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sha256           TEXT NOT NULL,
+    UNIQUE(source_system_id, sha256)
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_specs_sha256 ON spec_bronze.raw_specs(sha256);
 
 -- spec_documents: Ingested specification files
 CREATE TABLE IF NOT EXISTS spec_silver.spec_documents (
@@ -363,15 +380,29 @@ CREATE TABLE IF NOT EXISTS integration_gold.code_artifacts (
 );
 
 -- run_status: Execution status tracking
+-- V1.1: task_id is nullable to allow recording runs even when task persistence fails
 CREATE TABLE IF NOT EXISTS integration_gold.run_status (
     run_id           TEXT PRIMARY KEY,
-    task_id          BIGINT REFERENCES integration_gold.integration_tasks(id),
+    task_id          BIGINT NULL REFERENCES integration_gold.integration_tasks(id) ON DELETE SET NULL,
     status           TEXT NOT NULL,
     started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at      TIMESTAMPTZ,
     error_summary    TEXT,
     langsmith_run_id TEXT
 );
+
+-- run_checkpoints: Workflow state checkpoints for recovery
+-- Per V2 Implementation Plan Section 3.5
+CREATE TABLE IF NOT EXISTS integration_gold.run_checkpoints (
+    id         SERIAL PRIMARY KEY,
+    run_id     TEXT NOT NULL REFERENCES integration_gold.run_status(run_id) ON DELETE CASCADE,
+    node_name  TEXT NOT NULL,
+    state_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(run_id, node_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON integration_gold.run_checkpoints(run_id);
 
 -- rag_eval_metrics: RAG evaluation metrics per run/node
 CREATE TABLE IF NOT EXISTS integration_gold.rag_eval_metrics (
@@ -438,6 +469,17 @@ KG_DDL = """
 -- Used by align_task_with_kg for GraphRAG retrieval
 
 CREATE SCHEMA IF NOT EXISTS kg;
+
+-- provider_scoring_config: Provider-specific scoring weights for search
+-- Per V2 Implementation Plan Section 5.1
+CREATE TABLE IF NOT EXISTS kg.provider_scoring_config (
+    id                  SERIAL PRIMARY KEY,
+    provider_code       TEXT NOT NULL UNIQUE,
+    graph_weight        REAL NOT NULL DEFAULT 0.4,
+    embedding_weight    REAL NOT NULL DEFAULT 0.4,
+    exact_match_weight  REAL NOT NULL DEFAULT 0.2,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- kg_nodes: Core KG nodes representing entities, tasks, endpoints, templates
 -- Types: 'provider', 'entity', 'endpoint', 'workflow_template', 'task'
@@ -519,6 +561,49 @@ CREATE TABLE IF NOT EXISTS kg.step_bindings (
 
 CREATE INDEX IF NOT EXISTS kg_workflow_steps_template_idx ON kg.workflow_steps(template_node_id);
 CREATE INDEX IF NOT EXISTS kg_step_bindings_step_idx ON kg.step_bindings(step_id);
+
+-- =============================================================================
+-- Feedback and Learning Tables
+-- Per docs/decisions/FEEDBACK_LEARNING_IMPLEMENTATION.md
+-- =============================================================================
+
+-- kg.feedback_records: Stores feedback synced from LangSmith and implicit signals
+CREATE TABLE IF NOT EXISTS kg.feedback_records (
+    id                    BIGSERIAL PRIMARY KEY,
+    run_id                TEXT NOT NULL,
+    template_key          TEXT,                        -- kg.nodes key for the template used
+    pattern_key           TEXT,                        -- kg.nodes key for the pattern used
+    feedback_type         TEXT NOT NULL,               -- 'thumbs', 'score', 'auto_compile', 'auto_test', 'auto_lint'
+    score                 DOUBLE PRECISION NOT NULL,   -- Normalized 0-1
+    comment               TEXT,
+    source                TEXT NOT NULL DEFAULT 'langsmith',  -- 'langsmith', 'cli', 'auto', 'api'
+    langsmith_feedback_id TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    synced_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Unique constraint: one feedback per run + langsmith_feedback_id combo
+CREATE UNIQUE INDEX IF NOT EXISTS kg_feedback_run_ls_idx 
+ON kg.feedback_records(run_id, langsmith_feedback_id) 
+WHERE langsmith_feedback_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS kg_feedback_run_idx ON kg.feedback_records(run_id);
+CREATE INDEX IF NOT EXISTS kg_feedback_template_idx ON kg.feedback_records(template_key);
+CREATE INDEX IF NOT EXISTS kg_feedback_pattern_idx ON kg.feedback_records(pattern_key);
+
+-- kg.confidence_history: Track confidence changes over time for analysis
+CREATE TABLE IF NOT EXISTS kg.confidence_history (
+    id               BIGSERIAL PRIMARY KEY,
+    node_key         TEXT NOT NULL,
+    old_confidence   DOUBLE PRECISION,
+    new_confidence   DOUBLE PRECISION NOT NULL,
+    feedback_count   INT NOT NULL DEFAULT 0,
+    reason           TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS kg_confidence_history_node_idx ON kg.confidence_history(node_key);
+CREATE INDEX IF NOT EXISTS kg_confidence_history_time_idx ON kg.confidence_history(created_at);
 """
 
 

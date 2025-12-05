@@ -8,6 +8,7 @@ Validates that generated code artifacts:
 4. Follow spec-driven naming conventions
 """
 import ast
+import os
 import sys
 import importlib.util
 import pytest
@@ -17,6 +18,17 @@ from typing import List, Set
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.domain.models import CodeArtifact
+
+# Tests that require real LLM output - skip if:
+# 1. USE_MOCK_LLM is explicitly enabled, OR
+# 2. OPENAI_API_KEY is not set or appears invalid (starts with sk-eS9 which is our invalid test key)
+_openai_key = os.environ.get("OPENAI_API_KEY", "")
+_is_mock_mode = os.environ.get("USE_MOCK_LLM", "").lower() in ("true", "1", "yes")
+_has_valid_key = _openai_key and not _openai_key.startswith("sk-eS9")
+requires_real_llm = pytest.mark.skipif(
+    _is_mock_mode or not _has_valid_key,
+    reason="Test requires real LLM output (valid OPENAI_API_KEY not set or mock mode enabled)"
+)
 
 
 class TestASTValidation:
@@ -99,6 +111,7 @@ class TestASTValidation:
                 f"Flow artifact should have a function ending in '_flow', found: {function_names}"
             )
     
+    @requires_real_llm
     def test_test_artifact_has_test_function(self, generated_artifacts):
         """Test artifacts should define test functions."""
         test_artifacts = [a for a in generated_artifacts if a.artifact_type == "test"]

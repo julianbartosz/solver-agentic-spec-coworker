@@ -109,9 +109,9 @@ class TestArchetypeModelConfig:
         monkeypatch.delenv("LLM_MODEL", raising=False)
         reset_archetype_cache()
         
-        config = get_archetype_model_config("understand_task")
+        config = get_archetype_model_config("generate_code_and_tests")
         
-        # understand_task is configured to use Anthropic
+        # generate_code_and_tests is configured to use Anthropic for code writing
         assert config.get("provider") == "anthropic"
         assert "claude" in config.get("name", "").lower()
     

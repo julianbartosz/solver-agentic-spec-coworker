@@ -99,7 +99,7 @@ profile:
 layout:
   integrations_root: "src/external_apis"
   tests_root: "tests/external_apis"
-  
+
 conventions:
   client_module: "clients/{provider}.py"
   flow_module: "flows/{provider}_{task}.py"
@@ -108,7 +108,7 @@ conventions:
 hooks:                            # Optional — for auto-wiring
   router_file: "src/app/api/router.py"
   router_marker: "# AUTO_INTEGRATION"
-  
+
 metadata:
   generated_by: "integration-coworker"
   generated_at: "2025-12-01T10:30:00Z"
@@ -277,6 +277,54 @@ Once LLM inference proves reliable (measured by user override rate < 5%):
 - [ ] Add metrics for detection method (config vs archetype vs LLM)
 - [ ] Document config file format in README
 - [ ] Mark archetypes as deprecated (keep for backward compat)
+
+## v1 Constraints
+
+The following limitations apply until the config-first architecture is fully implemented.
+
+### Local Filesystem Only
+
+v1 reads repositories from local paths. Remote sources are not supported.
+
+| Constraint | v1 Behavior | v2 Target |
+|------------|-------------|-----------|
+| GitHub repos | Not supported | `GitHubRepoContextProvider` |
+| S3/Azure blobs | Not supported | Cloud storage adapters |
+| Binary files | Skipped silently | Hash-based detection, selective parsing |
+
+```python
+# src/integration_coworker/repo/context.py
+owner = "local"  # Phase 2 simplification
+# Read file content (skip binary files in Phase 2)
+```
+
+### File Sampling Limits
+
+Repo snapshots truncate large repositories to fit LLM context windows.
+
+| Limit | Value | Rationale |
+|-------|-------|-----------|
+| Max files in sample | 5 | Token budget |
+| Max chars per file | 500 | Avoid context overflow |
+
+```python
+for path in sorted_paths[:5]:  # Only include first 5 files
+    full_lines.append(f"```\n{file.content[:500]}...\n```")
+```
+
+**v2 Target**: Configurable `max_files`, `max_chars_per_file`, intelligent file selection based on relevance.
+
+### Profile Source Tracking
+
+Detection confidence is tracked internally but not exposed to users.
+
+```python
+profile_source: Optional[str] = None  # "archetype", "heuristic", "llm", "cached"
+```
+
+**v2 Target**: Display confidence badge in reports. Add manual override API when detection confidence is low.
+
+---
 
 ## References
 

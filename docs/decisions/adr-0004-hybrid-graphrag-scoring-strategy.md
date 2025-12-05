@@ -287,6 +287,65 @@ Run with:
 USE_SQLITE=true USE_MOCK_LLM=true python -m pytest tests/test_graphrag_integration.py -v
 ```
 
+## v1 Constraints
+
+The following limitations apply to the current scoring implementation.
+
+### Embedding Fallback Score
+
+When embeddings are unavailable (mock LLM mode, API failure), all templates receive a fixed score.
+
+```python
+if task_emb and template_emb:
+    return max(0.0, cosine_similarity(task_emb, template_emb))
+return 0.5  # Fallback when embeddings unavailable
+```
+
+| Scenario | Behavior | Impact |
+|----------|----------|--------|
+| Mock LLM mode | All templates score 0.5 | Random selection among candidates |
+| API timeout | Single template scores 0.5 | Falls back to graph score + exact match |
+| Missing template embedding | That template scores 0.5 | May rank lower than it should |
+
+**v2 Target**: Cache embeddings at persist time. Retry with exponential backoff. Surface embedding failures in metrics.
+
+### Fixed Weight Distribution
+
+The 40/40/20 weight split is hardcoded.
+
+```python
+final_score = (graph_score × 0.4) + (embedding_score × 0.4) + exact_match_bonus + base_score
+```
+
+Different API types may benefit from different weights:
+
+| API Type | Better Weight Profile | Rationale |
+|----------|----------------------|-----------|
+| Well-structured OpenAPI | Higher graph weight | Rich entity/endpoint metadata |
+| Sparse documentation | Higher embedding weight | Names may differ from concepts |
+| Keyword-heavy domains | Higher exact match | "checkout", "payment" are precise |
+
+**v2 Target**: Make weights configurable per provider. Consider learned-to-rank when usage data accumulates.
+
+### Legacy Template Code Paths
+
+Three code paths exist for template retrieval:
+
+| Path | Trigger | Status |
+|------|---------|--------|
+| DB Knowledge Graph | Default | Primary |
+| In-memory KG fallback | `USE_IN_MEMORY_KG_FALLBACK=1` | Deprecated |
+| Legacy templates dict | `USE_LEGACY_TEMPLATES=1` | Deprecated |
+
+```python
+# Fallback hierarchy:
+# 1. DB KG (primary)
+# 2. Legacy in-memory templates (if USE_LEGACY_TEMPLATES=1)
+# 3. In-memory KG fallback (if USE_IN_MEMORY_KG_FALLBACK=1)
+```
+
+**v2 Target**: Remove legacy paths once DB KG is stable. Maintain single fallback for cold-start scenarios.
+
 ---
 
 ## Open Questions

@@ -17,8 +17,13 @@ Writes to:
 Backfills IDs into state objects for downstream use.
 
 Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
+
+V3 Streaming Mode:
+When STREAMING_PERSISTENCE=true, chunks and embeddings are already persisted
+by ingest_spec and embed_spec_chunks. This node skips chunk persistence
+and only handles metadata (endpoints, schemas, entities, etc.).
 """
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import json
 import logging
 
@@ -27,6 +32,7 @@ from integration_coworker.persistence import db
 from integration_coworker.persistence.sql_helpers import (
     upsert_ignore, select_by_columns, get_engine_type
 )
+from integration_coworker.config import is_streaming_persistence_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +49,21 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
     - Only persist_* nodes may write to the database
     - Backfills IDs on in-memory objects
     
+    V3 Streaming Mode:
+    When chunks are already streamed (persisted_ids["chunks_streamed"] == True),
+    this node skips chunk persistence and only handles metadata.
+    
     Reads: source_system, spec_documents, spec_sections, endpoints, schemas,
            entities, relationships, events, spec_chunk_embeddings
     Writes: persisted_ids (silver subset), backfills IDs in state objects
     """
     is_dry_run = state.options.dry_run if state.options else False
+    chunks_already_streamed = state.persisted_ids.get("chunks_streamed", False)
+    embeddings_already_streamed = state.persisted_ids.get("embeddings_streamed", False)
 
     if is_dry_run:
         # Don't write to DB, just log what would be persisted
+        chunk_count = state.chunk_count if chunks_already_streamed else len(state.spec_chunk_embeddings)
         state.persisted_ids.update({
             "silver_dry_run": True,
             "would_persist_silver": {
@@ -231,45 +244,56 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             event.id = event_id
 
         # 11. Insert SpecChunks with embeddings
-        # Build URI -> spec_document_id mapping for multi-spec support
-        chunk_to_uri = {}
-        if state.plan and "chunk_index_to_spec_document_uri" in state.plan:
-            chunk_to_uri = state.plan["chunk_index_to_spec_document_uri"]
+        # V3 Streaming Mode: Skip if chunks were already streamed by ingest_spec
+        if chunks_already_streamed:
+            logger.info(f"Skipping chunk persistence - already streamed ({state.chunk_count} chunks)")
+            chunk_count = state.chunk_count
+        else:
+            # Legacy mode: persist chunks from state.spec_chunk_embeddings
+            # Build URI -> spec_document_id mapping for multi-spec support
+            chunk_to_uri = {}
+            if state.plan and "chunk_index_to_spec_document_uri" in state.plan:
+                chunk_to_uri = state.plan["chunk_index_to_spec_document_uri"]
 
-        for chunk in state.spec_chunk_embeddings:
-            # Resolve spec_document_id
-            doc_id = chunk.spec_document_id
-            if doc_id is None:
-                # Try to get from mapping
-                chunk_uri = chunk_to_uri.get(chunk.chunk_index)
-                if chunk_uri:
-                    doc_id = spec_document_ids.get(chunk_uri)
+            for chunk in state.spec_chunk_embeddings:
+                # Resolve spec_document_id
+                doc_id = chunk.spec_document_id
                 if doc_id is None:
-                    doc_id = primary_spec_document_id
+                    # Try to get from mapping
+                    chunk_uri = chunk_to_uri.get(chunk.chunk_index)
+                    if chunk_uri:
+                        doc_id = spec_document_ids.get(chunk_uri)
+                    if doc_id is None:
+                        doc_id = primary_spec_document_id
 
-            # Use full content if available, otherwise use preview
-            content = getattr(chunk, '_full_content', chunk.content)
-            embedding_json = json.dumps(chunk.embedding) if chunk.embedding else None
+                # Use full content if available, otherwise use preview
+                content = getattr(chunk, '_full_content', chunk.content)
+                embedding_json = json.dumps(chunk.embedding) if chunk.embedding else None
 
-            sql = upsert_ignore(
-                "spec_chunks",
-                ["spec_document_id", "chunk_index", "content", "embedding"],
-                ["spec_document_id", "chunk_index"],
-                schema
-            )
-            cur.execute(sql, (doc_id, chunk.chunk_index, content, embedding_json))
+                sql = upsert_ignore(
+                    "spec_chunks",
+                    ["spec_document_id", "chunk_index", "content", "embedding"],
+                    ["spec_document_id", "chunk_index"],
+                    schema
+                )
+                cur.execute(sql, (doc_id, chunk.chunk_index, content, embedding_json))
 
-            sql = select_by_columns("spec_chunks", ["id"], ["spec_document_id", "chunk_index"], schema)
-            cur.execute(sql, (doc_id, chunk.chunk_index))
-            row = cur.fetchone()
-            if row:
-                chunk.id = row[0]
-                chunk.spec_document_id = doc_id
+                sql = select_by_columns("spec_chunks", ["id"], ["spec_document_id", "chunk_index"], schema)
+                cur.execute(sql, (doc_id, chunk.chunk_index))
+                row = cur.fetchone()
+                if row:
+                    chunk.id = row[0]
+                    chunk.spec_document_id = doc_id
+            
+            chunk_count = len(state.spec_chunk_embeddings)
 
         conn.commit()
         conn.close()
 
         # Update persisted_ids
+        # V3: Use chunk_count variable which accounts for streaming mode
+        embedding_count = state.embedding_count if embeddings_already_streamed else len(state.spec_chunk_embeddings)
+        
         state.persisted_ids.update({
             "silver_checkpoint": "completed",
             "source_system_id": source_system_id,
@@ -279,12 +303,15 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             "endpoint_count": len(state.endpoints),
             "schema_count": len(state.schemas),
             "entity_count": len(state.entities),
-            "spec_chunk_count": len(state.spec_chunk_embeddings),
-            "silver_timestamp": datetime.now(UTC).isoformat(),
+            "spec_chunk_count": chunk_count,
+            "embedding_count": embedding_count,
+            "streaming_mode": chunks_already_streamed,
+            "silver_timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
         state.completed_steps.append("persist_silver_checkpoint")
-        logger.info(f"Silver checkpoint persisted: {len(state.endpoints)} endpoints, {len(state.schemas)} schemas, {len(state.spec_chunk_embeddings)} chunks")
+        mode_str = " (streaming mode)" if chunks_already_streamed else ""
+        logger.info(f"Silver checkpoint persisted{mode_str}: {len(state.endpoints)} endpoints, {len(state.schemas)} schemas, {chunk_count} chunks")
         return state
 
     except Exception as e:

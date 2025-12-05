@@ -9,10 +9,18 @@ The abstraction layer provides:
 - Unified get_connection() that returns appropriate connection type
 - Unified init_schema() that creates tables for either backend
 - Support for pgvector VECTOR(1536) in Postgres mode
+
+V2: USE_SQLITE is deprecated outside of tests. Production requires Postgres.
+
+V1.1: Added ConnectionWrapper for proper connection lifecycle management.
+      Ensures connections are returned to pool even on exceptions.
 """
+import os
 import sqlite3
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Generator, Optional, Union
 import logging
 
 from ..config import get_settings
@@ -32,6 +40,104 @@ class DBConnection(Protocol):
     def execute(self, sql: str, parameters: Any = ...) -> Any: ...
 
 
+class ConnectionWrapper:
+    """
+    V1.1: Wrapper that ensures database connections are properly returned to pool.
+    
+    Supports both context manager and manual close() patterns:
+    
+    Context manager (recommended):
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            ...
+    
+    Manual close (legacy, still works):
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            ...
+        finally:
+            conn.close()
+    
+    The wrapper tracks whether close() was called and auto-closes on garbage
+    collection if needed (with a warning).
+    """
+    
+    def __init__(self, connection: Any, pool: Optional[Any] = None, engine: str = "sqlite"):
+        self._conn = connection
+        self._pool = pool  # Postgres pool reference for proper return
+        self._engine = engine
+        self._closed = False
+    
+    def cursor(self) -> Any:
+        """Get a cursor from the underlying connection."""
+        return self._conn.cursor()
+    
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        self._conn.commit()
+    
+    def rollback(self) -> None:
+        """Rollback the current transaction."""
+        if hasattr(self._conn, 'rollback'):
+            self._conn.rollback()
+    
+    def execute(self, sql: str, parameters: Any = None) -> Any:
+        """Execute SQL directly on connection (for SQLite compatibility)."""
+        if parameters is not None:
+            return self._conn.execute(sql, parameters)
+        return self._conn.execute(sql)
+    
+    def close(self) -> None:
+        """
+        Return connection to pool (Postgres) or close it (SQLite).
+        
+        Safe to call multiple times.
+        """
+        if self._closed:
+            return
+        
+        self._closed = True
+        
+        if self._engine == "postgres" and self._pool is not None:
+            # Return to pool using putconn
+            try:
+                self._pool.putconn(self._conn)
+            except Exception as e:
+                logger.warning(f"Failed to return connection to pool: {e}")
+        else:
+            # SQLite - just close
+            try:
+                self._conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to close SQLite connection: {e}")
+    
+    def __enter__(self) -> 'ConnectionWrapper':
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit - ensures connection is returned to pool."""
+        if exc_type is not None:
+            # Exception occurred - rollback
+            self.rollback()
+        self.close()
+        return None  # Don't suppress exceptions
+    
+    def __del__(self):
+        """Garbage collection safety net."""
+        if not self._closed:
+            logger.warning(
+                "ConnectionWrapper was garbage collected without being closed. "
+                "Use 'with db.get_connection() as conn:' pattern for proper cleanup."
+            )
+            self.close()
+    
+    # Delegate attribute access to underlying connection
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 def get_engine_type() -> str:
     """
     Get the database engine type based on config.
@@ -40,6 +146,42 @@ def get_engine_type() -> str:
     """
     settings = get_settings()
     return settings.database.engine_type
+
+
+# Track if we've already warned (to avoid spamming logs)
+_sqlite_deprecation_warned = False
+
+
+def _warn_sqlite_deprecation() -> None:
+    """
+    Emit a deprecation warning if SQLite is used outside of pytest.
+    
+    Per V2 Implementation Plan Section 6.2:
+    - USE_SQLITE is deprecated for production use
+    - Only suppress warning when PYTEST_CURRENT_TEST is set
+    """
+    global _sqlite_deprecation_warned
+    
+    # Don't warn during pytest runs
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    
+    # Only warn once per process
+    if _sqlite_deprecation_warned:
+        return
+    _sqlite_deprecation_warned = True
+    
+    warnings.warn(
+        "USE_SQLITE=true is deprecated for production use. "
+        "Postgres with pgvector is required for production. "
+        "SQLite mode will be removed in a future version.",
+        DeprecationWarning,
+        stacklevel=4,  # Show caller's location, not this function
+    )
+    logger.warning(
+        "SQLite mode is deprecated. "
+        "Configure DATABASE_URL for Postgres in production."
+    )
 
 
 def get_sqlite_connection() -> sqlite3.Connection:
@@ -56,9 +198,27 @@ def get_sqlite_connection() -> sqlite3.Connection:
     return conn
 
 
-def get_connection() -> DBConnection:
+def get_connection() -> ConnectionWrapper:
     """
     Get a database connection based on config.
+    
+    V1.1: Returns ConnectionWrapper for proper lifecycle management.
+    Supports both context manager and manual close() patterns.
+    
+    Recommended usage (context manager):
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT ...")
+            conn.commit()
+    
+    Legacy usage (still works):
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            ...
+            conn.commit()
+        finally:
+            conn.close()
     
     Routing logic:
     - If USE_SQLITE=true: returns SQLite connection
@@ -67,7 +227,7 @@ def get_connection() -> DBConnection:
     - If neither is configured: raises RuntimeError
     
     Returns:
-        A database connection (SQLite or Postgres).
+        A ConnectionWrapper around SQLite or Postgres connection.
         
     Raises:
         RuntimeError: If Postgres is configured but dependencies are missing,
@@ -78,7 +238,10 @@ def get_connection() -> DBConnection:
 
     if engine == "sqlite":
         # USE_SQLITE=true explicitly requested
-        return get_sqlite_connection()
+        # V2: Emit deprecation warning unless running in pytest
+        _warn_sqlite_deprecation()
+        conn = get_sqlite_connection()
+        return ConnectionWrapper(conn, pool=None, engine="sqlite")
 
     if engine == "postgres":
         # Postgres is configured - must succeed or fail, no silent fallback
@@ -93,7 +256,8 @@ def get_connection() -> DBConnection:
 
         try:
             pool = get_pool()
-            return pool.getconn()
+            raw_conn = pool.getconn()
+            return ConnectionWrapper(raw_conn, pool=pool, engine="postgres")
         except Exception as e:
             raise RuntimeError(
                 f"Failed to connect to Postgres database: {e}\n"
@@ -160,6 +324,21 @@ def _init_sqlite_schema() -> None:
             code TEXT NOT NULL UNIQUE,
             display_name TEXT,
             base_url TEXT
+        )
+    """)
+
+    # Raw specs (Bronze layer - per V2 Implementation Plan Section 5.2)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS raw_specs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_system_id INTEGER NOT NULL,
+            uri TEXT NOT NULL,
+            raw_content BLOB NOT NULL,
+            content_type TEXT NOT NULL,
+            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+            sha256 TEXT NOT NULL,
+            FOREIGN KEY (source_system_id) REFERENCES source_systems(id),
+            UNIQUE(source_system_id, sha256)
         )
     """)
 
@@ -432,6 +611,8 @@ def _init_sqlite_schema() -> None:
     """)
 
     # Run status (per design doc Appendix B.3)
+    # Note: task_id is nullable to support standalone runs without a pre-created task
+    # FK constraint removed to avoid ordering issues during concurrent operations
     cur.execute("""
         CREATE TABLE IF NOT EXISTS run_status (
             run_id TEXT PRIMARY KEY,
@@ -440,8 +621,20 @@ def _init_sqlite_schema() -> None:
             started_at TEXT NOT NULL DEFAULT (datetime('now')),
             finished_at TEXT,
             error_summary TEXT,
-            langsmith_run_id TEXT,
-            FOREIGN KEY (task_id) REFERENCES integration_tasks(id)
+            langsmith_run_id TEXT
+        )
+    """)
+
+    # Run checkpoints (per V2 Implementation Plan Section 3.5)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS run_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (run_id) REFERENCES run_status(run_id),
+            UNIQUE(run_id, node_name)
         )
     """)
 
@@ -507,6 +700,18 @@ def _init_sqlite_schema() -> None:
     # =========================================================================
     # kg (Knowledge Graph) tables for GraphRAG
     # =========================================================================
+
+    # Provider scoring config (per V2 Implementation Plan Section 5.2)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS provider_scoring_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_code TEXT NOT NULL UNIQUE,
+            graph_weight REAL NOT NULL DEFAULT 0.4,
+            embedding_weight REAL NOT NULL DEFAULT 0.4,
+            exact_match_weight REAL NOT NULL DEFAULT 0.2,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
 
     # KG nodes (core graph nodes)
     cur.execute("""
@@ -580,6 +785,53 @@ def _init_sqlite_schema() -> None:
         )
     """)
 
+    # ==========================================================================
+    # Feedback and Learning Tables
+    # Per docs/decisions/FEEDBACK_LEARNING_IMPLEMENTATION.md
+    # ==========================================================================
+
+    # KG feedback records
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_feedback_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            template_key TEXT,
+            pattern_key TEXT,
+            feedback_type TEXT NOT NULL,
+            score REAL NOT NULL,
+            comment TEXT,
+            source TEXT NOT NULL DEFAULT 'langsmith',
+            langsmith_feedback_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Create unique index for deduplication
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS kg_feedback_dedup_idx 
+        ON kg_feedback_records(run_id, langsmith_feedback_id)
+        WHERE langsmith_feedback_id IS NOT NULL
+    """)
+
+    # KG confidence history
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_confidence_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_key TEXT NOT NULL,
+            old_confidence REAL,
+            new_confidence REAL NOT NULL,
+            feedback_count INTEGER NOT NULL DEFAULT 0,
+            reason TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Create indexes for feedback tables
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_feedback_run_idx ON kg_feedback_records(run_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_feedback_template_idx ON kg_feedback_records(template_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_confidence_history_node_idx ON kg_confidence_history(node_key)")
+
     conn.commit()
     conn.close()
 
@@ -611,15 +863,20 @@ def clear_test_data() -> None:
         with pg_get_connection() as conn:
             with conn.cursor() as cur:
                 # Delete in reverse dependency order
-                # KG tables first
+                # Feedback tables first (no foreign keys)
+                cur.execute("DELETE FROM kg.confidence_history")
+                cur.execute("DELETE FROM kg.feedback_records")
+                # KG tables
                 cur.execute("DELETE FROM kg.step_bindings")
                 cur.execute("DELETE FROM kg.workflow_steps")
                 cur.execute("DELETE FROM kg.edges")
                 cur.execute("DELETE FROM kg.nodes")
+                cur.execute("DELETE FROM kg.provider_scoring_config")
                 # Then repo_meta
                 cur.execute("DELETE FROM repo_meta.files")
                 cur.execute("DELETE FROM repo_meta.integrations")
                 cur.execute("DELETE FROM integration_gold.rag_eval_metrics")
+                cur.execute("DELETE FROM integration_gold.run_checkpoints")
                 cur.execute("DELETE FROM integration_gold.run_status")
                 cur.execute("DELETE FROM integration_gold.code_artifacts")
                 cur.execute("DELETE FROM integration_gold.policies")
@@ -638,6 +895,7 @@ def clear_test_data() -> None:
                 cur.execute("DELETE FROM spec_silver.schemas")
                 cur.execute("DELETE FROM spec_silver.spec_sections")
                 cur.execute("DELETE FROM spec_silver.spec_documents")
+                cur.execute("DELETE FROM spec_bronze.raw_specs")
                 cur.execute("DELETE FROM spec_silver.source_systems")
             conn.commit()
         return
@@ -647,15 +905,20 @@ def clear_test_data() -> None:
     cur = conn.cursor()
 
     # Delete in reverse dependency order
-    # KG tables first
+    # Feedback tables first
+    cur.execute("DELETE FROM kg_confidence_history")
+    cur.execute("DELETE FROM kg_feedback_records")
+    # KG tables
     cur.execute("DELETE FROM kg_step_bindings")
     cur.execute("DELETE FROM kg_workflow_steps")
     cur.execute("DELETE FROM kg_edges")
     cur.execute("DELETE FROM kg_nodes")
+    cur.execute("DELETE FROM provider_scoring_config")
     # Then rest
     cur.execute("DELETE FROM repo_files")
     cur.execute("DELETE FROM repo_integrations")
     cur.execute("DELETE FROM rag_eval_metrics")
+    cur.execute("DELETE FROM run_checkpoints")
     cur.execute("DELETE FROM run_status")
     cur.execute("DELETE FROM code_artifacts")
     cur.execute("DELETE FROM policies")
@@ -674,6 +937,7 @@ def clear_test_data() -> None:
     cur.execute("DELETE FROM schemas")
     cur.execute("DELETE FROM spec_sections")
     cur.execute("DELETE FROM spec_documents")
+    cur.execute("DELETE FROM raw_specs")
     cur.execute("DELETE FROM source_systems")
 
     conn.commit()

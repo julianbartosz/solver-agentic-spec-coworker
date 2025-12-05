@@ -142,7 +142,7 @@ def test_multi_spec_chunk_mapping(payments_spec_path: str, notifications_spec_pa
     assert notifications_spec_path in mapped_uris
 
 
-def test_multi_spec_no_errors(payments_spec_path: str, notifications_spec_path: str):
+def test_multi_spec_no_errors(payments_spec_path: str, notifications_spec_path: str, mock_embeddings):
     """Test that multi-spec processing completes without fatal errors."""
     options = IntegrationOptions(repo_integration_enabled=False, dry_run=True)
     

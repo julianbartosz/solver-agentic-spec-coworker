@@ -13,7 +13,7 @@ This is the final persistence checkpoint before returning the result.
 
 Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
 """
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import logging
 
 from integration_coworker.graph.state import WorkflowState
@@ -69,7 +69,7 @@ def persist_run_outcome(state: WorkflowState) -> WorkflowState:
         gold_schema = GOLD_SCHEMA if engine == "postgres" else None
         repo_schema = REPO_SCHEMA if engine == "postgres" else None
 
-        run_id = state.run_id or f"run_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+        run_id = state.run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         task_id = state.persisted_ids.get("task_id")
         provider_code = state.provider_code or "unknown"
         task_slug = state.integration_task.task_slug if state.integration_task else "unknown"
@@ -79,8 +79,8 @@ def persist_run_outcome(state: WorkflowState) -> WorkflowState:
 
         # RunStatus uses primary key so needs upsert_update
         run_status_table = f"{gold_schema}.run_status" if gold_schema else "run_status"
-        started_at = datetime.now(UTC).isoformat()
-        finished_at = datetime.now(UTC).isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
+        finished_at = datetime.now(timezone.utc).isoformat()
 
         if engine == "postgres":
             sql = f"""INSERT INTO {run_status_table} 
@@ -111,7 +111,12 @@ def persist_run_outcome(state: WorkflowState) -> WorkflowState:
         # 3. Insert Repo Integration Metadata (if repo_root provided)
         if state.repo_root and state.repo_profile:
             repo_name = state.repo_root.name if hasattr(state.repo_root, 'name') else str(state.repo_root).split('/')[-1]
-            profile_name = state.repo_profile.archetype if state.repo_profile else "unknown"
+            # Use archetype, or name, or fallback to "unknown" - ensure non-null
+            profile_name = (
+                state.repo_profile.archetype 
+                or state.repo_profile.name 
+                or "unknown"
+            ) if state.repo_profile else "unknown"
 
             # Upsert repo_integrations
             integrations_table = f"{repo_schema}.integrations" if repo_schema else "repo_integrations"
@@ -173,7 +178,7 @@ def persist_run_outcome(state: WorkflowState) -> WorkflowState:
             "run_status": final_status,
             "run_id": run_id,
             "run_outcome_checkpoint": "completed",
-            "outcome_timestamp": datetime.now(UTC).isoformat(),
+            "outcome_timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
         state.completed_steps.append("persist_run_outcome")

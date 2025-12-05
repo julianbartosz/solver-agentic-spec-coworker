@@ -3,12 +3,15 @@ LLM prompt builders for code generation.
 
 Builds rich, context-aware prompts that help the LLM generate
 high-quality, spec-driven, repo-fitting code.
+
+v2: Implements FT-SEC-002 - Input sanitization for task descriptions
 """
 from typing import Literal, Optional, Dict, Any
 
 from integration_coworker.domain.models import Endpoint, IntegrationTask
 from integration_coworker.repo.models import RepoProfile
 from integration_coworker.graph.state import WorkflowState
+from integration_coworker.llm.sanitizer import sanitize_task_description
 
 
 def build_codegen_prompt(
@@ -49,7 +52,10 @@ def build_codegen_prompt(
         A detailed prompt string for the LLM
     """
     provider_code = state.provider_code or "unknown"
-    task_desc = state.task_description or "API integration"
+    
+    # v2: Sanitize task description to prevent prompt injection (SEC-002)
+    raw_task_desc = task.description if task else state.task_description or ""
+    task_desc = sanitize_task_description(raw_task_desc) or "API integration"
 
     # Build endpoint context
     endpoint_context = _build_endpoint_context(endpoint)

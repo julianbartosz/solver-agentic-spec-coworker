@@ -10,7 +10,7 @@ Note: This is the legacy persist node, kept for backward compatibility.
 The new design uses checkpoint nodes: persist_silver_checkpoint, 
 persist_gold_checkpoint, and persist_run_outcome.
 """
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import json
 
 from integration_coworker.graph.state import WorkflowState
@@ -18,6 +18,9 @@ from integration_coworker.persistence import db
 from integration_coworker.persistence.sql_helpers import (
     upsert_ignore, select_by_columns, get_engine_type
 )
+
+# For Python 3.10 compatibility (UTC was added in 3.11)
+UTC = timezone.utc
 
 # Schema prefixes for Postgres tables
 SILVER_SCHEMA = "spec_silver"
@@ -49,7 +52,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 "code_artifacts": len(state.code_artifacts),
             },
             "run_status": "completed_dry_run",
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state.persisted_ids = summary
         state.completed_steps.append("persist_results")
@@ -282,7 +285,7 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             "workflow_node_count": len(state.workflow_nodes),
             "policy_count": len(state.policies),
             "code_artifact_count": len(state.code_artifacts),
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         conn.close()
@@ -294,6 +297,6 @@ def persist_results(state: WorkflowState) -> WorkflowState:
         state.persisted_ids = {
             "run_status": "failed",
             "error": str(e),
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         return state

@@ -15,6 +15,8 @@ KG Schema:
 - kg.edges: Relationships between nodes
 - kg.workflow_steps: Steps within workflow templates
 - kg.step_bindings: Endpoint bindings for steps
+
+V2.1: Uses LangChain OpenAIEmbeddings for automatic LangSmith tracing.
 """
 import json
 import logging
@@ -28,21 +30,59 @@ from integration_coworker.domain.models import KGNodeType, KGEdgeRelation
 logger = logging.getLogger(__name__)
 
 
+# Import LangChain embeddings for LangSmith tracing
+try:
+    from langchain_openai import OpenAIEmbeddings
+    HAS_LANGCHAIN_EMBEDDINGS = True
+except ImportError:
+    HAS_LANGCHAIN_EMBEDDINGS = False
+    OpenAIEmbeddings = None
+
+
+def _get_embedding_client():
+    """
+    Get LangChain OpenAIEmbeddings client for automatic LangSmith tracing.
+    
+    Returns an embeddings client or None if unavailable.
+    """
+    if not HAS_LANGCHAIN_EMBEDDINGS:
+        return None
+    
+    settings = get_settings()
+    if not settings.llm.api_key or settings.llm.use_mock:
+        return None
+    
+    try:
+        model = settings.llm.embedding_model or "text-embedding-3-small"
+        return OpenAIEmbeddings(
+            api_key=settings.llm.api_key,
+            model=model,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create LangChain OpenAIEmbeddings client: {e}")
+        return None
+
+
 def _compute_embedding(text: str) -> Optional[List[float]]:
-    """Compute embedding for text using OpenAI API (if available)."""
+    """
+    Compute embedding for text using LangChain OpenAIEmbeddings.
+    
+    Uses LangChain for automatic LangSmith tracing of embedding calls.
+    """
     settings = get_settings()
     if not settings.llm.api_key or settings.llm.use_mock:
         logger.debug("Embedding computation skipped: mock LLM or no API key")
         return None
 
+    client = _get_embedding_client()
+    if not client:
+        logger.debug("Embedding client unavailable")
+        return None
+
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.llm.api_key)
-        response = client.embeddings.create(
-            model=settings.llm.embedding_model or "text-embedding-3-small",
-            input=text[:8000],  # Truncate to avoid token limits
-        )
-        return response.data[0].embedding
+        # Use LangChain's embed_query for single text (traced in LangSmith)
+        truncated_text = text[:8000]  # Truncate to avoid token limits
+        return client.embed_query(truncated_text)
     except Exception as e:
         logger.warning(f"Failed to compute embedding: {e}")
         return None
@@ -203,6 +243,48 @@ def _upsert_workflow_step(
             SELECT id FROM kg_workflow_steps WHERE template_node_id = ? AND step_key = ?
         """, (template_node_id, step_key))
         return cur.fetchone()[0]
+
+
+def _increment_usage_count(
+    cur,
+    node_key: str,
+    is_postgres: bool = False,
+) -> bool:
+    """
+    V1.1 FT-011: Increment usage_count for a node by key.
+    
+    Used to track how often templates and patterns are successfully used.
+    
+    Args:
+        cur: Database cursor
+        node_key: The key of the node to update
+        is_postgres: Whether using Postgres or SQLite
+        
+    Returns:
+        True if node was found and updated, False otherwise
+    """
+    try:
+        if is_postgres:
+            cur.execute("""
+                UPDATE kg.nodes
+                SET usage_count = usage_count + 1,
+                    last_used_at = NOW()
+                WHERE key = %s
+                RETURNING id
+            """, (node_key,))
+            result = cur.fetchone()
+            return result is not None
+        else:
+            cur.execute("""
+                UPDATE kg_nodes
+                SET usage_count = usage_count + 1,
+                    last_used_at = datetime('now')
+                WHERE key = ?
+            """, (node_key,))
+            return cur.rowcount > 0
+    except Exception as e:
+        logger.debug(f"Failed to increment usage count for {node_key}: {e}")
+        return False
 
 
 def persist_kg_learning(state: WorkflowState) -> WorkflowState:
@@ -485,6 +567,26 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                                     is_postgres=is_postgres,
                                 )
                             break
+
+        # =====================================================================
+        # 7. V1.1 FT-011: Track usage of matched templates and patterns
+        # Increment usage_count for any templates/patterns that were matched
+        # during align_task_with_kg. This enables learning from successful runs.
+        # =====================================================================
+        if state.plan:
+            # Track usage of matched template
+            matched_template_id = state.plan.get("matched_template_id")
+            if matched_template_id:
+                if _increment_usage_count(cur, matched_template_id, is_postgres):
+                    logger.debug(f"Incremented usage_count for template: {matched_template_id}")
+                    state.persisted_ids["kg_template_usage_tracked"] = matched_template_id
+            
+            # Track usage of matched pattern
+            matched_pattern_id = state.plan.get("matched_pattern_id")
+            if matched_pattern_id:
+                if _increment_usage_count(cur, matched_pattern_id, is_postgres):
+                    logger.debug(f"Incremented usage_count for pattern: {matched_pattern_id}")
+                    state.persisted_ids["kg_pattern_usage_tracked"] = matched_pattern_id
 
         conn.commit()
 

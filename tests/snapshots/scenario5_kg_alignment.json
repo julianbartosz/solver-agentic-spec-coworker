@@ -26,7 +26,7 @@
       "has_content": true
     }
   ],
-  "workflow_nodes_count": 4,
+  "workflow_nodes_count": 5,
   "endpoint_bindings_count": 1,
   "completed_steps": [
     "align_task_with_kg",
@@ -52,10 +52,11 @@
     "Warning: EndpointBinding for node 'call_api' has endpoint_id=None"
   ],
   "workflow_node_keys": [
-    "IntegrationFlowNode(id=None, task_id=None, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'API Call', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
-    "IntegrationFlowNode(id=None, task_id=None, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=3)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'call_api', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=4)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='handle_response', node_type='transform', label=None, description=None, config={'label': 'handle_response', 'description': ''}, endpoint_id=None, entity_id=None, position=3)",
     "IntegrationFlowNode(id=None, task_id=None, node_key='start', node_type='start', label=None, description=None, config={'label': 'Start', 'description': ''}, endpoint_id=None, entity_id=None, position=0)",
-    "IntegrationFlowNode(id=None, task_id=None, node_key='validate_input', node_type='validation', label=None, description=None, config={'label': 'Validate Input', 'description': ''}, endpoint_id=None, entity_id=None, position=1)"
+    "IntegrationFlowNode(id=None, task_id=None, node_key='validate', node_type='validation', label=None, description=None, config={'label': 'validate', 'description': ''}, endpoint_id=None, entity_id=None, position=1)"
   ],
   "binding_endpoints": [
     "None"

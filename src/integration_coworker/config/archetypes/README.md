@@ -1,3 +1,4 @@
+````markdown
 # Node Archetypes
 
 This directory contains YAML archetype files that define the configuration for each LangGraph node.
@@ -15,8 +16,65 @@ Each archetype file defines:
 
 ## Supported Providers
 
-- `openai`: OpenAI models (gpt-4, gpt-4o-mini, etc.)
-- `anthropic`: Anthropic Claude models (claude-3-opus, claude-3-sonnet, etc.)
+- `openai`: OpenAI models (gpt-5.1, gpt-4o, gpt-4o-mini, etc.)
+- `anthropic`: Anthropic Claude models (claude-sonnet-4, claude-opus-4, etc.)
+- `google`: Google Gemini models (gemini-3-pro, gemini-2.0-flash) - ideal for large context tasks
+
+## Model Assignment by Role
+
+| Role | Provider | Model | Use Case |
+|------|----------|-------|----------|
+| Planning | OpenAI | gpt-5.1 | Task understanding, workflow design, KG alignment |
+| Code Generation | Anthropic | claude-sonnet-4 | Client code, flow code, test generation |
+| Extraction | OpenAI | gpt-4o-mini | Deterministic spec parsing, schema extraction |
+| Large Context | Google | gemini-3-pro | Repo analysis (when needed) |
+
+### Node-to-Model Mapping
+
+**Planning Nodes (GPT-5.1):**
+- `understand_task` - Analyzes task description
+- `plan_integration_flow` - Designs workflow graph
+- `plan_run` - Initializes execution plan
+- `align_task_with_kg` - Matches task to KG templates
+- `attach_policies_and_patterns` - Attaches auth, retry, error policies
+
+**Code Generation Nodes (Claude Sonnet 4):**
+- `generate_code_and_tests` - Generates client, flow, and test code
+
+**Extraction Nodes (GPT-4o-mini):**
+- `build_silver_api_model` - Parses API specs into Silver model
+
+**Pure Python Nodes (No LLM):**
+- `analyze_repo_layout` - Filesystem analysis
+- `apply_repo_integration_changes` - Applies file changes
+- `validate_integration_design` - Static validation
+
+## Changing Models
+
+Models are fully configurable via YAML - no code changes needed. To swap a model:
+
+1. Open the node's archetype file (e.g., `generate_code_and_tests.archetype.yaml`)
+2. Change the `model` section:
+   ```yaml
+   model:
+     provider: anthropic  # or openai, google
+     name: claude-sonnet-4-20250514  # any model the provider supports
+     temperature: 0.15
+     max_tokens: 8192
+   ```
+3. Restart the application
+
+## Provider Fallback
+
+When a primary provider's API key is missing, the system automatically falls back:
+1. OpenAI → Anthropic → Google → Mock
+2. Anthropic → OpenAI → Google → Mock
+3. Google → OpenAI → Anthropic → Mock
+
+Set API keys via environment variables:
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
 
 ## File Naming Convention
 
@@ -26,32 +84,40 @@ Each archetype file defines:
 ## Example
 
 ```yaml
-name: understand_task
-role: planning
+name: generate_code_and_tests
+role: codegen
 
 model:
+  # Claude Sonnet 4 for code generation
+  # Change provider/name here to swap models without code changes
   provider: anthropic
-  name: claude-3-sonnet-20240229
-  temperature: 0.2
-  max_tokens: 2048
+  name: claude-sonnet-4-20250514
+  temperature: 0.15
+  max_tokens: 8192
 
 prompting:
-  strategy: chain_of_thought
-  num_samples: 2
-  max_parallel_samples: 2
+  strategy: generation
+  num_candidates: 2
+  evaluator: static_checks
 
 retrieval:
   top_k: 8
   graph_radius: 1
-  token_budget: 3000
+  token_budget: 8000
+  sources:
+    - spec_endpoints
+    - spec_schemas
+    - kg_templates
+    - repo_profile
 
 input_schema:
-  task_description: string
-  spec_context: string
+  task: IntegrationTask
+  flow: IntegrationFlow
+  endpoints: list[Endpoint]
+  policies: list[Policy]
 
 output_schema:
-  task_slug: string
-  input_entities: list[string]
-  output_entities: list[string]
-  target_operations: list[string]
+  artifacts: list[CodeArtifact]
 ```
+
+````
