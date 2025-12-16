@@ -1,5 +1,13 @@
 # ADR 0001: Initial Architecture
 
+> **Status note (Dec 2025)**: This ADR describes the *original* architecture sketch and contains module names and stage names that no longer match the current codebase.
+>
+> **Superseded by**:
+> - [ADR-0006: Medallion Data Architecture](adr-0006-medallion-data-architecture.md)
+> - The current architecture reference: `docs/development/architecture.md`
+>
+> This file is retained for historical context.
+
 ## Status
 
 Accepted
