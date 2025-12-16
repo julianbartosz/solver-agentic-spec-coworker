@@ -11,7 +11,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 
 | fs_path | nav_path | H1 | status flags | evidence (date, bytes, inbound, outbound, in_nav) |
 |---|---|---|---|
-| docs/GETTING_STARTED.md | GETTING_STARTED.md | Ops Runbook: Getting Started | authoritative | 2025-12-16, 11155B, in0, out0, nav:yes |
+| docs/GETTING_STARTED.md | GETTING_STARTED.md | Ops Runbook: Getting Started | authoritative | 2025-12-16, 11053B, in0, out3, nav:yes |
 | docs/api-reference/entrypoint.md | api-reference/entrypoint.md | Entrypoint API | authoritative | 2025-12-09, 3356B, in3, out2, nav:yes |
 | docs/api-reference/types.md | api-reference/types.md | Types | authoritative | 2025-12-09, 4263B, in2, out2, nav:yes |
 | docs/api-reference/workflow-state.md | api-reference/workflow-state.md | WorkflowState | authoritative | 2025-12-09, 5201B, in2, out2, nav:yes |
@@ -31,7 +31,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/development/code-tour.md | development/code-tour.md | Code Tour | authoritative | 2025-12-09, 5575B, in2, out2, nav:yes |
 | docs/development/contributing.md | development/contributing.md | Contributing | authoritative | 2025-12-09, 3474B, in2, out2, nav:yes |
 | docs/development/dependency_bumps.md | development/dependency_bumps.md | Dependency bump playbook (docs tooling) | authoritative | 2025-12-16, 2124B, in0, out0, nav:yes |
-| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16366B, in0, out0, nav:yes |
+| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16510B, in0, out0, nav:yes |
 | docs/development/docs_tooling.md | development/docs_tooling.md | Docs tooling | authoritative | 2025-12-16, 1075B, in0, out0, nav:yes |
 | docs/development/testing.md | development/testing.md | Testing Guide | authoritative | 2025-12-09, 5180B, in2, out2, nav:yes |
 | docs/features/knowledge-graph.md | features/knowledge-graph.md | Knowledge Graph | authoritative | 2025-12-09, 3949B, in3, out2, nav:yes |
@@ -43,10 +43,10 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/getting-started/installation.md | getting-started/installation.md | Installation | authoritative | 2025-12-09, 1771B, in1, out1, nav:yes |
 | docs/getting-started/quickstart.md | getting-started/quickstart.md | Quickstart | authoritative | 2025-12-09, 1383B, in2, out3, nav:yes |
 | docs/index.md | index.md | Integration Co-Worker | authoritative | 2025-12-09, 2185B, in0, out5, nav:yes |
-| docs/operations/db-postgres.md | operations/db-postgres.md | Database: Postgres + pgvector | authoritative | 2025-12-16, 2061B, in1, out0, nav:yes |
-| docs/operations/deployment.md | operations/deployment.md | Deployment | authoritative | 2025-12-16, 1589B, in1, out0, nav:yes |
+| docs/operations/db-postgres.md | operations/db-postgres.md | Database: Postgres + pgvector | authoritative | 2025-12-16, 2061B, in2, out0, nav:yes |
+| docs/operations/deployment.md | operations/deployment.md | Deployment | authoritative | 2025-12-16, 1589B, in2, out0, nav:yes |
 | docs/operations/index.md | operations/index.md | Operations | authoritative | 2025-12-16, 634B, in0, out3, nav:yes |
-| docs/operations/validation.md | operations/validation.md | Validation | authoritative | 2025-12-16, 1156B, in1, out0, nav:yes |
+| docs/operations/validation.md | operations/validation.md | Validation | authoritative | 2025-12-16, 1156B, in2, out0, nav:yes |
 | docs/user-guide/cli-reference.md | user-guide/cli-reference.md | CLI Reference | authoritative,generated | 2025-12-09, 3616B, in4, out2, nav:yes |
 | docs/user-guide/specs.md | user-guide/specs.md | Supported Spec Formats | authoritative | 2025-12-09, 2264B, in2, out2, nav:yes |
 | docs/user-guide/web-ui.md | user-guide/web-ui.md | Web UI | authoritative | 2025-12-09, 2047B, in2, out2, nav:yes |
@@ -100,7 +100,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
     - docs/getting-started/quickstart.md
 
 - Top-level (misc/ops/audits)
-  - Entrypoint: docs/operations/db-postgres.md (nav:yes in1)
+  - Entrypoint: docs/operations/db-postgres.md (nav:yes in2)
   - Contributing files:
     - docs/GETTING_STARTED.md
     - docs/gen_cli_reference.py
@@ -234,12 +234,9 @@ The overlap notes below only reference headings that appear in the appendix (H1â
   ### PostgreSQL with pgvector (Production)
   # Single Docker command
   # Enable the vector extension
-  # docker-compose.yml
   # Required for Postgres mode
   # Optional: Force SQLite for tests
   # export USE_SQLITE=true
-  # Using CLI
-  # Or using helper script
   # Check status
   # Check pgvector manually
   ## LLM Configuration
