@@ -122,6 +122,11 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
         state.completed_steps.append("ingest_spec")
         return state
 
+    # Ensure outputs are initialized (some test fixtures construct WorkflowState
+    # without these lists).
+    if not state.spec_documents:
+        state.spec_documents = []
+
     # API-002: Create SourceRef objects for each spec
     if not state.source_refs:
         state.source_refs = []
@@ -142,6 +147,12 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
         logger.debug("Streaming persistence disabled, using legacy mode")
         return _ingest_spec_legacy(state, no_cache=no_cache)
     
+    # Keep a minimal in-memory handoff for downstream parsing.
+    # Tests and some pipeline paths expect ingest_spec to populate pending_specs
+    # with raw content, even when streaming persistence is enabled.
+    if not getattr(state, "pending_specs", None):
+        state.pending_specs = []
+
     # Fetch all specs first to determine total size
     fetched_specs = []
     total_bytes = 0
@@ -151,6 +162,9 @@ def ingest_spec(state: WorkflowState) -> WorkflowState:
             content, content_type = _fetch_spec_content(ref)
             fetched_specs.append((ref, content, content_type))
             total_bytes += len(content.encode("utf-8"))
+
+            # Lightweight in-memory handoff for parse stage
+            state.pending_specs.append({"ref": ref, "content": content, "content_type": content_type})
         except Exception as e:
             state.errors.append(f"Failed to fetch spec from {ref}: {str(e)}")
     
@@ -224,14 +238,28 @@ def _check_spec_cache(
         engine = get_engine_type()
         cur = conn.cursor()
         
+        # IMPORTANT: Scope cache hits to provider_code when available.
+        # The Silver layer (endpoints/schemas/entities) is keyed by source_system
+        # which is provider-specific. Reusing a spec_document row from a different
+        # provider_code can yield a "cache hit" but no corresponding endpoints.
         if engine == "postgres":
-            cur.execute("""
-                SELECT id, source_system_id, version, uri, content_type, sha256
-                FROM spec_silver.spec_documents
-                WHERE sha256 = %s
-                ORDER BY id DESC
-                LIMIT 1
-            """, (sha256,))
+            if provider_code:
+                cur.execute("""
+                    SELECT sd.id, sd.source_system_id, sd.version, sd.uri, sd.content_type, sd.sha256
+                    FROM spec_silver.spec_documents sd
+                    JOIN spec_silver.source_systems ss ON ss.id = sd.source_system_id
+                    WHERE sd.sha256 = %s AND ss.code = %s
+                    ORDER BY sd.id DESC
+                    LIMIT 1
+                """, (sha256, provider_code))
+            else:
+                cur.execute("""
+                    SELECT id, source_system_id, version, uri, content_type, sha256
+                    FROM spec_silver.spec_documents
+                    WHERE sha256 = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (sha256,))
         else:
             cur.execute("""
                 SELECT id, source_system_id, version, uri, content_type, sha256

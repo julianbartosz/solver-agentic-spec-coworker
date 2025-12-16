@@ -9,13 +9,13 @@ version: "1.0"
 # Models are configurable via YAML - no code changes needed to swap providers.
 #
 # Recommended by role:
-# - Planning nodes: OpenAI GPT-5.1
-# - Code generation: Anthropic Claude Opus 4.5
-# - Extraction: OpenAI GPT-4o-mini (smaller, faster)
-# - Large context: Google Gemini 3 Pro
+# - Planning nodes: OpenAI gpt-4o
+# - Code generation: Anthropic Claude Sonnet 4.5
+# - Extraction: OpenAI gpt-4o-mini (smaller, faster)
+# - Large context: Google gemini-2.5-flash
 model:
   provider: openai
-  name: gpt-5.1
+  name: gpt-4o
   temperature: 0.7
   max_tokens: 2000
 

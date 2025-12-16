@@ -16,6 +16,8 @@ import os
 import pytest
 from pathlib import Path
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 # Ensure we're using SQLite and mock LLM for this test
 os.environ.setdefault("USE_SQLITE", "true")
 os.environ.setdefault("USE_MOCK_LLM", "true")

@@ -15,6 +15,8 @@ from integration_coworker.graph.nodes.attach_policies_and_patterns import (
 )
 from integration_coworker.graph.state import WorkflowState
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 
 class TestAuthPolicyInference:
     """Tests for _infer_auth_policy_config()."""

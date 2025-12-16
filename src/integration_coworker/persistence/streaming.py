@@ -16,17 +16,18 @@ import json
 
 from integration_coworker.persistence.db import get_connection, get_engine_type
 from integration_coworker.persistence.sql_helpers import (
-    upsert_ignore,
     select_by_columns,
     placeholder,
     table_name,
 )
+from integration_coworker.persistence.upsert import InsertDoNothingBuilder
 
 logger = logging.getLogger(__name__)
 
 # Batch sizes for streaming operations
 CHUNK_BATCH_SIZE = 100  # Write chunks in batches of 100
-EMBEDDING_BATCH_SIZE = 50  # Update embeddings in batches of 50
+# Bug #58 fix: Reduced batch size from 50 to 25 to avoid rate limits
+EMBEDDING_BATCH_SIZE = 25  # Update embeddings in batches of 25
 
 # Schema prefix for Postgres tables
 SILVER_SCHEMA = "spec_silver"
@@ -71,6 +72,13 @@ def stream_raw_spec_to_bronze(
     conn = get_connection()
     cur = conn.cursor()
     
+    insert_builder = InsertDoNothingBuilder(
+        "raw_specs",
+        ["uri", "content_type", "sha256", "raw_content", "source_system_id"],
+        conflict_columns=["source_system_id", "sha256"],
+        schema=schema,
+    )
+
     try:
         # First, check if already exists (using unique constraint columns)
         if engine == "postgres":
@@ -87,34 +95,30 @@ def stream_raw_spec_to_bronze(
             logger.debug(f"Raw spec already exists: {uri} (id={row[0]})")
             return row[0]
         
-        # Insert new raw spec
+        # Insert new raw spec (idempotent)
+        sql, params = insert_builder.render(
+            {
+                "uri": uri,
+                "content_type": content_type,
+                "sha256": sha256,
+                "raw_content": content.encode("utf-8"),
+                "source_system_id": source_system_id,
+            }
+        )
+        cur.execute(sql, params)
+
+        # Fetch ID deterministically
         if engine == "postgres":
-            cur.execute("""
-                INSERT INTO spec_bronze.raw_specs 
-                    (uri, content_type, sha256, raw_content, source_system_id)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (source_system_id, sha256) DO NOTHING
-                RETURNING id
-            """, (uri, content_type, sha256, content.encode("utf-8"), source_system_id))
-            result = cur.fetchone()
-            if result:
-                raw_spec_id = result[0]
-            else:
-                # Conflict occurred, fetch existing
-                cur.execute("""
+            cur.execute(
+                """
                     SELECT id FROM spec_bronze.raw_specs 
                     WHERE source_system_id = %s AND sha256 = %s
-                """, (source_system_id, sha256,))
-                raw_spec_id = cur.fetchone()[0]
+                """,
+                (source_system_id, sha256),
+            )
         else:
-            # SQLite
-            cur.execute("""
-                INSERT OR IGNORE INTO raw_specs 
-                    (uri, content_type, sha256, raw_content, source_system_id)
-                VALUES (?, ?, ?, ?, ?)
-            """, (uri, content_type, sha256, content.encode("utf-8"), source_system_id))
             cur.execute("SELECT id FROM raw_specs WHERE sha256 = ?", (sha256,))
-            raw_spec_id = cur.fetchone()[0]
+        raw_spec_id = cur.fetchone()[0]
         
         conn.commit()
         conn.close()
@@ -194,39 +198,41 @@ def _write_chunk_batch(
 ) -> List[int]:
     """Write a batch of chunks and return their IDs."""
     ids = []
-    
+    insert_builder = InsertDoNothingBuilder(
+        "spec_chunks",
+        ["spec_document_id", "chunk_index", "content"],
+        conflict_columns=["spec_document_id", "chunk_index"],
+        schema=schema,
+    )
+
     for spec_document_id, chunk_index, content in batch:
+        sql, params = insert_builder.render(
+            {
+                "spec_document_id": spec_document_id,
+                "chunk_index": chunk_index,
+                "content": content,
+            }
+        )
+        cur.execute(sql, params)
+
         if engine == "postgres":
-            cur.execute("""
-                INSERT INTO spec_silver.spec_chunks 
-                    (spec_document_id, chunk_index, content)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (spec_document_id, chunk_index) DO NOTHING
-                RETURNING id
-            """, (spec_document_id, chunk_index, content))
-            result = cur.fetchone()
-            if result:
-                ids.append(result[0])
-            else:
-                # Already exists, fetch ID
-                cur.execute("""
+            cur.execute(
+                """
                     SELECT id FROM spec_silver.spec_chunks 
                     WHERE spec_document_id = %s AND chunk_index = %s
-                """, (spec_document_id, chunk_index))
-                ids.append(cur.fetchone()[0])
+                """,
+                (spec_document_id, chunk_index),
+            )
         else:
-            # SQLite
-            cur.execute("""
-                INSERT OR IGNORE INTO spec_chunks 
-                    (spec_document_id, chunk_index, content)
-                VALUES (?, ?, ?)
-            """, (spec_document_id, chunk_index, content))
-            cur.execute("""
-                SELECT id FROM spec_chunks 
-                WHERE spec_document_id = ? AND chunk_index = ?
-            """, (spec_document_id, chunk_index))
-            ids.append(cur.fetchone()[0])
-    
+            cur.execute(
+                """
+                    SELECT id FROM spec_chunks 
+                    WHERE spec_document_id = ? AND chunk_index = ?
+                """,
+                (spec_document_id, chunk_index),
+            )
+        ids.append(cur.fetchone()[0])
+
     return ids
 
 

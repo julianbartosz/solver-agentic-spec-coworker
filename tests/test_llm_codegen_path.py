@@ -9,6 +9,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.llm.client import MockLLMClient

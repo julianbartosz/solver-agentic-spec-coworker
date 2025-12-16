@@ -124,8 +124,8 @@ def test_generate_settings_block_with_url():
     
     assert 'INTEGRATIONS["stripe"]' in block
     assert "https://api.stripe.com" in block
-    assert "timeout_s=30" in block
-    assert "retries=3" in block
+    assert '"timeout_s": 30' in block
+    assert '"retries": 3' in block
 
 
 def test_generate_settings_block_default_url():

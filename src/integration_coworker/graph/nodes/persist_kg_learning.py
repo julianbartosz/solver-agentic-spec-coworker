@@ -20,12 +20,14 @@ V2.1: Uses LangChain OpenAIEmbeddings for automatic LangSmith tracing.
 """
 import json
 import logging
-from typing import Optional, List, Dict, Any
+import re
+from typing import Optional, List, Dict, Any, Tuple
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
 from integration_coworker.config import get_settings
 from integration_coworker.domain.models import KGNodeType, KGEdgeRelation
+from integration_coworker.kg import STANDARD_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,98 @@ def _compute_embedding(text: str) -> Optional[List[float]]:
 
 # Track whether we've logged embedding degradation for this run
 _logged_embedding_warning = False
+
+
+def _detect_pattern_from_workflow(
+    workflow_nodes: List,
+    endpoints: List,
+    task_description: str,
+) -> Tuple[Optional[str], float]:
+    """
+    Detect which STANDARD_PATTERN a workflow most closely matches.
+    
+    Matching is based on:
+    1. HTTP methods of bound endpoints (POST -> create, GET -> list/read, etc.)
+    2. Step types in the workflow (api_call, validation, pagination, etc.)
+    3. Task description keywords
+    
+    Returns:
+        Tuple of (pattern_key, confidence) or (None, 0.0) if no match
+    """
+    if not workflow_nodes:
+        return None, 0.0
+    
+    # Extract HTTP methods from endpoints
+    http_methods = set()
+    for ep in endpoints:
+        if hasattr(ep, 'method') and ep.method:
+            http_methods.add(ep.method.upper())
+    
+    # Extract step types from workflow
+    step_types = [n.node_type for n in workflow_nodes if hasattr(n, 'node_type')]
+    has_validation = "validation" in step_types
+    has_pagination = "pagination" in step_types
+    has_api_call = "api_call" in step_types
+    api_call_count = step_types.count("api_call")
+    
+    # Check endpoint paths for patterns
+    endpoint_paths = [ep.path for ep in endpoints if hasattr(ep, 'path')]
+    has_id_param = any('{' in path and '}' in path for path in endpoint_paths)
+    
+    task_lower = task_description.lower() if task_description else ""
+    
+    best_match = None
+    best_confidence = 0.0
+    
+    for pattern_key, pattern in STANDARD_PATTERNS.items():
+        confidence = 0.0
+        
+        # Check HTTP method match (strong signal)
+        pattern_methods = set(pattern.get("http_methods", []))
+        if pattern_methods and http_methods:
+            method_overlap = len(http_methods & pattern_methods) / len(pattern_methods)
+            confidence += method_overlap * 0.4
+        
+        # Check path pattern match
+        if "path_pattern" in pattern and endpoint_paths:
+            pattern_regex = pattern["path_pattern"]
+            for path in endpoint_paths:
+                if re.match(pattern_regex, path):
+                    confidence += 0.2
+                    break
+        
+        # Check pattern-specific indicators
+        if pattern_key == "crud_create" and "POST" in http_methods and has_validation:
+            confidence += 0.2
+        elif pattern_key == "crud_list" and "GET" in http_methods and has_pagination:
+            confidence += 0.2
+        elif pattern_key == "crud_read" and "GET" in http_methods and has_id_param:
+            confidence += 0.15
+        elif pattern_key == "crud_update" and ("PUT" in http_methods or "PATCH" in http_methods):
+            confidence += 0.2
+        elif pattern_key == "crud_delete" and "DELETE" in http_methods:
+            confidence += 0.2
+        elif pattern_key == "nested_resource" and api_call_count > 1:
+            confidence += 0.15
+        
+        # Check keywords in task description
+        keywords = pattern.get("keywords", [])
+        if not keywords:
+            # Default keywords from pattern key
+            keywords = pattern_key.replace("_", " ").split()
+        for kw in keywords:
+            if kw.lower() in task_lower:
+                confidence += 0.1
+                break
+        
+        if confidence > best_confidence:
+            best_confidence = confidence
+            best_match = pattern_key
+    
+    # Only return a match if confidence is above threshold
+    if best_confidence >= 0.3:
+        return best_match, best_confidence
+    return None, 0.0
 
 
 def _upsert_kg_node(
@@ -242,6 +336,74 @@ def _upsert_workflow_step(
         cur.execute("""
             SELECT id FROM kg_workflow_steps WHERE template_node_id = ? AND step_key = ?
         """, (template_node_id, step_key))
+        return cur.fetchone()[0]
+
+
+def _upsert_step_binding(
+    cur,
+    step_id: int,
+    endpoint_node_id: Optional[int],
+    endpoint_path: Optional[str],
+    endpoint_method: Optional[str],
+    request_mapping: Optional[Dict[str, Any]] = None,
+    response_mapping: Optional[Dict[str, Any]] = None,
+    is_postgres: bool = False,
+) -> int:
+    """
+    Create or update a step→endpoint binding in kg.step_bindings.
+    
+    KG-001 Fix: This function populates the step_bindings table which links
+    workflow steps to their bound endpoints, enabling GraphRAG to recommend
+    specific endpoints for specific workflow steps.
+    
+    Args:
+        cur: Database cursor
+        step_id: ID of the workflow step (from kg.workflow_steps)
+        endpoint_node_id: ID of the endpoint node (from kg.nodes WHERE node_type='endpoint')
+        endpoint_path: The endpoint path (e.g., "/v1/checkout/sessions")
+        endpoint_method: The HTTP method (e.g., "POST")
+        request_mapping: Request parameter mapping dict
+        response_mapping: Response field mapping dict
+        is_postgres: Whether using Postgres or SQLite
+        
+    Returns:
+        The ID of the created/updated step_binding
+    """
+    request_json = json.dumps(request_mapping or {})
+    response_json = json.dumps(response_mapping or {})
+    
+    if is_postgres:
+        cur.execute("""
+            INSERT INTO kg.step_bindings (
+                step_id, endpoint_node_id, endpoint_path, endpoint_method,
+                request_mapping, response_mapping, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (step_id, endpoint_node_id) DO UPDATE SET
+                endpoint_path = EXCLUDED.endpoint_path,
+                endpoint_method = EXCLUDED.endpoint_method,
+                request_mapping = EXCLUDED.request_mapping,
+                response_mapping = EXCLUDED.response_mapping
+            RETURNING id
+        """, (step_id, endpoint_node_id, endpoint_path, endpoint_method, request_json, response_json))
+        row = cur.fetchone()
+        return row['id'] if isinstance(row, dict) else row[0]
+    else:
+        cur.execute("""
+            INSERT INTO kg_step_bindings (
+                step_id, endpoint_node_id, endpoint_path, endpoint_method,
+                request_mapping, response_mapping, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(step_id, endpoint_node_id) DO UPDATE SET
+                endpoint_path = excluded.endpoint_path,
+                endpoint_method = excluded.endpoint_method,
+                request_mapping = excluded.request_mapping,
+                response_mapping = excluded.response_mapping
+        """, (step_id, endpoint_node_id, endpoint_path, endpoint_method, request_json, response_json))
+        cur.execute("""
+            SELECT id FROM kg_step_bindings WHERE step_id = ? AND endpoint_node_id = ?
+        """, (step_id, endpoint_node_id))
         return cur.fetchone()[0]
 
 
@@ -445,8 +607,11 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
             # =====================================================================
             # 4. Create workflow steps in kg.workflow_steps
             # =====================================================================
+            # Store step_key -> step_id mapping for step_bindings creation
+            step_ids_by_key: Dict[str, int] = {}
+            
             for wf_node in state.workflow_nodes:
-                _upsert_workflow_step(
+                step_id = _upsert_workflow_step(
                     cur,
                     template_node_id=template_node_id,
                     step_key=wf_node.node_key,
@@ -457,6 +622,122 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
                     config=wf_node.config,
                     is_postgres=is_postgres,
                 )
+                step_ids_by_key[wf_node.node_key] = step_id
+
+            # =====================================================================
+            # 4.1 KG-001 Fix: Create step_bindings linking steps to endpoints
+            # This enables GraphRAG to recommend specific endpoints for workflow steps
+            # =====================================================================
+            step_bindings_created = 0
+            if state.endpoint_bindings:
+                # Build endpoint lookup by ID for efficient access
+                endpoint_by_id = {ep.id: ep for ep in state.endpoints if ep.id}
+                
+                for binding in state.endpoint_bindings:
+                    # Find the step this binding applies to
+                    step_id = step_ids_by_key.get(binding.flow_node_key)
+                    if not step_id:
+                        logger.debug(f"No step found for binding flow_node_key={binding.flow_node_key}")
+                        continue
+                    
+                    # Get endpoint details
+                    endpoint = endpoint_by_id.get(binding.endpoint_id) if binding.endpoint_id else None
+                    endpoint_path = endpoint.path if endpoint else None
+                    endpoint_method = endpoint.method if endpoint else None
+                    
+                    # Look up the endpoint_node_id from kg.nodes
+                    endpoint_node_id = None
+                    if endpoint and provider_code:
+                        endpoint_key = f"endpoint.{provider_code}.{endpoint_method}.{endpoint_path}"
+                        if is_postgres:
+                            cur.execute(
+                                "SELECT id FROM kg.nodes WHERE key = %s AND node_type = %s",
+                                (endpoint_key, KGNodeType.ENDPOINT.value)
+                            )
+                        else:
+                            cur.execute(
+                                "SELECT id FROM kg_nodes WHERE key = ? AND node_type = ?",
+                                (endpoint_key, KGNodeType.ENDPOINT.value)
+                            )
+                        row = cur.fetchone()
+                        endpoint_node_id = row[0] if row else None
+                    
+                    # Create the step_binding (even if endpoint_node_id is None for future linking)
+                    if endpoint_path or endpoint_method or endpoint_node_id:
+                        try:
+                            _upsert_step_binding(
+                                cur,
+                                step_id=step_id,
+                                endpoint_node_id=endpoint_node_id,
+                                endpoint_path=endpoint_path,
+                                endpoint_method=endpoint_method,
+                                request_mapping=binding.request_mapping,
+                                response_mapping=binding.response_mapping,
+                                is_postgres=is_postgres,
+                            )
+                            step_bindings_created += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to create step_binding for step={binding.flow_node_key}: {e}")
+                
+                if step_bindings_created > 0:
+                    logger.debug(f"Created {step_bindings_created} step_bindings for template {template_key}")
+
+            # =====================================================================
+            # 4.5 Bug #62 Fix: Create pattern nodes and link templates to patterns
+            # This enables cross-provider pattern matching via KG queries
+            # =====================================================================
+            # Only consider endpoints that are actually bound to this workflow
+            bound_endpoint_ids = {b.endpoint_id for b in (state.endpoint_bindings or []) if b.endpoint_id}
+            bound_endpoints = [ep for ep in state.endpoints if ep.id in bound_endpoint_ids]
+            # Fallback: if no bindings, use all endpoints (shouldn't happen normally)
+            if not bound_endpoints:
+                bound_endpoints = state.endpoints[:5]  # Limit to avoid confusion
+            
+            pattern_key, pattern_confidence = _detect_pattern_from_workflow(
+                state.workflow_nodes,
+                bound_endpoints,
+                task_description,
+            )
+            
+            if pattern_key and pattern_key in STANDARD_PATTERNS:
+                pattern = STANDARD_PATTERNS[pattern_key]
+                pattern_node_key = f"pattern.{pattern_key}"
+                
+                # Create/upsert the pattern node (provider-agnostic, so provider_code=None)
+                pattern_node_id = _upsert_kg_node(
+                    cur,
+                    node_type=KGNodeType.PATTERN.value,
+                    key=pattern_node_key,
+                    name=pattern["name"],
+                    provider_code=None,  # Patterns are provider-agnostic
+                    description=pattern["description"],
+                    properties={
+                        "pattern_key": pattern_key,
+                        "http_methods": pattern.get("http_methods", []),
+                        "steps": pattern.get("steps", []),
+                        "path_pattern": pattern.get("path_pattern"),
+                        "keywords": pattern.get("keywords", []),
+                    },
+                    run_id=run_id,
+                    is_postgres=is_postgres,
+                )
+                
+                # Edge: template → pattern (template implements this pattern)
+                _upsert_kg_edge(
+                    cur,
+                    src_node_id=template_node_id,
+                    dst_node_id=pattern_node_id,
+                    relation_type=KGEdgeRelation.IMPLEMENTS_PATTERN.value,
+                    properties={"confidence": pattern_confidence},
+                    run_id=run_id,
+                    is_postgres=is_postgres,
+                )
+                
+                # Also update template properties to include pattern_key for quick access
+                template_props["pattern_key"] = pattern_key
+                template_props["pattern_confidence"] = pattern_confidence
+                
+                logger.debug(f"Linked template to pattern: {pattern_key} (confidence={pattern_confidence:.2f})")
 
         # =====================================================================
         # 5. Create entity nodes and edges
@@ -599,6 +880,35 @@ def persist_kg_learning(state: WorkflowState) -> WorkflowState:
         })
 
         logger.info(f"KG learning complete: {len(entity_node_ids)} entities, {len(endpoint_node_ids)} endpoints, template={template_node_id}")
+
+        # =====================================================================
+        # 8. PL-001: Capture run events for pattern discovery
+        # =====================================================================
+        try:
+            from integration_coworker.kg.pattern_discovery import (
+                capture_run_events,
+                check_and_promote_candidates,
+            )
+            
+            events_captured = capture_run_events(
+                run_id=run_id,
+                workflow_nodes=state.workflow_nodes,
+                provider_code=provider_code,
+                endpoints=state.endpoints,
+            )
+            
+            if events_captured > 0:
+                state.persisted_ids["kg_events_captured"] = events_captured
+                
+                # Check if any candidates should be promoted
+                promoted = check_and_promote_candidates()
+                if promoted:
+                    state.persisted_ids["kg_patterns_promoted"] = promoted
+                    logger.info(f"Auto-promoted {len(promoted)} pattern(s): {promoted}")
+                    
+        except Exception as e:
+            # Pattern learning failure is non-critical
+            logger.warning(f"Pattern event capture failed (non-critical): {e}")
 
         state.completed_steps.append("persist_kg_learning")
 

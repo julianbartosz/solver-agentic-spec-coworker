@@ -8,7 +8,6 @@ from integration_coworker.repo.models import (
     RepoSnapshot,
     RepoChangeSet,
     FileChange,
-    MockFile,
     DetectedProfile,
     FrameworkArchetype,
 )
@@ -44,7 +43,6 @@ __all__ = [
     "RepoSnapshot",
     "RepoChangeSet",
     "FileChange",
-    "MockFile",
     "DetectedProfile",
     "FrameworkArchetype",
     # Detection (M6 two-layer pipeline)

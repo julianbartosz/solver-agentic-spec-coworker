@@ -7,6 +7,7 @@ and validates state changes.
 
 Uses USE_SQLITE=true and USE_MOCK_LLM=true for fast, deterministic tests.
 """
+import asyncio
 import os
 import pytest
 from pathlib import Path
@@ -627,6 +628,27 @@ class TestTimedNodeDecorator:
         
         assert my_custom_node.__name__ == "my_custom_node"
         assert "Custom node docstring" in my_custom_node.__doc__
+
+    def test_timed_node_awaits_nested_coroutines(self):
+        """Ensure timed_node handles async nodes that return awaitables."""
+        from integration_coworker.graph.runtime import timed_node
+
+        @timed_node
+        async def async_node(state: WorkflowState) -> WorkflowState:
+            async def inner():
+                return state
+
+            return inner()
+
+        state = WorkflowState(
+            source_refs=[],
+            spec_refs=["test.yaml"],
+            task_description="Test task",
+        )
+
+        new_state = asyncio.run(async_node(state))
+
+        assert isinstance(new_state, WorkflowState)
 
 
 # ============================================================================

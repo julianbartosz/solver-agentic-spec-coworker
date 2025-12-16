@@ -173,17 +173,23 @@ def persist_gold_checkpoint(state: WorkflowState) -> WorkflowState:
                 target_ops = state.integration_task.constraints.get("extra", {}).get("target_operations", [])
                 if target_ops:
                     op = target_ops[0]
-                    operation_id = op.get("operation_id")
-                    if operation_id and operation_id in endpoint_ids_by_key:
-                        endpoint_id = endpoint_ids_by_key[operation_id]
-                    else:
-                        method = op.get("method")
-                        path = op.get("path")
-                        for key, ep_id in endpoint_ids_by_key.items():
-                            if isinstance(key, tuple) and len(key) == 3:
-                                if key[0] == method and key[1] == path:
-                                    endpoint_id = ep_id
-                                    break
+                    # Handle case where op is a string instead of dict (Bug #16 fix)
+                    if isinstance(op, str):
+                        # Try to find matching endpoint by operation_id or path
+                        if op in endpoint_ids_by_key:
+                            endpoint_id = endpoint_ids_by_key[op]
+                    elif isinstance(op, dict):
+                        operation_id = op.get("operation_id")
+                        if operation_id and operation_id in endpoint_ids_by_key:
+                            endpoint_id = endpoint_ids_by_key[operation_id]
+                        else:
+                            method = op.get("method")
+                            path = op.get("path")
+                            for key, ep_id in endpoint_ids_by_key.items():
+                                if isinstance(key, tuple) and len(key) == 3:
+                                    if key[0] == method and key[1] == path:
+                                        endpoint_id = ep_id
+                                        break
 
             # Fall back to first endpoint if still not resolved
             if not endpoint_id and endpoint_ids_by_key:
@@ -228,14 +234,15 @@ def persist_gold_checkpoint(state: WorkflowState) -> WorkflowState:
                 policy.task_id = task_id
 
         # 7. Insert CodeArtifacts
+        # Bug #53 fix: Include module_name in the INSERT columns
         for artifact in state.code_artifacts:
             sql = upsert_ignore(
                 "code_artifacts",
-                ["task_id", "artifact_type", "rel_path", "language", "content"],
+                ["task_id", "artifact_type", "rel_path", "language", "module_name", "content"],
                 ["task_id", "rel_path", "artifact_type"],
                 schema
             )
-            cur.execute(sql, (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.content))
+            cur.execute(sql, (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.module_name, artifact.content))
 
             sql = select_by_columns("code_artifacts", ["id"], ["task_id", "rel_path", "artifact_type"], schema)
             cur.execute(sql, (task_id, artifact.rel_path, artifact.artifact_type))

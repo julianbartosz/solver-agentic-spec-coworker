@@ -32,6 +32,10 @@ from integration_coworker.persistence import db
 from integration_coworker.persistence.sql_helpers import (
     upsert_ignore, select_by_columns, get_engine_type
 )
+from integration_coworker.graph.nodes.build_silver_file_model import (
+    _persist_file_specs,
+    _persist_to_kg,
+)
 from integration_coworker.config import is_streaming_persistence_enabled
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,8 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
                 "endpoints": len(state.endpoints),
                 "schemas": len(state.schemas),
                 "entities": len(state.entities),
+                "file_specs": len(state.file_specs),
+                "file_fields": len(state.file_fields),
                 "spec_chunks": len(state.spec_chunk_embeddings),
             },
         })
@@ -243,7 +249,22 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             event_id = cur.fetchone()[0]
             event.id = event_id
 
-        # 11. Insert SpecChunks with embeddings
+        # 11. Insert File Specs and Fields (Silver file model)
+        if state.file_specs:
+            for spec in state.file_specs:
+                if getattr(spec, "source_system_id", None) is None:
+                    spec.source_system_id = source_system_id
+            try:
+                _persist_file_specs(state, state.file_specs, state.file_fields)
+            except Exception as e:
+                logger.error(f"Failed to persist file specs: {e}", exc_info=True)
+                raise
+            try:
+                _persist_to_kg(state, state.file_specs, state.file_fields, state.parsed_specs)
+            except Exception as e:
+                logger.warning(f"KG persistence failed (non-blocking): {e}")
+
+        # 12. Insert SpecChunks with embeddings
         # V3 Streaming Mode: Skip if chunks were already streamed by ingest_spec
         if chunks_already_streamed:
             logger.info(f"Skipping chunk persistence - already streamed ({state.chunk_count} chunks)")
@@ -303,6 +324,8 @@ def persist_silver_checkpoint(state: WorkflowState) -> WorkflowState:
             "endpoint_count": len(state.endpoints),
             "schema_count": len(state.schemas),
             "entity_count": len(state.entities),
+            "file_spec_count": len(state.file_specs),
+            "file_field_count": len(state.file_fields),
             "spec_chunk_count": chunk_count,
             "embedding_count": embedding_count,
             "streaming_mode": chunks_already_streamed,

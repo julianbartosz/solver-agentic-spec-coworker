@@ -1,38 +1,215 @@
+import asyncio
 import functools
+import inspect
 import logging
 import os
 import time
-from typing import Dict, Optional, Callable, List
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from typing import Dict, Optional, Callable, List, Union
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from integration_coworker.graph.state import WorkflowState
-from integration_coworker.graph.nodes import (
-    plan_run,
-    ingest_spec,
-    detect_and_parse_spec,
-    build_silver_api_model,
-    embed_spec_chunks,
-    understand_task,
-    align_task_with_kg,
-    plan_integration_flow,
-    attach_policies_and_patterns,
-    attach_repo_context,
-    generate_code_and_tests,
-    analyze_repo_layout,
-    apply_repo_integration_changes,
-    validate_integration_design,
-    persist_results,
-    build_report,
-    handle_error,
+from integration_coworker.graph.state_v2 import (
+    WorkflowStateDict,
+    dataclass_to_dict,
+    dict_to_dataclass,
 )
-from integration_coworker.graph.nodes import (
-    persist_silver_checkpoint,
-    persist_gold_checkpoint,
-    persist_run_outcome,
-    persist_kg_learning,
-)
+
+# NOTE: Don't import via `from integration_coworker.graph.nodes import (...)`.
+# The `graph/nodes/` directory is currently a namespace package (no __init__.py).
+# Importing `integration_coworker.graph.nodes` can resolve to an empty namespace
+# module depending on environment/tooling, which breaks node resolution.
+# Import node modules explicitly instead.
+from integration_coworker.graph.nodes import plan_run
+from integration_coworker.graph.nodes import ingest_spec
+from integration_coworker.graph.nodes import detect_and_parse_spec
+from integration_coworker.graph.nodes import build_silver_api_model
+from integration_coworker.graph.nodes import build_silver_file_model
+from integration_coworker.graph.nodes import embed_spec_chunks
+from integration_coworker.graph.nodes import understand_task
+from integration_coworker.graph.nodes import align_task_with_kg
+from integration_coworker.graph.nodes import plan_integration_flow
+from integration_coworker.graph.nodes import attach_policies_and_patterns
+from integration_coworker.graph.nodes import attach_repo_context
+from integration_coworker.graph.nodes import generate_code_and_tests
+from integration_coworker.graph.nodes import analyze_repo_layout
+from integration_coworker.graph.nodes import apply_repo_integration_changes
+from integration_coworker.graph.nodes import validate_integration_design
+from integration_coworker.graph.nodes import persist_results
+from integration_coworker.graph.nodes import build_report
+from integration_coworker.graph.nodes import handle_error
+from integration_coworker.graph.nodes import persist_silver_checkpoint
+from integration_coworker.graph.nodes import persist_gold_checkpoint
+from integration_coworker.graph.nodes import persist_run_outcome
+from integration_coworker.graph.nodes import persist_kg_learning
 from integration_coworker.llm.client import set_run_context, clear_run_context
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LangGraph Native Checkpointing (Bug #61 Fix - Solution B)
+# =============================================================================
+# Uses LangGraph's built-in checkpointer for native resume support.
+# PostgresSaver for Postgres, SqliteSaver for SQLite fallback.
+# =============================================================================
+
+_checkpointer_instance: Optional[BaseCheckpointSaver] = None
+_checkpointer_connection = None  # Keep connection alive or hold async aexit
+
+# Async SQLite saver objects (and their internal locks) are bound to the event
+# loop they were created in. Pytest creates/destroys event loops across tests,
+# so we must not reuse a cached AsyncSqliteSaver across loops.
+_sqlite_checkpointer_cache_enabled = False
+
+
+def _default_db_url() -> str:
+    return os.getenv(
+        "DATABASE_URL",
+        "postgresql://integration:integration@localhost:5432/integration_coworker",
+    )
+
+
+def _sqlite_checkpoint_path() -> str:
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "langgraph_checkpoints.db")
+
+
+@contextmanager
+def checkpointer_context() -> BaseCheckpointSaver:
+    """Sync checkpointer context that always yields a saver instance."""
+    from integration_coworker.persistence.db import get_engine_type
+
+    engine = get_engine_type()
+    if engine == "postgres":
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        with PostgresSaver.from_conn_string(_default_db_url()) as saver:
+            saver.setup()
+            yield saver
+        return
+
+    # SQLite sync saver
+    import sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    sqlite_path = _sqlite_checkpoint_path()
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        saver = SqliteSaver(conn)
+        saver.setup()
+        yield saver
+    finally:
+        conn.close()
+
+
+@asynccontextmanager
+async def async_checkpointer_context() -> BaseCheckpointSaver:
+    """Async checkpointer context that yields a saver instance (not a context manager)."""
+    from integration_coworker.persistence.db import get_engine_type
+
+    engine = get_engine_type()
+    if engine == "postgres":
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        async with AsyncPostgresSaver.from_conn_string(_default_db_url()) as saver:
+            await saver.setup()
+            yield saver
+        return
+
+    # SQLite async saver
+    import aiosqlite  # noqa: WPS433
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    sqlite_path = _sqlite_checkpoint_path()
+    conn = await aiosqlite.connect(sqlite_path)
+    try:
+        saver = AsyncSqliteSaver(conn)
+        await saver.setup()
+        yield saver
+    finally:
+        await conn.close()
+
+
+async def get_checkpointer() -> BaseCheckpointSaver:
+    """
+    Get or create a LangGraph checkpointer based on configured DB engine.
+    
+    Returns:
+        A checkpointer instance or context manager depending on backend.
+        
+    Note:
+        V3.0: Returns async context manager for AsyncPostgresSaver.
+        The caller must use 'async with' to get the actual checkpointer.
+    """
+    global _checkpointer_instance, _checkpointer_connection
+
+    if _checkpointer_instance is not None:
+        return _checkpointer_instance
+
+    from integration_coworker.persistence.db import get_engine_type
+    engine = get_engine_type()
+
+    if engine == "postgres":
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            cm = AsyncPostgresSaver.from_conn_string(_default_db_url())
+            saver = await cm.__aenter__()
+            await saver.setup()
+            _checkpointer_instance = saver
+            _checkpointer_connection = cm  # store context manager for cleanup
+            logger.info("Initialized AsyncPostgresSaver for LangGraph checkpointing")
+            return saver
+        except ImportError as e:
+            logger.warning(f"langgraph-checkpoint-postgres not installed: {e}, falling back to SQLite")
+        except Exception as e:
+            logger.warning(f"Failed to initialize AsyncPostgresSaver: {e}, falling back to SQLite")
+
+    try:
+        import aiosqlite  # noqa: F401
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "SQLite async checkpointing requires 'aiosqlite' and an async-capable LangGraph saver. "
+            "Install aiosqlite or configure Postgres checkpointing."
+        ) from e
+
+    sqlite_path = _sqlite_checkpoint_path()
+
+    if not _sqlite_checkpointer_cache_enabled:
+        conn = await aiosqlite.connect(sqlite_path)
+        saver = AsyncSqliteSaver(conn)
+        await saver.setup()
+        logger.info(f"Initialized AsyncSqliteSaver (non-cached) at {sqlite_path} for LangGraph checkpointing")
+        return saver
+
+    _checkpointer_connection = await aiosqlite.connect(sqlite_path)
+    _checkpointer_instance = AsyncSqliteSaver(_checkpointer_connection)
+    await _checkpointer_instance.setup()
+
+    logger.info(f"Initialized AsyncSqliteSaver (cached) at {sqlite_path} for LangGraph checkpointing")
+    return _checkpointer_instance
+
+
+def reset_checkpointer() -> None:
+    """Reset the checkpointer singleton (useful for testing)."""
+    global _checkpointer_instance, _checkpointer_connection
+    if _checkpointer_connection is not None:
+        try:
+            # If it's an async context manager from postgres saver
+            aexit = getattr(_checkpointer_connection, "__aexit__", None)
+            if aexit:
+                asyncio.get_event_loop().create_task(aexit(None, None, None))
+            else:
+                close = getattr(_checkpointer_connection, "close", None)
+                if close is not None:
+                    close()
+        except Exception:
+            pass
+    _checkpointer_instance = None
+    _checkpointer_connection = None
 
 
 # =============================================================================
@@ -190,7 +367,8 @@ NODE_DEPENDENCIES: Dict[str, List[str]] = {
     "ingest_spec": ["plan_run"],
     "detect_and_parse_spec": ["ingest_spec"],
     "build_silver_api_model": ["detect_and_parse_spec"],
-    "embed_spec_chunks": ["build_silver_api_model"],
+    "build_silver_file_model": ["build_silver_api_model"],
+    "embed_spec_chunks": ["build_silver_file_model"],
     "persist_silver_checkpoint": ["embed_spec_chunks"],
     
     # Phase 2: Task understanding (depends on Silver model)
@@ -309,6 +487,9 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None, enable_c
     Per V2 Implementation Plan Section 3.5, also saves checkpoints after
     successful node execution to enable recovery.
     
+    Bug #61 Fix: Nodes now check completed_steps to skip execution during resume.
+    If a node is already in state.completed_steps, it returns state unchanged.
+    
     Args:
         fn: The node function to wrap
         metadata: Optional override metadata dict with 'category' and 'responsibility'
@@ -323,6 +504,12 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None, enable_c
 
     # Check if LangSmith tracing is enabled
     tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"
+    
+    def _should_skip_node(state: WorkflowState) -> bool:
+        """Check if this node should be skipped (already completed during resume)."""
+        if hasattr(state, 'completed_steps') and state.completed_steps:
+            return node_name in state.completed_steps
+        return False
     
     def _save_checkpoint_if_enabled(result: WorkflowState):
         """Save checkpoint after node execution if enabled and run_id exists.
@@ -347,67 +534,160 @@ def timed_node(fn: Callable, metadata: Optional[Dict[str, str]] = None, enable_c
                 # Log but don't fail the workflow
                 logger.warning(f"Failed to save checkpoint for {node_name}: {e}")
 
+    # Check if the function is async
+    is_async = asyncio.iscoroutinefunction(fn)
+
     if tracing_enabled:
         try:
             from langsmith import traceable
 
-            @traceable(
-                name=node_name,
-                run_type="chain",
-                metadata={
-                    "node_type": node_meta.get("category", "unknown"),
-                    "responsibility": node_meta.get("responsibility", ""),
-                },
-                tags=[
-                    f"node_type:{node_meta.get('category', 'unknown')}",
-                    "non-llm-node",
-                ],
-            )
-            @functools.wraps(fn)
-            def traced_wrapper(state: WorkflowState, *args, **kwargs):
-                start = time.perf_counter()
-                result = fn(state, *args, **kwargs)
-                duration_ms = (time.perf_counter() - start) * 1000
-
-                # Record into result state's timings dict
-                if hasattr(result, 'node_timings'):
-                    result.node_timings[node_name] = duration_ms
-
-                # Log for visibility
-                logger.debug(
-                    f"Node {node_name} completed in {duration_ms:.2f}ms "
-                    f"[{node_meta.get('category', 'unknown')}]"
+            if is_async:
+                @traceable(
+                    name=node_name,
+                    run_type="chain",
+                    metadata={
+                        "node_type": node_meta.get("category", "unknown"),
+                        "responsibility": node_meta.get("responsibility", ""),
+                    },
+                    tags=[
+                        f"node_type:{node_meta.get('category', 'unknown')}",
+                        "non-llm-node",
+                    ],
                 )
-                
-                # Save checkpoint after successful execution
-                _save_checkpoint_if_enabled(result)
+                @functools.wraps(fn)
+                async def traced_async_wrapper(state: WorkflowState, *args, **kwargs):
+                    # Bug #61 Fix: Skip if node already completed during resume
+                    if _should_skip_node(state):
+                        logger.debug(f"Skipping {node_name} - already completed during previous run")
+                        return state
+                    
+                    # Filter out 'config' that LangGraph may pass
+                    kwargs.pop('config', None)
+                    
+                    start = time.perf_counter()
+                    result = await fn(state)  # Node functions only take state
+                    if inspect.isawaitable(result):
+                        result = await result
+                    duration_ms = (time.perf_counter() - start) * 1000
 
-                return result
+                    # Record into result state's timings dict
+                    if hasattr(result, 'node_timings'):
+                        result.node_timings[node_name] = duration_ms
 
-            return traced_wrapper
+                    # Log for visibility
+                    logger.debug(
+                        f"Node {node_name} completed in {duration_ms:.2f}ms "
+                        f"[{node_meta.get('category', 'unknown')}]"
+                    )
+                    
+                    # Save checkpoint after successful execution
+                    _save_checkpoint_if_enabled(result)
+
+                    return result
+
+                return traced_async_wrapper
+            else:
+                @traceable(
+                    name=node_name,
+                    run_type="chain",
+                    metadata={
+                        "node_type": node_meta.get("category", "unknown"),
+                        "responsibility": node_meta.get("responsibility", ""),
+                    },
+                    tags=[
+                        f"node_type:{node_meta.get('category', 'unknown')}",
+                        "non-llm-node",
+                    ],
+                )
+                @functools.wraps(fn)
+                def traced_wrapper(state: WorkflowState, *args, **kwargs):
+                    # Bug #61 Fix: Skip if node already completed during resume
+                    if _should_skip_node(state):
+                        logger.debug(f"Skipping {node_name} - already completed during previous run")
+                        return state
+                    
+                    # Filter out 'config' that LangGraph may pass
+                    kwargs.pop('config', None)
+                    
+                    start = time.perf_counter()
+                    result = fn(state)  # Node functions only take state
+                    duration_ms = (time.perf_counter() - start) * 1000
+
+                    # Record into result state's timings dict
+                    if hasattr(result, 'node_timings'):
+                        result.node_timings[node_name] = duration_ms
+
+                    # Log for visibility
+                    logger.debug(
+                        f"Node {node_name} completed in {duration_ms:.2f}ms "
+                        f"[{node_meta.get('category', 'unknown')}]"
+                    )
+                    
+                    # Save checkpoint after successful execution
+                    _save_checkpoint_if_enabled(result)
+
+                    return result
+
+                return traced_wrapper
 
         except ImportError:
             logger.debug("langsmith not available, using basic timing wrapper")
 
     # Fallback: basic timing without LangSmith traceable
-    @functools.wraps(fn)
-    def wrapper(state: WorkflowState, *args, **kwargs):
-        start = time.perf_counter()
-        result = fn(state, *args, **kwargs)
-        duration_ms = (time.perf_counter() - start) * 1000
+    if is_async:
+        @functools.wraps(fn)
+        async def async_wrapper(state: WorkflowState, *args, **kwargs):
+            # Bug #61 Fix: Skip if node already completed during resume
+            if _should_skip_node(state):
+                logger.debug(f"Skipping {node_name} - already completed during previous run")
+                return state
+            
+            # Filter out 'config' that LangGraph may pass
+            kwargs.pop('config', None)
+            
+            start = time.perf_counter()
+            result = await fn(state)  # Node functions only take state
+            if inspect.isawaitable(result):
+                result = await result
+            duration_ms = (time.perf_counter() - start) * 1000
 
-        # Record into result state's timings dict
-        if hasattr(result, 'node_timings'):
-            result.node_timings[node_name] = duration_ms
-        
-        # Save checkpoint after successful execution
-        _save_checkpoint_if_enabled(result)
+            # Record into result state's timings dict
+            if hasattr(result, 'node_timings'):
+                result.node_timings[node_name] = duration_ms
+            
+            # Save checkpoint after successful execution
+            _save_checkpoint_if_enabled(result)
 
-        return result
+            return result
 
-    return wrapper
+        return async_wrapper
+    else:
+        @functools.wraps(fn)
+        def wrapper(state: WorkflowState, *args, **kwargs):
+            # Bug #61 Fix: Skip if node already completed during resume
+            if _should_skip_node(state):
+                logger.debug(f"Skipping {node_name} - already completed during previous run")
+                return state
+            
+            # Filter out 'config' that LangGraph may pass
+            kwargs.pop('config', None)
+            
+            start = time.perf_counter()
+            result = fn(state)  # Node functions only take state
+            duration_ms = (time.perf_counter() - start) * 1000
 
-def build_graph():
+            # Record into result state's timings dict
+            if hasattr(result, 'node_timings'):
+                result.node_timings[node_name] = duration_ms
+            
+            # Save checkpoint after successful execution
+            _save_checkpoint_if_enabled(result)
+
+            return result
+
+        return wrapper
+
+def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     """
     Build the LangGraph workflow.
     
@@ -418,6 +698,10 @@ def build_graph():
     
     Non-LLM nodes are wrapped with timed_node() to record execution time
     in state.node_timings for observability (since LangSmith may show "0.00s").
+    
+    Args:
+        checkpointer: Optional LangGraph checkpointer for native resume support.
+                      If provided, enables automatic state persistence after each node.
     """
     workflow = StateGraph(WorkflowState)
 
@@ -427,6 +711,7 @@ def build_graph():
     workflow.add_node("ingest_spec", timed_node(ingest_spec.ingest_spec))
     workflow.add_node("detect_and_parse_spec", timed_node(detect_and_parse_spec.detect_and_parse_spec))
     workflow.add_node("build_silver_api_model", timed_node(build_silver_api_model.build_silver_api_model))
+    workflow.add_node("build_silver_file_model", timed_node(build_silver_file_model.build_silver_file_model))  # File Integration V1
     workflow.add_node("embed_spec_chunks", embed_spec_chunks.embed_spec_chunks)  # Has API call, no wrapper needed
 
     # Silver checkpoint - per design doc Section 5.4
@@ -450,7 +735,8 @@ def build_graph():
     # Legacy persist_results kept for backward compatibility (delegates to checkpoints if needed)
     workflow.add_node("persist_results", timed_node(persist_results.persist_results))
 
-    workflow.add_node("build_report", build_report.build_report)  # Has LLM call for summary
+    # build_report is async; wrap so it is awaited and we record timings consistently.
+    workflow.add_node("build_report", timed_node(build_report.build_report))  # Has LLM call for summary
 
     # Run outcome checkpoint - per design doc Section 5.4
     workflow.add_node("persist_run_outcome", timed_node(persist_run_outcome.persist_run_outcome))
@@ -462,7 +748,8 @@ def build_graph():
     workflow.add_edge("plan_run", "ingest_spec")
     workflow.add_edge("ingest_spec", "detect_and_parse_spec")
     workflow.add_edge("detect_and_parse_spec", "build_silver_api_model")
-    workflow.add_edge("build_silver_api_model", "embed_spec_chunks")
+    workflow.add_edge("build_silver_api_model", "build_silver_file_model")  # File Integration V1: process files after APIs
+    workflow.add_edge("build_silver_file_model", "embed_spec_chunks")
 
     # Silver checkpoint after embedding (per design doc Section 5.4)
     workflow.add_edge("embed_spec_chunks", "persist_silver_checkpoint")
@@ -526,9 +813,212 @@ def build_graph():
     workflow.add_edge("build_report", "persist_run_outcome")
     workflow.add_edge("persist_run_outcome", END)
 
-    return workflow.compile()
+    # Compile with optional checkpointer for native resume support
+    return workflow.compile(checkpointer=checkpointer)
 
-def run_workflow(state: WorkflowState) -> WorkflowState:
+
+def build_parallel_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
+    """
+    Build the LangGraph workflow with parallel execution support (Plan 8).
+    
+    When PARALLEL_WORKFLOW=true, this graph runs embed_spec_chunks and
+    understand_task in parallel after build_silver_api_model.
+    
+    Parallel execution flow:
+        build_silver_api_model
+               |
+         [parallel split]
+             /   \\
+      embed_spec_chunks   understand_task
+             \\   /
+        [sync_embed_task]
+               |
+        persist_silver_checkpoint
+               |
+          align_task_with_kg
+               |
+             ...
+    
+    V2 Parallel Fix:
+    Uses TypedDict (WorkflowStateDict) with Annotated reducers to enable
+    LangGraph's native parallel merge. Each field has a reducer that tells
+    LangGraph how to combine values from parallel branches:
+    - `last_non_none`: Takes most recent non-None value (for scalars)
+    - `unique_list`: Combines lists without duplicates (for completed_steps)
+    - `merge_dicts`: Merges dicts (for plan, node_timings)
+    - `operator.add`: Concatenates lists (for embeddings)
+    
+    Node functions still use WorkflowState dataclass internally - we wrap them
+    to convert dict <-> dataclass at boundaries.
+    
+    Args:
+        checkpointer: Optional LangGraph checkpointer for resume support
+        
+    Returns:
+        Compiled LangGraph application with parallel execution
+    """
+    from integration_coworker.graph.parallel import sync_embed_task
+    
+    # Use TypedDict state for parallel graph (has Annotated reducers)
+    workflow = StateGraph(WorkflowStateDict)
+    
+    # Wrapper to convert dict state -> dataclass for node execution -> dict result
+    # Also filters out 'config' kwarg that LangGraph may pass
+    def wrap_node_for_dict(node_fn: Callable) -> Callable:
+        """Wrap a dataclass-based node to work with dict state."""
+        @functools.wraps(node_fn)
+        async def async_wrapper(state_dict: WorkflowStateDict, **kwargs) -> WorkflowStateDict:
+            # LangGraph may pass 'config', filter it out for node functions
+            # (timed_node wrapper also filters, but direct-wrapped nodes need this)
+            kwargs.pop('config', None)
+            # Convert dict to dataclass (handle if already a dataclass)
+            if isinstance(state_dict, WorkflowState):
+                state = state_dict
+            else:
+                state = dict_to_dataclass(state_dict)
+            # Call the node (may be async) - pass remaining kwargs to support wrappers
+            result = await node_fn(state, **kwargs)
+            # Convert back to dict
+            if isinstance(result, dict):
+                return result
+            return dataclass_to_dict(result)
+        
+        @functools.wraps(node_fn)
+        def sync_wrapper(state_dict: WorkflowStateDict, **kwargs) -> WorkflowStateDict:
+            # LangGraph may pass 'config', filter it out for node functions
+            kwargs.pop('config', None)
+            # Convert dict to dataclass (handle if already a dataclass)
+            if isinstance(state_dict, WorkflowState):
+                state = state_dict
+            else:
+                state = dict_to_dataclass(state_dict)
+            # Call the node - pass remaining kwargs to support wrappers
+            result = node_fn(state, **kwargs)
+            # Convert back to dict
+            if isinstance(result, dict):
+                return result
+            return dataclass_to_dict(result)
+        
+        # Choose wrapper based on whether node is async
+        if inspect.iscoroutinefunction(node_fn):
+            return async_wrapper
+        return sync_wrapper
+    
+    # Timed wrapper that also handles dict conversion
+    def timed_dict_node(node_fn: Callable) -> Callable:
+        """Timed wrapper for dict-based state."""
+        return wrap_node_for_dict(timed_node(node_fn))
+
+    # Add nodes - wrapped for dict state
+    workflow.add_node("plan_run", timed_dict_node(plan_run.plan_run))
+    workflow.add_node("ingest_spec", timed_dict_node(ingest_spec.ingest_spec))
+    workflow.add_node("detect_and_parse_spec", timed_dict_node(detect_and_parse_spec.detect_and_parse_spec))
+    workflow.add_node("build_silver_api_model", timed_dict_node(build_silver_api_model.build_silver_api_model))
+    workflow.add_node("build_silver_file_model", timed_dict_node(build_silver_file_model.build_silver_file_model))
+    
+    # Parallel branch nodes - wrapped for dict state
+    workflow.add_node("embed_spec_chunks", wrap_node_for_dict(embed_spec_chunks.embed_spec_chunks))
+    workflow.add_node("understand_task", wrap_node_for_dict(understand_task.understand_task))
+    
+    # Sync node - wrapped for dict state
+    workflow.add_node("sync_embed_task", wrap_node_for_dict(timed_node(sync_embed_task)))
+    
+    # Silver checkpoint after sync
+    workflow.add_node("persist_silver_checkpoint", timed_dict_node(persist_silver_checkpoint.persist_silver_checkpoint))
+
+    # Rest of the nodes - wrapped for dict state
+    workflow.add_node("align_task_with_kg", timed_dict_node(align_task_with_kg.align_task_with_kg))
+    workflow.add_node("plan_integration_flow", wrap_node_for_dict(plan_integration_flow.plan_integration_flow))
+    workflow.add_node("attach_policies_and_patterns", timed_dict_node(attach_policies_and_patterns.attach_policies_and_patterns))
+    workflow.add_node("attach_repo_context", timed_dict_node(attach_repo_context.attach_repo_context))
+    workflow.add_node("generate_code_and_tests", wrap_node_for_dict(generate_code_and_tests.generate_code_and_tests))
+    workflow.add_node("persist_gold_checkpoint", timed_dict_node(persist_gold_checkpoint.persist_gold_checkpoint))
+    workflow.add_node("analyze_repo_layout", timed_dict_node(analyze_repo_layout.analyze_repo_layout))
+    workflow.add_node("apply_repo_integration_changes", timed_dict_node(apply_repo_integration_changes.apply_repo_integration_changes))
+    workflow.add_node("validate_integration_design", timed_dict_node(validate_integration_design.validate_integration_design))
+    workflow.add_node("persist_results", timed_dict_node(persist_results.persist_results))
+    workflow.add_node("build_report", timed_dict_node(build_report.build_report))
+    workflow.add_node("persist_run_outcome", timed_dict_node(persist_run_outcome.persist_run_outcome))
+    workflow.add_node("handle_error", timed_dict_node(handle_error.handle_error))
+    workflow.add_node("persist_kg_learning", timed_dict_node(persist_kg_learning.persist_kg_learning))
+
+    # Define edges - sequential until build_silver_api_model
+    workflow.set_entry_point("plan_run")
+    workflow.add_edge("plan_run", "ingest_spec")
+    workflow.add_edge("ingest_spec", "detect_and_parse_spec")
+    workflow.add_edge("detect_and_parse_spec", "build_silver_api_model")
+    workflow.add_edge("build_silver_api_model", "build_silver_file_model")
+    
+    # PARALLEL BRANCHES: build_silver_file_model fans out to both nodes
+    # LangGraph will execute both branches when they have the same source
+    workflow.add_edge("build_silver_file_model", "embed_spec_chunks")
+    workflow.add_edge("build_silver_file_model", "understand_task")
+    
+    # Both parallel branches merge at sync_embed_task
+    workflow.add_edge("embed_spec_chunks", "sync_embed_task")
+    workflow.add_edge("understand_task", "sync_embed_task")
+    
+    # Continue sequential after sync
+    workflow.add_edge("sync_embed_task", "persist_silver_checkpoint")
+    workflow.add_edge("persist_silver_checkpoint", "align_task_with_kg")
+
+    workflow.add_edge("align_task_with_kg", "plan_integration_flow")
+    workflow.add_edge("plan_integration_flow", "attach_policies_and_patterns")
+    workflow.add_edge("attach_policies_and_patterns", "generate_code_and_tests")
+    workflow.add_edge("generate_code_and_tests", "persist_gold_checkpoint")
+    workflow.add_edge("persist_gold_checkpoint", "persist_kg_learning")
+
+    # Conditional routing for repo integration
+    def should_run_repo_nodes(state: WorkflowStateDict) -> str:
+        plan = state.get("plan", {})
+        if plan.get("use_repo", False):
+            return "with_repo"
+        return "without_repo"
+
+    workflow.add_conditional_edges(
+        "persist_kg_learning",
+        should_run_repo_nodes,
+        {
+            "with_repo": "attach_repo_context",
+            "without_repo": "validate_integration_design",
+        }
+    )
+
+    # Repo flow
+    workflow.add_edge("attach_repo_context", "analyze_repo_layout")
+    workflow.add_edge("analyze_repo_layout", "apply_repo_integration_changes")
+    workflow.add_edge("apply_repo_integration_changes", "validate_integration_design")
+
+    # Error handling
+    def check_for_errors_after_validation(state: WorkflowStateDict) -> str:
+        errors = state.get("errors", [])
+        plan = state.get("plan", {})
+        if errors and not plan.get("failed", False):
+            return "has_errors"
+        return "no_errors"
+
+    workflow.add_conditional_edges(
+        "validate_integration_design",
+        check_for_errors_after_validation,
+        {
+            "has_errors": "handle_error",
+            "no_errors": "build_report",
+        }
+    )
+
+    workflow.add_edge("handle_error", "build_report")
+    workflow.add_edge("build_report", "persist_run_outcome")
+    workflow.add_edge("persist_run_outcome", END)
+
+    logger.info("Built parallel workflow graph (PARALLEL_WORKFLOW=true)")
+    return workflow.compile(checkpointer=checkpointer)
+
+
+def run_workflow(
+    state: WorkflowState,
+    use_checkpointer: bool = True,
+    thread_id: Optional[str] = None,
+) -> WorkflowState:
     """
     Execute the workflow graph with LangSmith tracing context.
     
@@ -536,25 +1026,77 @@ def run_workflow(state: WorkflowState) -> WorkflowState:
     within this run are correlated with the same run_id and provider_code.
     
     V4 Observability: Initializes and captures token usage tracking.
-    """
-    from integration_coworker.llm.client import init_token_usage, get_token_usage
     
-    app = build_graph()
+    Bug #61 Fix: Uses LangGraph's native checkpointing for resume support.
+    When use_checkpointer=True, state is automatically saved after each node,
+    enabling resume from interruptions.
+    
+    Plan 8: When PARALLEL_WORKFLOW=true, uses parallel graph for faster execution.
+    
+    V3.0: Uses async execution with AsyncPostgresSaver (ASYNC_MIGRATION_PLAN.md).
+    
+    Args:
+        state: Initial workflow state
+        use_checkpointer: Enable LangGraph native checkpointing (default True)
+        thread_id: Optional thread ID for checkpoint isolation. If not provided,
+                   uses state.run_id. Each thread_id has its own checkpoint history.
+    """
+    return asyncio.run(_run_workflow_async(state, use_checkpointer, thread_id))
 
+
+async def _run_workflow_async(
+    state: WorkflowState,
+    use_checkpointer: bool = True,
+    thread_id: Optional[str] = None,
+) -> WorkflowState:
+    """Internal async implementation of run_workflow."""
+    from integration_coworker.llm.client import init_token_usage, get_token_usage
+    from integration_coworker.graph.parallel import is_parallel_enabled
+    from integration_coworker.persistence.db import get_engine_type
+    
     # Set run context for LangSmith tracing
-    # Use existing run_id from state or generate a new one
     run_id = state.run_id or state.plan.get("run_id", "")
     provider_code = state.provider_code
-
     if run_id:
         set_run_context(run_id, provider_code)
     
     # V4 Observability: Initialize token tracking
     init_token_usage()
+    
+    # Check if parallel mode is enabled
+    parallel_mode = is_parallel_enabled()
+    
+    # For parallel graph, convert initial state to dict format
+    # (parallel graph uses WorkflowStateDict with Annotated reducers)
+    if parallel_mode:
+        initial_state = dataclass_to_dict(state)
+    else:
+        initial_state = state
 
     try:
-        final_state_dict = app.invoke(state)
-        final_state = WorkflowState(**final_state_dict)
+        # Configure thread_id for checkpoint isolation
+        effective_thread_id = thread_id or run_id or state.plan.get("run_id", "default")
+        config = {"configurable": {"thread_id": effective_thread_id}}
+        
+        if use_checkpointer:
+            async with async_checkpointer_context() as checkpointer:
+                if parallel_mode:
+                    app = build_parallel_graph(checkpointer=checkpointer)
+                else:
+                    app = build_graph(checkpointer=checkpointer)
+                final_state_dict = await app.ainvoke(initial_state, config=config)
+        else:
+            if parallel_mode:
+                app = build_parallel_graph(checkpointer=None)
+            else:
+                app = build_graph(checkpointer=None)
+            final_state_dict = await app.ainvoke(initial_state, config=config)
+        
+        # Convert final state back to dataclass if it's a dict
+        if isinstance(final_state_dict, dict):
+            final_state = dict_to_dataclass(final_state_dict)
+        else:
+            final_state = final_state_dict
         
         # V4 Observability: Copy aggregated token usage to final state
         final_state.llm_token_usage = get_token_usage()
@@ -575,6 +1117,7 @@ WORKFLOW_NODE_ORDER: List[str] = [
     "ingest_spec",
     "detect_and_parse_spec",
     "build_silver_api_model",
+    "build_silver_file_model",
     "embed_spec_chunks",
     "persist_silver_checkpoint",
     "understand_task",
@@ -608,31 +1151,41 @@ def get_node_names() -> List[str]:
 def run_from_node(
     state: WorkflowState,
     start_node: str,
+    thread_id: Optional[str] = None,
 ) -> WorkflowState:
     """
-    Execute the workflow starting from a specific node.
+    Resume workflow execution using LangGraph's native checkpointing.
     
-    Used for recovery/resume operations.
+    Bug #61 Fix: Uses LangGraph's checkpointer to resume from the last
+    successful checkpoint, not from a specific node.
     
-    Note: This is a simplified implementation. Full support would require
-    LangGraph's interrupt/resume features.
+    V3.0: Uses async execution with AsyncPostgresSaver (ASYNC_MIGRATION_PLAN.md).
     
     Args:
-        state: The workflow state to resume from
-        start_node: The node to start execution from
+        state: The workflow state (used for config if no checkpoint exists)
+        start_node: Deprecated - resume point is determined by checkpointer
+        thread_id: Thread ID for checkpoint lookup (defaults to state.run_id)
         
     Returns:
         Final workflow state
         
     Raises:
-        ValueError: If start_node is not a valid node name
+        ValueError: If start_node is not a valid node name (for API compat)
     """
     if start_node not in WORKFLOW_NODE_ORDER:
         raise ValueError(f"Unknown node: {start_node}")
     
-    # For now, we rebuild and run the full graph
-    # LangGraph doesn't have a simple "start from node X" API
-    # We mark the completed steps so nodes can detect they should be skipped
+    return asyncio.run(_run_from_node_async(state, start_node, thread_id))
+
+
+async def _run_from_node_async(
+    state: WorkflowState,
+    start_node: str,
+    thread_id: Optional[str] = None,
+) -> WorkflowState:
+    """Internal async implementation of run_from_node."""
+    from integration_coworker.llm.client import init_token_usage, get_token_usage
+    from integration_coworker.persistence.db import get_engine_type
     
     # Set run context for LangSmith tracing
     run_id = state.run_id or state.plan.get("run_id", "")
@@ -642,8 +1195,32 @@ def run_from_node(
         set_run_context(run_id, provider_code)
     
     try:
-        app = build_graph()
-        final_state_dict = app.invoke(state)
-        return WorkflowState(**final_state_dict)
+        # Initialize token tracking
+        init_token_usage()
+        
+        # Use thread_id for checkpoint isolation
+        effective_thread_id = thread_id or run_id or "default"
+        config = {"configurable": {"thread_id": effective_thread_id}}
+        
+        # Use unified async checkpointer context so LangGraph gets a saver instance
+        async with async_checkpointer_context() as checkpointer:
+            app = build_graph(checkpointer=checkpointer)
+            
+            try:
+                existing_state = await app.aget_state(config)
+                if existing_state and existing_state.values:
+                    logger.info(f"Resuming from checkpoint for thread {effective_thread_id}")
+                    final_state_dict = await app.ainvoke(None, config=config)
+                else:
+                    logger.info(f"No checkpoint found for thread {effective_thread_id}, starting fresh")
+                    final_state_dict = await app.ainvoke(state, config=config)
+            except Exception as e:
+                logger.warning(f"Could not load checkpoint, starting fresh: {e}")
+                final_state_dict = await app.ainvoke(state, config=config)
+        
+        final_state = WorkflowState(**final_state_dict)
+        final_state.llm_token_usage = get_token_usage()
+        
+        return final_state
     finally:
         clear_run_context()

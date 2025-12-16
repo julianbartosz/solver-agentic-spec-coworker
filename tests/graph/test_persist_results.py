@@ -17,6 +17,29 @@ from integration_coworker.domain.models import (
 from integration_coworker.persistence import db
 
 
+def _init_db_for_test() -> None:
+    """Ensure the configured DB backend has tables before assertions."""
+    db.init_schema()
+
+
+def _table(name: str) -> str:
+    """Return schema-qualified table name for the configured backend."""
+    if db.get_engine_type() == "postgres":
+        return f"spec_silver.{name}"
+    return name
+
+
+def _count(cur, table: str, where: str = "", params=None) -> int:
+    """SELECT COUNT(*) with backend-appropriate placeholder style."""
+    params = params or ()
+    if db.get_engine_type() == "postgres":
+        # psycopg uses %s placeholders
+        cur.execute(f"SELECT COUNT(*) FROM {table}{where}", params)
+    else:
+        cur.execute(f"SELECT COUNT(*) FROM {table}{where}", params)
+    return cur.fetchone()[0]
+
+
 def test_dry_run_no_db_writes():
     """Test that dry_run=True prevents database writes."""
     state = WorkflowState(
@@ -48,10 +71,10 @@ def test_dry_run_no_db_writes():
     assert "would_persist" in result.persisted_ids
     
     # Verify no DB rows created
+    _init_db_for_test()
     conn = db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM source_systems")
-    assert cur.fetchone()[0] == 0
+    assert _count(cur, _table("source_systems")) == 0
 
 
 def test_normal_mode_writes_to_db():
@@ -100,17 +123,14 @@ def test_normal_mode_writes_to_db():
     assert task.id is not None
     
     # Verify DB rows exist
+    _init_db_for_test()
     conn = db.get_connection()
     cur = conn.cursor()
-    
-    cur.execute("SELECT COUNT(*) FROM source_systems WHERE code = ?", ("test_provider",))
-    assert cur.fetchone()[0] == 1
-    
-    cur.execute("SELECT COUNT(*) FROM spec_documents")
-    assert cur.fetchone()[0] == 1
-    
-    cur.execute("SELECT COUNT(*) FROM endpoints")
-    assert cur.fetchone()[0] == 1
+
+    where = " WHERE code = %s" if db.get_engine_type() == "postgres" else " WHERE code = ?"
+    assert _count(cur, _table("source_systems"), where=where, params=("test_provider",)) == 1
+    assert _count(cur, _table("spec_documents")) == 1
+    assert _count(cur, _table("endpoints")) == 1
 
 
 def test_idempotent_persistence():
@@ -133,10 +153,10 @@ def test_idempotent_persistence():
     persist_results(state)
     
     # Should still have only one row
+    _init_db_for_test()
     conn = db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM spec_documents")
-    assert cur.fetchone()[0] == 1
+    assert _count(cur, _table("spec_documents")) == 1
 
 
 def test_completed_steps_appended():

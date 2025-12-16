@@ -38,13 +38,14 @@ def filesystem_repo_context_provider(repo_root: str) -> RepoSnapshot:
         file_types=[FileType.SOURCE_CODE, FileType.CONFIG, FileType.DOCUMENTATION]
     )
     
-    # Build files dict (MockFile for backwards compatibility)
+    # Build files dict using SourceFile
     files = {}
     for sf in provider.get_files(file_paths):
         if sf.content is not None:
-            files[sf.path] = MockFile(
+            files[sf.path] = SourceFile(
                 path=sf.path,
-                content=sf.content
+                content=sf.content,
+                size_bytes=len(sf.content),
             )
     
     # Generate tree markdown

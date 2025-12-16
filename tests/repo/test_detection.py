@@ -11,7 +11,6 @@ import json
 from integration_coworker.repo.detection import (
     detect_repo_profile,
     build_effective_repo_profile,
-    KNOWN_ARCHETYPES,
 )
 from integration_coworker.repo.models import DetectedProfile, RepoProfile
 

@@ -40,6 +40,10 @@ class DBConnection(Protocol):
     def execute(self, sql: str, parameters: Any = ...) -> Any: ...
 
 
+# Track if we've warned about unclosed connections (to avoid spamming logs)
+_unclosed_connection_warned = False
+
+
 class ConnectionWrapper:
     """
     V1.1: Wrapper that ensures database connections are properly returned to pool.
@@ -125,13 +129,28 @@ class ConnectionWrapper:
         return None  # Don't suppress exceptions
     
     def __del__(self):
-        """Garbage collection safety net."""
+        """
+        Garbage collection safety net.
+        
+        Bug #20 fix: Only warn once per session to avoid log spam.
+        The connection IS cleaned up, this is just informational.
+        """
+        global _unclosed_connection_warned
+        
         if not self._closed:
-            logger.warning(
-                "ConnectionWrapper was garbage collected without being closed. "
-                "Use 'with db.get_connection() as conn:' pattern for proper cleanup."
-            )
-            self.close()
+            # Only warn once per session to avoid spam
+            if not _unclosed_connection_warned:
+                _unclosed_connection_warned = True
+                logger.warning(
+                    "ConnectionWrapper was garbage collected without being closed. "
+                    "Use 'with db.get_connection() as conn:' pattern for proper cleanup. "
+                    "(This warning is shown once per session)"
+                )
+            # Still clean up the connection
+            try:
+                self.close()
+            except Exception:
+                pass  # Ignore errors during GC cleanup
     
     # Delegate attribute access to underlying connection
     def __getattr__(self, name: str) -> Any:
@@ -146,6 +165,50 @@ def get_engine_type() -> str:
     """
     settings = get_settings()
     return settings.database.engine_type
+
+
+# =============================================================================
+# Table Name Helpers (PL-001: Pattern Learning)
+# =============================================================================
+# SQLite uses underscore prefix (kg_nodes), Postgres uses schema (kg.nodes).
+# These helpers ensure consistent table naming across backends.
+
+# Table name mappings: base_name -> (sqlite_name, postgres_name)
+_KG_TABLE_NAMES = {
+    "nodes": ("kg_nodes", "kg.nodes"),
+    "edges": ("kg_edges", "kg.edges"),
+    "workflow_steps": ("kg_workflow_steps", "kg.workflow_steps"),
+    "step_bindings": ("kg_step_bindings", "kg.step_bindings"),
+    "feedback_records": ("kg_feedback_records", "kg.feedback_records"),
+    "run_events": ("kg_run_events", "kg.run_events"),
+    "pattern_candidates": ("kg_pattern_candidates", "kg.pattern_candidates"),
+    "pattern_matches": ("kg_pattern_matches", "kg.pattern_matches"),
+    "confidence_history": ("kg_confidence_history", "kg.confidence_history"),
+    "provider_scoring_config": ("kg_provider_scoring_config", "kg.provider_scoring_config"),
+}
+
+
+def kg_table(base_name: str) -> str:
+    """
+    Get the appropriate KG table name for current engine.
+    
+    Args:
+        base_name: Base table name without prefix (e.g., "nodes", "run_events")
+        
+    Returns:
+        Full table name for current engine (e.g., "kg_nodes" or "kg.nodes")
+        
+    Example:
+        >>> kg_table("run_events")
+        'kg.run_events'  # on Postgres
+        'kg_run_events'  # on SQLite
+    """
+    if base_name not in _KG_TABLE_NAMES:
+        raise ValueError(f"Unknown KG table: {base_name}. Known tables: {list(_KG_TABLE_NAMES.keys())}")
+    
+    is_postgres = get_engine_type() == "postgres"
+    sqlite_name, postgres_name = _KG_TABLE_NAMES[base_name]
+    return postgres_name if is_postgres else sqlite_name
 
 
 # Track if we've already warned (to avoid spamming logs)
@@ -500,6 +563,109 @@ def _init_sqlite_schema() -> None:
     """)
 
     # =========================================================================
+    # File spec tables (Silver layer - File Integration V1)
+    # Per docs/FILE_INTEGRATION_V1_PLAN.md Section 5.3
+    # =========================================================================
+
+    # file_specs: CSV/EDI/Excel file metadata
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_specs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_system_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            spec_document_id INTEGER,
+            encoding TEXT DEFAULT 'utf-8',
+            delimiter TEXT,
+            has_header INTEGER DEFAULT 1,
+            line_terminator TEXT DEFAULT '\\n',
+            quote_char TEXT DEFAULT '"',
+            escape_char TEXT,
+            description TEXT,
+            version TEXT,
+            sample_uri TEXT,
+            FOREIGN KEY (source_system_id) REFERENCES source_systems(id) ON DELETE CASCADE,
+            FOREIGN KEY (spec_document_id) REFERENCES spec_documents(id),
+            UNIQUE(source_system_id, name)
+        )
+    """)
+
+    # file_fields: Fields/columns within a file spec
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_fields (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_spec_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            field_type TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            start_position INTEGER,
+            length INTEGER,
+            format_mask TEXT,
+            nullable INTEGER DEFAULT 1,
+            default_value TEXT,
+            validation_regex TEXT,
+            description TEXT,
+            sample_values TEXT DEFAULT '[]',
+            inference_confidence REAL DEFAULT 1.0,
+            FOREIGN KEY (file_spec_id) REFERENCES file_specs(id) ON DELETE CASCADE,
+            UNIQUE(file_spec_id, name)
+        )
+    """)
+
+    # record_layouts: For multi-record fixed-width files
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS record_layouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_spec_id INTEGER NOT NULL,
+            record_type TEXT NOT NULL,
+            identifier_field TEXT,
+            identifier_value TEXT,
+            record_length INTEGER,
+            position INTEGER DEFAULT 0,
+            min_occurrences INTEGER DEFAULT 0,
+            max_occurrences INTEGER,
+            description TEXT,
+            FOREIGN KEY (file_spec_id) REFERENCES file_specs(id) ON DELETE CASCADE,
+            UNIQUE(file_spec_id, record_type)
+        )
+    """)
+
+    # file_validation_rules: Validation rules for file data
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_validation_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_spec_id INTEGER NOT NULL,
+            field_name TEXT,
+            rule_type TEXT NOT NULL,
+            rule_config TEXT DEFAULT '{}',
+            error_message TEXT,
+            severity TEXT DEFAULT 'error',
+            FOREIGN KEY (file_spec_id) REFERENCES file_specs(id) ON DELETE CASCADE
+        )
+    """)
+
+    # file_field_mappings: Map file fields to entity fields
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_field_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_field_id INTEGER NOT NULL,
+            entity_id INTEGER,
+            entity_field_name TEXT NOT NULL,
+            transform_expression TEXT,
+            description TEXT,
+            FOREIGN KEY (file_field_id) REFERENCES file_fields(id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Indexes for file-related tables
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_fields_spec ON file_fields(file_spec_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_record_layouts_spec ON record_layouts(file_spec_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_validation_rules_spec ON file_validation_rules(file_spec_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_field_mappings_field ON file_field_mappings(file_field_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_field_mappings_entity ON file_field_mappings(entity_id)")
+
+    # =========================================================================
     # integration_gold tables
     # =========================================================================
 
@@ -832,8 +998,101 @@ def _init_sqlite_schema() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS kg_feedback_template_idx ON kg_feedback_records(template_key)")
     cur.execute("CREATE INDEX IF NOT EXISTS kg_confidence_history_node_idx ON kg_confidence_history(node_key)")
 
+    # ==========================================================================
+    # Dynamic Pattern Learning Tables (PL-001)
+    # Per docs/PATTERN_LEARNING_DESIGN.md
+    # ==========================================================================
+
+    # KG run events - event log for pattern discovery
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            activity TEXT NOT NULL,
+            activity_type TEXT,
+            position INTEGER,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            provider_code TEXT,
+            endpoint_path TEXT,
+            endpoint_method TEXT,
+            attributes TEXT DEFAULT '{}',
+            FOREIGN KEY (run_id) REFERENCES run_status(run_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_run_events_run_idx ON kg_run_events(run_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_run_events_activity_idx ON kg_run_events(activity)")
+    
+    # Add unique constraint to prevent double-capture on retries
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS kg_run_events_dedupe_idx 
+        ON kg_run_events(run_id, position, event_type, activity)
+    """)
+
+    # KG pattern candidates - staging table for discovered patterns
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_pattern_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_key TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT,
+            canonical_sequence TEXT NOT NULL,
+            signature_version TEXT DEFAULT 'v1',
+            signature_hash TEXT,
+            support_count INTEGER NOT NULL DEFAULT 1,
+            first_seen_run_id TEXT,
+            last_seen_run_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            promoted_pattern_key TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_pattern_candidates_status_idx ON kg_pattern_candidates(status)")
+
+    # KG pattern matches - record match decisions for explainability
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS kg_pattern_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            pattern_key TEXT NOT NULL,
+            match_score REAL NOT NULL,
+            match_method TEXT NOT NULL,
+            explanation TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (run_id) REFERENCES run_status(run_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_pattern_matches_run_idx ON kg_pattern_matches(run_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_pattern_matches_pattern_idx ON kg_pattern_matches(pattern_key)")
+
+    # Add origin column to kg_nodes if not exists (migration-safe)
+    try:
+        cur.execute("ALTER TABLE kg_nodes ADD COLUMN origin TEXT DEFAULT 'seeded'")
+    except Exception:
+        pass  # Column already exists
+
+    # Backfill NULL origin values to 'seeded' (defensive migration)
+    cur.execute("UPDATE kg_nodes SET origin = 'seeded' WHERE origin IS NULL")
+    
+    # Additional composite indexes for pattern learning queries
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_run_events_run_position_idx ON kg_run_events(run_id, position)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_pattern_candidates_status_support_idx ON kg_pattern_candidates(status, support_count DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS kg_nodes_type_origin_idx ON kg_nodes(node_type, origin)")
+
     conn.commit()
     conn.close()
+    
+    # KG-002 Fix: Seed standard patterns into kg_nodes
+    # This enables cross-provider pattern matching from the start
+    try:
+        from integration_coworker.persistence.seed_kg import seed_standard_patterns
+        added, skipped = seed_standard_patterns()
+        if added > 0:
+            logger.info(f"Seeded {added} standard patterns into kg_nodes")
+    except Exception as e:
+        # Don't fail init if pattern seeding fails - it's not critical
+        logger.warning(f"Failed to seed standard patterns: {e}")
 
     logger.info("SQLite schema initialized successfully (including kg tables)")
 
@@ -863,7 +1122,11 @@ def clear_test_data() -> None:
         with pg_get_connection() as conn:
             with conn.cursor() as cur:
                 # Delete in reverse dependency order
-                # Feedback tables first (no foreign keys)
+                # PL-001: Pattern learning tables first
+                cur.execute("DELETE FROM kg.pattern_matches")
+                cur.execute("DELETE FROM kg.pattern_candidates")
+                cur.execute("DELETE FROM kg.run_events")
+                # Feedback tables (no foreign keys)
                 cur.execute("DELETE FROM kg.confidence_history")
                 cur.execute("DELETE FROM kg.feedback_records")
                 # KG tables
@@ -905,7 +1168,11 @@ def clear_test_data() -> None:
     cur = conn.cursor()
 
     # Delete in reverse dependency order
-    # Feedback tables first
+    # PL-001: Pattern learning tables first
+    cur.execute("DELETE FROM kg_pattern_matches")
+    cur.execute("DELETE FROM kg_pattern_candidates")
+    cur.execute("DELETE FROM kg_run_events")
+    # Feedback tables
     cur.execute("DELETE FROM kg_confidence_history")
     cur.execute("DELETE FROM kg_feedback_records")
     # KG tables

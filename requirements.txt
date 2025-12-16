@@ -10,9 +10,11 @@ google-generativeai
 python-dotenv
 pytest
 pyyaml
+SQLAlchemy>=2.0.0
 
 # Postgres + pgvector support (per design doc Section 4.3)
 psycopg[binary]>=3.1.0
+aiosqlite
 psycopg_pool>=3.1.0
 pgvector>=0.2.0
 
@@ -21,3 +23,10 @@ httpx>=0.24.0
 
 # CLI
 typer>=0.9.0
+
+# Testing with real Postgres
+testcontainers>=4.0.0
+
+# Safe expression evaluation (replaces eval() in cross-field validation)
+# Per docs/BUCKET_2_TECH_DEBT_AND_SCALING.md TD-SEC-001
+simpleeval>=1.0.0

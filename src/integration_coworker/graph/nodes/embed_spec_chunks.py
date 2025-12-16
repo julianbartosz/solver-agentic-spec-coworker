@@ -17,8 +17,11 @@ V3 Adaptive Streaming Mode:
 - Lazy loads chunks from DB instead of reading from state.doc_chunks
 - Streams embeddings directly to DB as they're computed
 - Keeps state.spec_chunk_embeddings empty for memory efficiency
+
+Bug #58 fix: Added exponential backoff retry for rate limit errors.
 """
 import os
+import time
 import logging
 from typing import Optional, List, Tuple, Any, Protocol, runtime_checkable
 
@@ -33,6 +36,75 @@ MAX_BATCH_SIZE = 2048  # Max inputs per API call
 MAX_TOKENS_PER_REQUEST = 250000  # Stay under 300K limit with safety margin
 MAX_INPUT_CHARS = 8000  # Max chars per individual input
 CHARS_PER_TOKEN = 4  # Rough estimate: 1 token ≈ 4 characters
+
+# Bug #58 fix: Retry configuration for rate limit errors
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 2.0
+MAX_BACKOFF_SECONDS = 60.0
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Check if an exception is a rate limit or retryable error."""
+    error_str = str(error).lower()
+    retryable_patterns = [
+        "rate limit",
+        "rate_limit",
+        "429",
+        "too many requests",
+        "quota exceeded",
+        "timeout",
+        "service unavailable",
+        "503",
+        "connection error",
+    ]
+    return any(pattern in error_str for pattern in retryable_patterns)
+
+
+def _embed_with_retry(
+    client: Any,
+    texts: List[str],
+    max_retries: int = MAX_RETRIES,
+) -> List[List[float]]:
+    """
+    Call embed_documents with exponential backoff retry for rate limit errors.
+    
+    Bug #58 fix: Adds retry logic for transient API errors.
+    
+    Args:
+        client: LangChain embedding client
+        texts: List of texts to embed
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        List of embedding vectors
+        
+    Raises:
+        Original exception if all retries fail or non-retryable error
+    """
+    last_error = None
+    backoff = INITIAL_BACKOFF_SECONDS
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return client.embed_documents(texts)
+        except Exception as e:
+            last_error = e
+            
+            # Only retry on rate limit / transient errors
+            if not _is_rate_limit_error(e):
+                logger.error(f"Non-retryable embedding error: {e}")
+                raise
+            
+            if attempt < max_retries:
+                logger.warning(
+                    f"Embedding rate limit hit (attempt {attempt + 1}/{max_retries + 1}), "
+                    f"retrying in {backoff:.1f}s: {e}"
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+            else:
+                logger.error(f"All {max_retries + 1} embedding attempts failed: {e}")
+                raise last_error
 
 
 @runtime_checkable
@@ -128,6 +200,7 @@ def _batch_embed(client: EmbeddingsProtocol, texts: List[str], model: str) -> Li
     Embed texts in token-aware batches using LangChain OpenAIEmbeddings.
     
     Uses embed_documents() for batch embedding with automatic LangSmith tracing.
+    Bug #58 fix: Uses _embed_with_retry for rate limit handling.
     
     Returns list of embedding vectors in same order as input texts.
     None values indicate failed embeddings.
@@ -147,9 +220,9 @@ def _batch_embed(client: EmbeddingsProtocol, texts: List[str], model: str) -> Li
         batch_indices = [idx for idx, _ in batch]
         
         try:
-            # Use LangChain's embed_documents for batch embedding
-            # This is automatically traced in LangSmith
-            batch_embeddings = client.embed_documents(batch_texts)
+            # Use _embed_with_retry for automatic rate limit handling
+            # Bug #58 fix: Uses exponential backoff for transient errors
+            batch_embeddings = _embed_with_retry(client, batch_texts)
             
             # Map embeddings back to original indices
             for i, embedding in enumerate(batch_embeddings):
@@ -367,6 +440,8 @@ def _process_embedding_batch(
     """
     Process a batch of chunks: compute embeddings and stream to DB.
     
+    Bug #58 fix: Uses _embed_with_retry for rate limit handling.
+    
     Args:
         client: LangChain embedding client
         batch_chunks: List of (chunk_id, chunk_index, content) tuples
@@ -385,8 +460,9 @@ def _process_embedding_batch(
     chunk_ids = [chunk_id for chunk_id, _, _ in batch_chunks]
     
     try:
-        # Compute embeddings for batch
-        embeddings = client.embed_documents(texts)
+        # Use _embed_with_retry for automatic rate limit handling
+        # Bug #58 fix: Uses exponential backoff for transient errors
+        embeddings = _embed_with_retry(client, texts)
         
         # Prepare updates for DB
         updates = list(zip(chunk_ids, embeddings))
@@ -398,5 +474,5 @@ def _process_embedding_batch(
         return success_count, failed_count
         
     except Exception as e:
-        logger.error(f"Batch embedding failed: {e}")
+        logger.error(f"Batch embedding failed after retries: {e}")
         return 0, len(batch_chunks)

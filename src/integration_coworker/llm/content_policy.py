@@ -69,13 +69,29 @@ INSECURE_CREDENTIAL_PATTERNS = [
     (r'[?&]access_token=', "Access token in query string (use header instead)"),
     (r'[?&]secret=', "Secret in query string"),
     
-    # Hardcoded secrets
-    (r'api_key\s*=\s*["\'][a-zA-Z0-9_-]{20,}["\']', "Hardcoded API key detected"),
-    (r'secret\s*=\s*["\'][a-zA-Z0-9_-]{20,}["\']', "Hardcoded secret detected"),
-    (r'password\s*=\s*["\'][^"\']{8,}["\']', "Hardcoded password detected"),
+    # Hardcoded secrets - but exclude common test placeholders (Bug #31 fix)
+    # Pattern: Match realistic-looking keys but not test placeholders
+    (r'api_key\s*=\s*["\'](?!test_|mock_|fake_|your_)[a-zA-Z0-9_-]{32,}["\']', "Hardcoded API key detected"),
+    (r'secret\s*=\s*["\'](?!test_|mock_|fake_|your_)[a-zA-Z0-9_-]{32,}["\']', "Hardcoded secret detected"),
+    (r'password\s*=\s*["\'](?!test_|mock_|fake_|your_|password)[^"\']{12,}["\']', "Hardcoded password detected"),
     
     # HTTP Basic Auth in URL
     (r'https?://[^:]+:[^@]+@', "Credentials in URL (use separate auth)"),
+]
+
+# Whitelist patterns for test code - these are acceptable (Bug #31 fix)
+TEST_CREDENTIAL_WHITELIST = [
+    r'test_api_key',
+    r'test_key',
+    r'mock_api_key',
+    r'fake_api_key',
+    r'your_api_key_here',
+    r'your_auth_token_here',
+    r'test_\w+_key',
+    r'ACXXXXXXXX+',  # Twilio-style masked test SID
+    r'test_\d+',
+    r'sk_test_\w*',  # Stripe test keys pattern
+    r'pk_test_\w*',  # Stripe test keys pattern
 ]
 
 # Patterns that suggest data leakage
@@ -119,6 +135,11 @@ class ContentPolicyEnforcer:
         self._leakage_patterns = [
             (re.compile(pattern, re.IGNORECASE), msg)
             for pattern, msg in DATA_LEAKAGE_PATTERNS
+        ]
+        # Bug #31 fix: Compile whitelist patterns
+        self._credential_whitelist = [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in TEST_CREDENTIAL_WHITELIST
         ]
     
     @classmethod
@@ -170,7 +191,18 @@ class ContentPolicyEnforcer:
         
         for line_num, line in enumerate(code.split('\n'), 1):
             for pattern, message in self._credential_patterns:
-                if pattern.search(line):
+                match = pattern.search(line)
+                if match:
+                    # Bug #31 fix: Check if matched value is in whitelist
+                    matched_text = match.group(0)
+                    is_whitelisted = any(
+                        wp.search(matched_text) or wp.search(line)
+                        for wp in self._credential_whitelist
+                    )
+                    if is_whitelisted:
+                        logger.debug(f"Credential pattern matched but whitelisted: {matched_text[:30]}...")
+                        continue
+                    
                     violations.append(PolicyViolation(
                         type=PolicyViolationType.INSECURE_CREDENTIAL_USAGE,
                         message=message,
@@ -342,9 +374,9 @@ def validate_generated_code(
 def format_violations(violations: List[PolicyViolation]) -> str:
     """Format violations as human-readable string."""
     if not violations:
-        return "No content policy violations found."
+        return "No spec compliance violations found."
     
-    lines = ["Content policy violations detected:"]
+    lines = ["Spec compliance violations detected:"]
     for v in violations:
         loc = f"Line {v.line_number}: " if v.line_number else ""
         lines.append(f"  [{v.severity.value.upper()}] {loc}{v.message}")

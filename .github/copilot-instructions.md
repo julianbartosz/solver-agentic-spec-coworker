@@ -1,299 +1,132 @@
-Below is a **fully structured, symbol-consistent, hierarchical rewrite** of your unstructured markdown.
-All content is preserved.
-No semantics changed.
-Just clean, organized, professional Markdown.
+# GitHub Copilot Instructions for Beads
 
----
+## Project Overview
 
-# `.github/copilot-instructions.md`
+**beads** (command: `bd`) is a Git-backed issue tracker designed for AI-supervised coding workflows. We dogfood our own tool for all task tracking.
 
-## **Agentic Integration Designer — Copilot Ruleset**
+**Key Features:**
+- Dependency-aware issue tracking
+- Auto-sync with Git via JSONL
+- AI-optimized CLI with JSON output
+- Built-in daemon for background operations
+- MCP server integration for Claude and other AI assistants
 
----
+## Tech Stack
 
-## **1. 🎯 Purpose**
+- **Language**: Go 1.21+
+- **Storage**: SQLite (internal/storage/sqlite/)
+- **CLI Framework**: Cobra
+- **Testing**: Go standard testing + table-driven tests
+- **CI/CD**: GitHub Actions
+- **MCP Server**: Python (integrations/beads-mcp/)
 
-This file defines the **stable GitHub Copilot ruleset** for this repository.
+## Coding Guidelines
 
-### **1.1 Scope**
+### Testing
+- Always write tests for new features
+- Use `BEADS_DB=/tmp/test.db` to avoid polluting production database
+- Run `go test -short ./...` before committing
+- Never create test issues in production DB (use temporary DB)
 
-* **High-level rules & preferences** → defined here.
-* **Project memory** → `.github/prompts/*.md` (updated via MCP tools + CLI).
-* **Per-task behavior** → controlled by chat modes referencing prompt files.
+### Code Style
+- Run `golangci-lint run ./...` before committing
+- Follow existing patterns in `cmd/bd/` for new commands
+- Add `--json` flag to all commands for programmatic use
+- Update docs when changing behavior
 
-### **1.2 Requirements for Copilot**
+### Git Workflow
+- Always commit `.beads/issues.jsonl` with code changes
+- Run `bd sync` at end of work sessions
+- Install git hooks: `bd hooks install` (ensures DB ↔ JSONL consistency)
 
-* ALWAYS read this file **and** relevant `.github/prompts/*` files before making a plan.
-* Prefer **chat modes** or **prompt-file references** over duplicating content.
+## Issue Tracking with bd
 
----
+**CRITICAL**: This project uses **bd** for ALL task tracking. Do NOT create markdown TODO lists.
 
-## **2. 📦 Project Overview (for Copilot)**
+### Essential Commands
 
-This repo implements the **Agentic API Integration Designer & Code Generator**.
+```bash
+# Find work
+bd ready --json                    # Unblocked issues
+bd stale --days 30 --json          # Forgotten issues
 
-### **2.1 Inputs**
+# Create and manage
+bd create "Title" -t bug|feature|task -p 0-4 --json
+bd update <id> --status in_progress --json
+bd close <id> --reason "Done" --json
 
-* `spec_refs` (OpenAPI / HTML / PDF)
-* `task_description` (natural language)
-* optional: `provider_code`, `repo_root`, `repo_profile`
+# Search
+bd list --status open --priority 1 --json
+bd show <id> --json
 
-### **2.2 Outputs**
-
-* Parsed spec + **Silver** API model
-* Planned **Gold** integration workflow graph
-* Generated:
-
-  * client code
-  * workflow code
-  * tests
-  * config
-* Optional repo wiring into a target repo
-* Persisted Silver/Gold records in Postgres + pgvector
-* Human-readable run report
-
-### **2.3 Primary Public API**
-
-```python
-design_and_generate_integration(
-    spec_refs,
-    task_description,
-    provider_code: str | None = None,
-    repo_root: str | None = None,
-    repo_profile: str | None = None,
-    options: dict | None = None,
-) -> IntegrationResult
+# Sync (CRITICAL at end of session!)
+bd sync  # Force immediate export/commit/push
 ```
 
----
+### Workflow
 
-## **3. 🧱 Architecture & Tech Stack**
+1. **Check ready work**: `bd ready --json`
+2. **Claim task**: `bd update <id> --status in_progress`
+3. **Work on it**: Implement, test, document
+4. **Discover new work?** `bd create "Found bug" -p 1 --deps discovered-from:<parent-id> --json`
+5. **Complete**: `bd close <id> --reason "Done" --json`
+6. **Sync**: `bd sync` (flushes changes to git immediately)
 
-### **3.1 Language & Runtime**
+### Priorities
 
-* Python **3.11+**
-* Package name: **agentic_integration**
+- `0` - Critical (security, data loss, broken builds)
+- `1` - High (major features, important bugs)
+- `2` - Medium (default, nice-to-have)
+- `3` - Low (polish, optimization)
+- `4` - Backlog (future ideas)
 
-### **3.2 Core Libraries**
+## Project Structure
 
-* **LangGraph** (agent workflow)
-* **Postgres** + **pgvector (1536 dim)**
-* **SQLAlchemy** or typed DB layer for Silver/Gold persistence
-
-### **3.3 Database Schemas**
-
-* **spec_silver**
-
-  * spec documents, sections, endpoints, schemas, fields, entities, events
-* **integration_gold**
-
-  * tasks, workflow templates, nodes, edges, endpoint bindings, policies, code artifacts
-
-### **3.4 Workflow Graph (LangGraph Nodes)**
-
-1. `plan_run`
-2. `ingest_spec`
-3. `detect_and_parse_spec`
-4. `build_silver_api_model`
-5. `understand_task`
-6. `align_task_with_kg`
-7. `plan_integration_flow`
-8. `attach_policies_and_patterns`
-9. `generate_code_and_tests`
-10. `analyze_repo_layout` *(repo-aware only)*
-11. `apply_repo_integration_changes` *(repo-aware only)*
-12. `validate_integration_design`
-13. `persist_results`
-14. `build_report`
-
----
-
-## **4. 📂 Copilot Memory Layout**
-
-Treat `.github/prompts/` as the **canonical project memory**.
-
-### **4.1 Key Prompt Files**
-
-| File                       | Purpose                                       |
-| -------------------------- | --------------------------------------------- |
-| `00_project-brief.md`      | Project overview & success criteria           |
-| `10_system-patterns.md`    | Architecture, medallion model, workflow nodes |
-| `30_development-status.md` | Done / Doing / Next snapshots (living)        |
-| `35_current-task.md`       | Current focus, key files, next steps (living) |
-| `90_decision-log.md`       | Append-only decision log                      |
-| `_index.md`                | Optional index / TOC                          |
-
-### **4.2 Rules for Copilot**
-
-* **Do NOT rewrite** `.github/prompts/*.md` manually.
-* Update memory using **MCP tools** or **CLI wrapper scripts**:
-
-#### MCP Tools
-
-* `memory_update_context`
-* `memory_update_progress`
-* `memory_log_decision`
-
-#### CLI Wrappers
-
-* Example: `npm run memory:update-context`
-
-### **4.3 Behavior in Agent Mode**
-
-* Always load the relevant prompt files via chat modes rather than copying content.
-
----
-
-## **5. 🧩 MCP & Tools**
-
-This repo runs a **local MCP server** so Copilot can update memory files and access project context.
-
-### **5.1 MCP Tools**
-
-| Tool                     | Purpose                                            |
-| ------------------------ | -------------------------------------------------- |
-| `memory_update_context`  | Updates 35_current-task.md                         |
-| `memory_update_progress` | Updates 30_development-status.md (Done/Doing/Next) |
-| `memory_log_decision`    | Appends an entry to 90_decision-log.md             |
-
-### **5.2 Guidance for Copilot**
-
-After significant progress:
-
-* Call **`memory_update_progress`**
-* If architecture/patterns changed → call **`memory_log_decision`**
-* When switching tasks → call **`memory_update_context`**
-
----
-
-## **6. 💬 Chat Modes & Prompt Files**
-
-Chat modes compose project memory into tailored workflows.
-
-### **6.1 Typical Modes**
-
-#### **Phase 0 — Scaffolder**
-
-Includes the entire memory stack:
-
-* project brief
-* system patterns
-* dev status
-* current task
-* decision log
-
-Goal:
-Generate or refine:
-
-* Python package skeleton
-* LangGraph stubs
-* DB/persistence layer
-
-#### **Current Task Driver**
-
-Focus: contents of `35_current-task.md`.
-
-Workflow for Copilot:
-
-1. Read current task + dev status
-2. Produce a small, reversible plan
-3. Apply minimal safe edits
-4. Suggest or run tests
-5. Update memory via MCP tools
-
-### **6.2 Guidance**
-
-* Follow chat-mode workflow first
-* Prefer:
-
-  * small diffs
-  * explicit TODOs
-  * consistency with Silver/Gold terminology
-
----
-
-## **7. 🧪 Coding Style & Conventions**
-
-### **7.1 General Rules**
-
-* Keep files **≤ 200–250 LOC**
-* Extract helpers early
-* Prefer typed, minimal APIs
-* Use `@dataclass` or Pydantic for:
-
-  * WorkflowState
-  * IntegrationResult
-  * Domain models
-
-### **7.2 Project Structure**
-
-* `config.py`
-* `db.py`
-* `models_*.py`
-* `langgraph_graph.py`
-* `cli.py`
-
-### **7.3 LangGraph Nodes**
-
-Node signature:
-
-```python
-def node_name(state: WorkflowState) -> WorkflowState:
-    ...
+```
+beads/
+├── cmd/bd/              # CLI commands (add new commands here)
+├── internal/
+│   ├── types/           # Core data types
+│   └── storage/         # Storage layer
+│       └── sqlite/      # SQLite implementation
+├── integrations/
+│   └── beads-mcp/       # MCP server (Python)
+├── examples/            # Integration examples
+├── docs/                # Documentation
+└── .beads/
+    ├── beads.db         # SQLite database (DO NOT COMMIT)
+    └── issues.jsonl     # Git-synced issue storage
 ```
 
-Node docstrings must specify:
+## Available Resources
 
-* Which design-doc section they implement
-* Which Silver/Gold tables/fields they touch
+### MCP Server (Recommended)
+Use the beads MCP server for native function calls instead of shell commands:
+- Install: `pip install beads-mcp`
+- Functions: `mcp__beads__ready()`, `mcp__beads__create()`, etc.
+- See `integrations/beads-mcp/README.md`
 
-### **7.4 DB Models**
+### Scripts
+- `./scripts/bump-version.sh <version> --commit` - Update all version files atomically
+- `./scripts/release.sh <version>` - Complete release workflow
+- `./scripts/update-homebrew.sh <version>` - Update Homebrew formula
 
-* Mirror schema exactly
-* Prefer explicit columns over JSON
+### Key Documentation
+- **AGENTS.md** - Comprehensive AI agent guide (detailed workflows, advanced features)
+- **AGENT_INSTRUCTIONS.md** - Development procedures, testing, releases
+- **README.md** - User-facing documentation
+- **docs/CLI_REFERENCE.md** - Complete command reference
 
-### **7.5 Testing**
+## Important Rules
 
-Prefer:
-
-* Unit tests for parsing/normalization
-* Node-level tests against a test DB
-* Small E2E scenarios with stub spec + stub repo
-
----
-
-## **8. ⚙️ Operational Practices**
-
-### **8.1 Commits**
-
-* Commit after each coherent step
-* Keep PRs focused on one phase/task
-
-### **8.2 Documentation**
-
-When adding new behavior:
-
-* Update prompt files via tools
-* Optionally add a design note under `docs/`
-
-### **8.3 CI**
-
-* If core source changes but prompts do not, CI may request memory updates
-* Use branch name `[*skip-memory*]` **only when correct**
+- ✅ Use bd for ALL task tracking
+- ✅ Always use `--json` flag for programmatic use
+- ✅ Run `bd sync` at end of sessions
+- ✅ Test with `BEADS_DB=/tmp/test.db`
+- ❌ Do NOT create markdown TODO lists
+- ❌ Do NOT create test issues in production DB
+- ❌ Do NOT commit `.beads/beads.db` (JSONL only)
 
 ---
 
-## **9. 🧠 What Not To Do**
-
-### ❌ Avoid:
-
-* Dumping giant code/spec blobs into this file
-* Editing `.github/prompts/*.md` manually (except when explicitly asked)
-* Adding new MCP tools casually
-* Excessive abstraction
-* Diverging from Silver/Gold structure
-* Ignoring DB schema terminology
-
----
-
-## **End of `.github/copilot-instructions.md`**
+**For detailed workflows and advanced features, see [AGENTS.md](../AGENTS.md)**

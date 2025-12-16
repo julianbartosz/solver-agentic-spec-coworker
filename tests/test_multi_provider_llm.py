@@ -336,19 +336,19 @@ class TestGoogleGeminiClient:
         """Test GoogleLLMClient initialization."""
         client = GoogleLLMClient(
             api_key="test-google-key",
-            model="gemini-3-pro",
+            model="gemini-2.5-flash",
             task_type="test",
         )
         
         assert client.api_key == "test-google-key"
-        assert client.model == "gemini-3-pro"
+        assert client.model == "gemini-2.5-flash"
         assert client.task_type == "test"
     
     def test_default_model(self):
-        """Test default model is Gemini 3 Pro."""
+        """Test default model is Gemini 2.5 Flash."""
         client = GoogleLLMClient(api_key="test-key")
         
-        assert client.model == "gemini-3-pro"
+        assert client.model == "gemini-2.5-flash"
     
     def test_metadata_includes_google_provider(self):
         """Test that metadata includes google as provider."""
@@ -410,7 +410,7 @@ class TestGoogleProviderFallback:
         )
         
         assert isinstance(client, GoogleLLMClient)
-        assert client.model == "gemini-3-pro"  # Default
+        assert client.model == "gemini-2.5-flash"  # Default
     
     def test_google_in_fallback_chain(self, monkeypatch):
         """Test that Google is included in fallback chain."""
@@ -435,7 +435,7 @@ class TestGoogleProviderFallback:
         
         client = _try_create_client_for_provider(
             provider="google",
-            model_name="gemini-1.5-pro",
+            model_name="gemini-2.0-flash",
             temperature=0.3,
             max_tokens=2000,
             task_type="test",
@@ -466,8 +466,8 @@ class TestProviderLiteralType:
 class TestNodeModelAssignment:
     """Tests that each node type gets the correct model/provider from archetypes."""
 
-    def test_planning_nodes_use_openai_gpt51(self, monkeypatch):
-        """Test that planning nodes are configured for GPT-5.1."""
+    def test_planning_nodes_use_openai_gpt4o(self, monkeypatch):
+        """Test that planning nodes are configured for gpt-4o."""
         # Clear env overrides
         monkeypatch.delenv("USE_MOCK_LLM", raising=False)
         monkeypatch.delenv("LLM_PROVIDER", raising=False)
@@ -485,10 +485,10 @@ class TestNodeModelAssignment:
         for node_name in planning_nodes:
             config = get_archetype_model_config(node_name)
             assert config.get("provider") == "openai", f"{node_name} should use openai"
-            assert "gpt-5.1" in config.get("name", ""), f"{node_name} should use gpt-5.1"
+            assert "gpt-4o" in config.get("name", ""), f"{node_name} should use gpt-4o"
 
-    def test_codegen_nodes_use_anthropic_claude_opus_45(self, monkeypatch):
-        """Test that code generation nodes are configured for Claude Opus 4."""
+    def test_codegen_nodes_use_anthropic_claude_sonnet_45(self, monkeypatch):
+        """Test that code generation nodes are configured for Claude Sonnet 4.5."""
         monkeypatch.delenv("USE_MOCK_LLM", raising=False)
         monkeypatch.delenv("LLM_PROVIDER", raising=False)
         monkeypatch.delenv("LLM_MODEL", raising=False)
@@ -499,8 +499,8 @@ class TestNodeModelAssignment:
         assert config.get("provider") == "anthropic"
         assert "claude" in config.get("name", "").lower()
         assert "sonnet" in config.get("name", "").lower()
-        # Model name is claude-sonnet-4-20250514
-        assert "sonnet-4" in config.get("name", "").lower()
+        # Model name is claude-sonnet-4-5-20250929
+        assert "sonnet-4-5" in config.get("name", "").lower()
 
     def test_extraction_nodes_use_gpt4o_mini(self, monkeypatch):
         """Test that extraction nodes use smaller, faster models."""
@@ -528,7 +528,7 @@ class TestClientForNode:
         client = get_llm_client_for_node("understand_task")
         
         assert isinstance(client, OpenAILLMClient)
-        assert "gpt-5.1" in client.model
+        assert "gpt-4o" in client.model
 
     def test_get_client_for_codegen_node(self, monkeypatch):
         """Test getting client for a code generation node."""
@@ -541,8 +541,8 @@ class TestClientForNode:
         
         assert isinstance(client, AnthropicLLMClient)
         assert "sonnet" in client.model.lower()
-        # Model name is claude-sonnet-4-20250514
-        assert "sonnet-4" in client.model.lower()
+        # Model name is claude-sonnet-4-5-20250929
+        assert "sonnet-4-5" in client.model.lower()
 
 
 class TestModelTemperature:

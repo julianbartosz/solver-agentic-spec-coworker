@@ -49,6 +49,11 @@ class IntegrationOptions:
     
     # V1.1 (FT-008): Strict code generation mode
     strict_codegen: bool = False
+    
+    # V2.2 (Dynamic Capability Fix #7): Constrained code generation mode
+    # When True, use constrained generation that injects paths/fixtures from spec
+    # rather than allowing LLM to generate them (reduces hallucination risk)
+    constrained_codegen: bool = False
 
 
 @dataclass

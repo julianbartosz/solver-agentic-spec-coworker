@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import logging
 
 from integration_coworker.graph.state import WorkflowState
+from integration_coworker.api.types import IntegrationOptions
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,13 @@ def plan_run(state: WorkflowState) -> WorkflowState:
     - Uses spec content (servers URL, info.title) when available
     - Falls back to filepath-based inference
     """
+    # Bug #88 fix: Convert dict options to IntegrationOptions object
+    # When options is passed as a dict (e.g., from tests or direct API calls),
+    # it needs to be converted to an IntegrationOptions dataclass
+    if state.options is not None and isinstance(state.options, dict):
+        logger.info("Converting dict options to IntegrationOptions object")
+        state.options = IntegrationOptions(**state.options)
+
     # 0. Generate run_id
     if not state.run_id:
         state.run_id = str(uuid.uuid4())
@@ -300,6 +308,45 @@ def plan_run(state: WorkflowState) -> WorkflowState:
     # 3. Fix plan["use_repo"] logic per spec
     # Must have both repo_root AND repo_integration_enabled
     repo_integration_enabled = getattr(state.options, "repo_integration_enabled", True) if state.options else True
+    
+    # Bug #55 fix: Convert string repo_profile to RepoProfile object.
+    # Users may pass a string like "typescript" or "python" for convenience.
+    # This must happen before the eager load check below.
+    if state.repo_profile is not None and isinstance(state.repo_profile, str):
+        from integration_coworker.repo.models import RepoProfile
+        profile_name = state.repo_profile
+        # Create a basic RepoProfile from the string
+        # Language detection from common profile names
+        language = "python"
+        if profile_name.lower() in ("typescript", "javascript", "ts", "js", "node", "nodejs"):
+            language = "typescript"
+        elif profile_name.lower() in ("python", "py", "django", "flask", "fastapi"):
+            language = "python"
+        
+        state.repo_profile = RepoProfile(
+            name=profile_name,
+            language=language,
+            integrations_root="src/integrations" if language == "python" else "src/integrations",
+            tests_root="tests/integrations" if language == "python" else "tests/integrations",
+            profile_source="string_parameter",
+        )
+        logger.info(f"Converted string repo_profile '{profile_name}' to RepoProfile object (language={language})")
+    
+    # Bug #22 fix: Eagerly load repo_profile from config file when repo_root is provided.
+    # This ensures the profile is available during code generation, even though
+    # attach_repo_context runs later in the workflow for repo wiring.
+    if state.repo_root and state.repo_profile is None:
+        try:
+            from integration_coworker.graph.nodes.attach_repo_context import _get_profile_config_first
+            state.repo_profile = _get_profile_config_first(
+                state.repo_root, 
+                use_llm_fallback=False  # Only use config file, don't invoke LLM here
+            )
+            logger.info(f"Eagerly loaded repo_profile: {state.repo_profile.name} (source: {state.repo_profile.profile_source})")
+        except Exception as e:
+            logger.debug(f"Could not eagerly load repo_profile: {e}")
+            # Will be loaded later by attach_repo_context
+    
     state.plan = {
         "provider_code": state.provider_code,
         "primary_spec_ref": primary_ref,

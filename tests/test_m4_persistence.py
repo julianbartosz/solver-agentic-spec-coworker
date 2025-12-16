@@ -10,6 +10,8 @@ from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.persistence import db
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 
 def _table(name: str) -> str:
     """

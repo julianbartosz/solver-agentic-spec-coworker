@@ -79,7 +79,8 @@ def test_no_errors_skips_handle_error():
     assert has_errors is False
 
 
-def test_graph_completes_after_handle_error():
+@pytest.mark.asyncio
+async def test_graph_completes_after_handle_error():
     """Test that graph continues to build_report after handle_error."""
     from integration_coworker.graph.nodes.handle_error import handle_error
     from integration_coworker.graph.nodes.build_report import build_report
@@ -101,7 +102,7 @@ def test_graph_completes_after_handle_error():
     assert state.plan.get("failed") is True
     
     # Should still be able to build report
-    state = build_report(state)
+    state = await build_report(state)
     assert state.report_markdown is not None
     assert "test-run-123" in state.report_markdown
     assert "Test error" in state.report_markdown or "Errors" in state.report_markdown

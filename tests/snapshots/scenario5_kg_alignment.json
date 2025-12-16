@@ -33,6 +33,7 @@
     "attach_policies_and_patterns",
     "build_report",
     "build_silver_api_model",
+    "build_silver_file_model",
     "detect_and_parse_spec",
     "embed_spec_chunks",
     "generate_code_and_tests",

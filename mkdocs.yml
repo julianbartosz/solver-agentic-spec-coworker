@@ -75,6 +75,17 @@ plugins:
         'DEPLOYMENT_PLAN.md': 'operations/deployment.md'
         'DISTRIBUTION_STRATEGY.md': 'operations/deployment.md'
 
+        # Dev slimdown: keep old published URLs working, but redirect to canonical pages.
+        'development/ARCHITECTURE_AUDIT_P0_REST.md': 'development/architecture.md'
+        'development/ARCHITECTURE_AUDIT_P1.md': 'development/architecture.md'
+        'development/ARCHITECTURE_AUDIT_P2.md': 'development/architecture.md'
+        'development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md': 'development/architecture.md'
+        'development/ARCHITECTURE_AUDIT_QUESTIONS.md': 'development/maintenance.md'
+        'development/ARCHITECTURE_REWRITE_PLAN.md': 'development/maintenance.md'
+        'development/DEPRECATION_CLEANUP_AUDIT.md': 'development/maintenance.md'
+        'development/PRODUCTION_SPEC_SWEEP.md': 'development/maintenance.md'
+        'development/ASYNC_MIGRATION_PLAN.md': 'development/maintenance.md'
+
 # Extensions
 markdown_extensions:
   - admonition
@@ -133,15 +144,7 @@ nav:
     - Dependency bumps: development/dependency_bumps.md
     - Docs tooling: development/docs_tooling.md
     - Docs audit: development/docs_audit_deliverable.md
-    - Async migration plan: development/ASYNC_MIGRATION_PLAN.md
-    - Deprecation cleanup audit: development/DEPRECATION_CLEANUP_AUDIT.md
-    - Production spec sweep: development/PRODUCTION_SPEC_SWEEP.md
-    - Architecture rewrite plan: development/ARCHITECTURE_REWRITE_PLAN.md
-    - Architecture audit (P0): development/ARCHITECTURE_AUDIT_P0_REST.md
-    - Architecture audit (P1): development/ARCHITECTURE_AUDIT_P1.md
-    - Architecture audit (P2): development/ARCHITECTURE_AUDIT_P2.md
-    - Architecture audit questions: development/ARCHITECTURE_AUDIT_QUESTIONS.md
-    - Architecture audit runtime data: development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md
+    - Maintenance: development/maintenance.md
   - Decisions:
     - Tech debt register: decisions/TECHNICAL_DEBT_REGISTER.md
     - Feedback learning: decisions/FEEDBACK_LEARNING_IMPLEMENTATION.md

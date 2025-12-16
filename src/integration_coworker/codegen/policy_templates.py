@@ -232,7 +232,8 @@ def get_rate_limit_template(config: Dict[str, Any]) -> PolicyCodeSnippet:
             # Refill tokens based on elapsed time
             elapsed = now - self._last_refill
             tokens_to_add = elapsed * self._rate_limit
-            self._tokens = min(self._burst_size, self._tokens + tokens_to_add)
+            new_tokens = self._tokens + tokens_to_add
+            self._tokens = min(self._burst_size, new_tokens)
             self._last_refill = now
             
             # Wait if no tokens available
@@ -241,7 +242,8 @@ def get_rate_limit_template(config: Dict[str, Any]) -> PolicyCodeSnippet:
                 time.sleep(sleep_time)
                 now = time.time()
                 elapsed = now - self._last_refill
-                self._tokens = min(self._burst_size, self._tokens + elapsed * self._rate_limit)
+                new_tokens = self._tokens + elapsed * self._rate_limit
+                self._tokens = min(self._burst_size, new_tokens)
                 self._last_refill = now
             
             self._tokens -= 1

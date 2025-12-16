@@ -87,6 +87,7 @@ def persist_run_outcome(state: WorkflowState) -> WorkflowState:
                       (run_id, task_id, status, started_at, finished_at, error_summary)
                       VALUES (%s, %s, %s, %s, %s, %s)
                       ON CONFLICT (run_id) DO UPDATE SET
+                      task_id = EXCLUDED.task_id,
                       status = EXCLUDED.status, finished_at = EXCLUDED.finished_at,
                       error_summary = EXCLUDED.error_summary"""
         else:

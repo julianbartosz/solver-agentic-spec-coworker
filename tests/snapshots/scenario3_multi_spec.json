@@ -35,6 +35,7 @@
     "attach_policies_and_patterns",
     "build_report",
     "build_silver_api_model",
+    "build_silver_file_model",
     "detect_and_parse_spec",
     "embed_spec_chunks",
     "generate_code_and_tests",
@@ -51,14 +52,14 @@
   ],
   "has_report": true,
   "errors": [
-    "Warning: EndpointBinding for node 'call_create' has endpoint_id=None"
+    "Warning: EndpointBinding for node 'call_api' has endpoint_id=None"
   ],
   "workflow_node_keys": [
-    "IntegrationFlowNode(id=None, task_id=None, node_key='call_create', node_type='api_call', label=None, description=None, config={'label': 'POST /v1/notifications', 'description': 'Send a notification'}, endpoint_id=None, entity_id=None, position=2)",
-    "IntegrationFlowNode(id=None, task_id=None, node_key='end', node_type='end', label=None, description=None, config={'label': 'Return Result', 'description': ''}, endpoint_id=None, entity_id=None, position=4)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='call_api', node_type='api_call', label=None, description=None, config={'label': 'call_api', 'description': ''}, endpoint_id=None, entity_id=None, position=2)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='end', node_type='end', label=None, description=None, config={'label': 'End', 'description': ''}, endpoint_id=None, entity_id=None, position=4)",
+    "IntegrationFlowNode(id=None, task_id=None, node_key='handle_response', node_type='transform', label=None, description=None, config={'label': 'handle_response', 'description': ''}, endpoint_id=None, entity_id=None, position=3)",
     "IntegrationFlowNode(id=None, task_id=None, node_key='start', node_type='start', label=None, description=None, config={'label': 'Start', 'description': ''}, endpoint_id=None, entity_id=None, position=0)",
-    "IntegrationFlowNode(id=None, task_id=None, node_key='transform_response', node_type='transform', label=None, description=None, config={'label': 'Extract Created Resource', 'description': 'Return the created resource with ID'}, endpoint_id=None, entity_id=None, position=3)",
-    "IntegrationFlowNode(id=None, task_id=None, node_key='validate_input', node_type='validation', label=None, description=None, config={'label': 'Validate Create Input', 'description': 'Validate request body for /v1/notifications'}, endpoint_id=None, entity_id=None, position=1)"
+    "IntegrationFlowNode(id=None, task_id=None, node_key='validate', node_type='validation', label=None, description=None, config={'label': 'validate', 'description': ''}, endpoint_id=None, entity_id=None, position=1)"
   ],
   "binding_endpoints": [
     "None"

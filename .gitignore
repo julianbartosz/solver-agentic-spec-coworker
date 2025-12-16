@@ -3,6 +3,16 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Local environment (secrets)
+.env
+.env.*
+
+# Local environment helpers
+.envrc
+
+# Local virtual environments
+.venv311/
+
 # C extensions
 *.so
 

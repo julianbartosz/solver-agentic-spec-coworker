@@ -59,23 +59,58 @@ def get_layout_dirs(repo_profile: Optional[RepoProfile]) -> Tuple[str, str, str]
     """
     Get the directory paths for clients, flows, and tests from a RepoProfile.
     
+    Combines integrations_root with subdirectory layout_hints to produce
+    full relative paths from repo root.
+    
+    Bug #34 fix: Handle case where layout_hints already contain full paths
+    (e.g., "src/integrations/clients" instead of just "clients").
+    
     Returns:
         Tuple of (clients_dir, flows_dir, tests_dir)
     """
-    if not repo_profile or not repo_profile.layout_hints:
-        # Sensible defaults
+    if not repo_profile:
+        # Sensible defaults when no profile
         return (
             "src/integrations/clients",
             "src/integrations/flows",
             "tests/integrations",
         )
 
-    hints = repo_profile.layout_hints
+    # Get the base roots
+    integrations_root = getattr(repo_profile, 'integrations_root', 'src/integrations')
+    tests_root = getattr(repo_profile, 'tests_root', 'tests/integrations')
+    
+    hints = repo_profile.layout_hints or {}
 
     # Note: profile might use "workflows_dir" or "flows_dir"
-    clients_dir = hints.get("clients_dir", "src/integrations/clients")
-    flows_dir = hints.get("workflows_dir", hints.get("flows_dir", "src/integrations/flows"))
-    tests_dir = hints.get("tests_dir", "tests/integrations")
+    # Subdirectory names within integrations_root
+    clients_subdir = hints.get("clients_dir", "clients")
+    flows_subdir = hints.get("workflows_dir", hints.get("flows_dir", "flows"))
+    
+    # Strip trailing slashes for clean join
+    integrations_root = integrations_root.rstrip("/")
+    tests_root = tests_root.rstrip("/")
+    
+    # Bug #34 fix: Check if layout_hints already contain full paths
+    # If clients_subdir already starts with integrations_root, use it directly
+    # This happens with archetype detection which stores full paths in hints
+    if clients_subdir.startswith(integrations_root):
+        clients_dir = clients_subdir
+    elif "/" in clients_subdir and not clients_subdir.startswith(integrations_root):
+        # It's a full path but different root - use as-is
+        clients_dir = clients_subdir
+    else:
+        # It's just a subdirectory name - combine with root
+        clients_dir = f"{integrations_root}/{clients_subdir}"
+    
+    if flows_subdir.startswith(integrations_root):
+        flows_dir = flows_subdir
+    elif "/" in flows_subdir and not flows_subdir.startswith(integrations_root):
+        flows_dir = flows_subdir
+    else:
+        flows_dir = f"{integrations_root}/{flows_subdir}"
+    
+    tests_dir = tests_root
 
     return (clients_dir, flows_dir, tests_dir)
 

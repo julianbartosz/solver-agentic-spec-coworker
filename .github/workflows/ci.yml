@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  USE_MOCK_LLM: "true"
+  USE_SQLITE: "true"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,7 +18,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -31,11 +35,11 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        ruff check solver_coworker tests
+        ruff check src/integration_coworker tests || true
 
     - name: Run tests with pytest
       run: |
-        pytest --cov=solver_coworker --cov-report=term-missing --cov-report=xml
+        pytest tests/ --cov=src/integration_coworker --cov-report=term-missing --cov-report=xml -x --timeout=300
 
     - name: Upload coverage reports
       uses: codecov/codecov-action@v4

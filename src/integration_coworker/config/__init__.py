@@ -30,9 +30,6 @@ from urllib.parse import urlparse
 
 from integration_coworker.config.llm_mode import LLMMode, get_llm_mode, reset_llm_mode
 
-# Cache for loaded config
-_CONFIG_CACHE: Optional[Dict[str, Any]] = None
-
 # Cache for loaded archetypes
 _ARCHETYPE_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -137,6 +134,34 @@ class LLMConfig:
 
 
 @dataclass
+class CacheConfig:
+    """
+    Redis LLM cache configuration (Plan 7).
+    
+    Environment Variables:
+        REDIS_URL: Redis connection URL (default: redis://localhost:6379/0)
+        LLM_CACHE_ENABLED: Enable/disable caching (default: true)
+        LLM_CACHE_TTL: Cache TTL in seconds (default: 86400 = 24h)
+    """
+    
+    # Redis connection URL
+    redis_url: str = field(default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    
+    # Enable/disable caching
+    enabled: bool = field(
+        default_factory=lambda: os.getenv("LLM_CACHE_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+    )
+    
+    # Cache TTL in seconds (default 24 hours)
+    ttl: int = field(default_factory=lambda: int(os.getenv("LLM_CACHE_TTL", "86400")))
+    
+    @property
+    def is_enabled(self) -> bool:
+        """Check if caching is enabled."""
+        return self.enabled
+
+
+@dataclass
 class EmbeddingConfig:
     """Embedding configuration for pgvector."""
 
@@ -157,6 +182,7 @@ class Settings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
 
     # HTTP client settings
     http_timeout: int = field(default_factory=lambda: int(os.getenv("HTTP_TIMEOUT", "30")))
@@ -183,6 +209,59 @@ class Settings:
     )
     streaming_threshold_chunks: int = field(
         default_factory=lambda: int(os.getenv("STREAMING_THRESHOLD_CHUNKS", "500"))  # 500 chunks
+    )
+
+    # ==========================================================================
+    # Dynamic Pattern Learning (PL-001)
+    # Per docs/PATTERN_LEARNING_DESIGN.md
+    # 
+    # PRODUCTION NOTE: Pattern learning is OFF by default to avoid unexpected
+    # storage growth and behavior changes. Enable granularly as needed.
+    # ==========================================================================
+    
+    # Master switch - enables/disables all pattern learning features
+    # Default: false (safe for production)
+    pattern_learning_enabled: bool = field(
+        default_factory=lambda: os.getenv("PATTERN_LEARNING_ENABLED", "false").lower() in ("true", "1", "yes")
+    )
+    
+    # Granular control: capture workflow events to kg_run_events
+    # Requires pattern_learning_enabled=true
+    pattern_capture_events: bool = field(
+        default_factory=lambda: os.getenv("PATTERN_CAPTURE_EVENTS", "true").lower() in ("true", "1", "yes")
+    )
+    
+    # Granular control: run pattern discovery on event logs
+    # Requires pattern_learning_enabled=true
+    pattern_discover_candidates: bool = field(
+        default_factory=lambda: os.getenv("PATTERN_DISCOVER_CANDIDATES", "true").lower() in ("true", "1", "yes")
+    )
+    
+    # Granular control: auto-promote candidates to learned patterns
+    # Requires pattern_learning_enabled=true AND pattern_discover_candidates=true
+    pattern_auto_promote: bool = field(
+        default_factory=lambda: os.getenv("PATTERN_AUTO_PROMOTE", "false").lower() in ("true", "1", "yes")
+    )
+    
+    # Granular control: use learned patterns during alignment
+    # Requires pattern_learning_enabled=true
+    pattern_match_learned: bool = field(
+        default_factory=lambda: os.getenv("PATTERN_MATCH_LEARNED", "true").lower() in ("true", "1", "yes")
+    )
+    
+    # Minimum support count for auto-promoting a pattern candidate
+    pattern_promotion_threshold: int = field(
+        default_factory=lambda: int(os.getenv("PATTERN_PROMOTION_THRESHOLD", "3"))
+    )
+    
+    # Minimum average feedback score for promotion (0.0-1.0)
+    pattern_min_feedback_score: float = field(
+        default_factory=lambda: float(os.getenv("PATTERN_MIN_FEEDBACK_SCORE", "0.6"))
+    )
+    
+    # Decay factor for unused pattern confidence (applied per discovery cycle)
+    pattern_confidence_decay: float = field(
+        default_factory=lambda: float(os.getenv("PATTERN_CONFIDENCE_DECAY", "0.95"))
     )
 
     @classmethod
@@ -290,68 +369,9 @@ def should_use_streaming_for_spec(total_content_bytes: int, estimated_chunks: in
 
 def reset_settings() -> None:
     """Reset settings (for testing)."""
-    global _settings, _CONFIG_CACHE
+    global _settings
     _settings = None
-    _CONFIG_CACHE = None
     reset_llm_mode()
-
-
-def _load_config() -> Dict[str, Any]:
-    """Load configuration from models.yaml."""
-    global _CONFIG_CACHE
-
-    if _CONFIG_CACHE is not None:
-        return _CONFIG_CACHE
-
-    # Find models.yaml relative to this file
-    config_dir = Path(__file__).parent
-    config_file = config_dir / "models.yaml"
-
-    if config_file.exists():
-        with open(config_file, 'r') as f:
-            _CONFIG_CACHE = yaml.safe_load(f) or {}
-    else:
-        _CONFIG_CACHE = {}
-
-    return _CONFIG_CACHE
-
-
-def get_llm_config(task_type: str = "default") -> Dict[str, Any]:
-    """
-    Get LLM configuration for a specific task type.
-    
-    Args:
-        task_type: Type of task (e.g., "planning", "extraction", "codegen")
-    
-    Returns:
-        Configuration dictionary with model, temperature, etc.
-    """
-    config = _load_config()
-    llm_config = config.get("llm", {})
-    settings = get_settings()
-
-    # Get task-specific config or fall back to defaults
-    if task_type in llm_config:
-        task_config = llm_config[task_type].copy()
-    else:
-        # Default configuration
-        task_config = {
-            "model": settings.llm.default_model,
-            "temperature": 0.7,
-            "max_tokens": 2000,
-        }
-
-    # Add provider settings
-    task_config["api_key"] = settings.llm.api_key
-    if settings.llm.base_url:
-        task_config["base_url"] = settings.llm.base_url
-    task_config["use_mock"] = settings.llm.use_mock
-
-    # Allow environment variable overrides for model
-    if os.getenv("LLM_MODEL"):
-        task_config["model"] = os.getenv("LLM_MODEL")
-
-    return task_config
 
 
 def get_embedding_config() -> Dict[str, Any]:
@@ -361,14 +381,13 @@ def get_embedding_config() -> Dict[str, Any]:
     Returns:
         Configuration for embedding model (dimensions must match pgvector VECTOR(1536))
     """
-    config = _load_config()
     settings = get_settings()
 
-    embedding_config = config.get("embeddings", {
+    embedding_config = {
         "model": settings.embedding.model,
         "dimensions": settings.embedding.dimensions,
         "batch_size": settings.embedding.batch_size,
-    })
+    }
 
     # Add API key for embedding calls
     embedding_config["api_key"] = settings.llm.api_key
@@ -422,6 +441,24 @@ def get_http_client_config() -> Dict[str, Any]:
         "timeout": settings.http_timeout,
         "max_retries": settings.http_max_retries,
         "retry_backoff": settings.http_retry_backoff,
+    }
+
+
+def get_cache_config() -> Dict[str, Any]:
+    """
+    Get LLM cache configuration (Plan 7).
+    
+    Returns:
+        Configuration for Redis LLM cache including:
+        - redis_url: Connection URL
+        - enabled: Whether caching is enabled
+        - ttl: Cache TTL in seconds
+    """
+    settings = get_settings()
+    return {
+        "redis_url": settings.cache.redis_url,
+        "enabled": settings.cache.enabled,
+        "ttl": settings.cache.ttl,
     }
 
 
@@ -512,7 +549,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     Apply environment variable overrides to archetype config.
     
     Supports:
-    - LLM_PROVIDER: Override model.provider
+    - LLM_PROVIDER: Override model.provider (and reset model name if incompatible)
     - LLM_MODEL: Override model.name (only for matching provider - won't apply OpenAI model to Anthropic)
     - USE_MOCK_LLM: Force mock mode
     
@@ -520,17 +557,52 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     - gpt-* models only apply to openai provider
     - claude-* models only apply to anthropic provider
     This prevents accidentally using wrong model with wrong provider.
+    
+    Bug #26 Fix: When LLM_PROVIDER changes the provider, the model name is reset
+    to the new provider's default if the archetype's model is incompatible.
     """
     result = config.copy()
+    
+    # Default models for each provider
+    PROVIDER_DEFAULT_MODELS = {
+        "openai": "gpt-4o",
+        "anthropic": "claude-sonnet-4-5-20250929",
+        "google": "gemini-2.5-flash",
+        "mock": "mock-model",
+    }
 
     # Model overrides
     if "model" in result:
         model_config = result["model"].copy()
-        current_provider = model_config.get("provider", "openai")
+        original_provider = model_config.get("provider", "openai")
+        current_provider = original_provider
+        current_model = model_config.get("name", "")
 
         if os.getenv("LLM_PROVIDER"):
-            model_config["provider"] = os.getenv("LLM_PROVIDER")
-            current_provider = model_config["provider"]
+            new_provider = os.getenv("LLM_PROVIDER")
+            model_config["provider"] = new_provider
+            
+            # Bug #26 Fix: Check if the current model is incompatible with the new provider
+            # If so, reset to the new provider's default model
+            if new_provider != original_provider:
+                is_openai_model = current_model.startswith(("gpt-", "o1-", "text-"))
+                is_anthropic_model = current_model.startswith("claude-")
+                is_google_model = current_model.startswith("gemini-")
+                
+                # Determine if model is compatible with new provider
+                model_compatible = (
+                    (new_provider == "openai" and is_openai_model) or
+                    (new_provider == "anthropic" and is_anthropic_model) or
+                    (new_provider == "google" and is_google_model) or
+                    (new_provider == "mock")  # Mock accepts any model
+                )
+                
+                if not model_compatible:
+                    # Reset to new provider's default model
+                    default_model = PROVIDER_DEFAULT_MODELS.get(new_provider, "gpt-4o")
+                    model_config["name"] = default_model
+            
+            current_provider = new_provider
 
         # Only apply LLM_MODEL if it matches the provider
         env_model = os.getenv("LLM_MODEL")

@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Docker Compose configuration for Integration Co-Worker development
-# See docs/db_setup.md for full setup instructions
+# See docs/GETTING_STARTED.md for full setup instructions
 
 services:
   db:
@@ -22,5 +22,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Redis cache for LLM responses (Plan 7)
+  redis:
+    image: redis:7-alpine
+    container_name: integration-coworker-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
 volumes:
   pgdata:
+  redisdata:

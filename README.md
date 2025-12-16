@@ -110,13 +110,27 @@ This outputs a valid JSON `IntegrationResult` to stdout with all debug logs supp
 
 ### Testing the Vertical Slice
 
-Run the complete test suite:
+Install test extras and run the suite locally:
 
 ```bash
-PYTHONPATH=src pytest -v
+python -m pip install -e ."[test]"
+PYTHONPATH=src python -m pytest -q
 ```
 
-All 9 tests should pass, covering:
+Checkpoint stack (pinned for CI):
+
+- `langgraph-checkpoint-sqlite==3.0.0`
+- `langgraph-checkpoint-postgres==3.0.0`
+
+These versions are validated with AsyncPostgresSaver roundtrip tests; keep them in sync when upgrading LangGraph.
+
+This installs all async/test dependencies (pytest-asyncio, aiosqlite, langgraph checkpoint extras, openpyxl, graphql, simpleeval, reportlab, testcontainers) so the full suite runs without import errors. Use SQLite-only mode (no Postgres) with:
+
+```bash
+USE_SQLITE=true PYTHONPATH=src python -m pytest -q
+```
+
+All tests should pass, covering:
 - End-to-end dry-run workflow
 - Repository integration with file writing
 - Provider inference
@@ -125,7 +139,19 @@ All 9 tests should pass, covering:
 - Policy attachment
 - Error handling
 
-See `docs/PHASE2_NOTES.md` for detailed implementation notes.
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Installation, database setup, LLM config, quick demo, production runbook |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture, LangGraph pipeline, Silver/Gold medallion model |
+| [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) | 60-90 minute codebase walkthrough for onboarding |
+
+For design decisions, see [`docs/decisions/`](docs/decisions/).
+
+Historical documentation (milestones, implementation plans, audits) is archived in [`docs/history/`](docs/history/).
 
 ---
 

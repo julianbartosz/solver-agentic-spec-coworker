@@ -1,0 +1,6 @@
+id,name,email,balance,created_date
+1,Alice Johnson,alice@example.com,1500.50,2024-01-15
+2,Bob Smith,bob@example.com,2340.00,2024-02-20
+3,Charlie Brown,,850.25,2024-03-10
+4,Diana Lee,diana@example.com,,2024-04-05
+5,Eve Wilson,eve@example.com,3200.75,2024-05-18

@@ -3,6 +3,8 @@ Public API entrypoint for the integration coworker.
 
 File: api/entrypoint.py (per Section 4.4 of design spec)
 """
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional, Union, TYPE_CHECKING
 
@@ -59,6 +61,11 @@ def design_and_generate_integration(
         repo_profile=repo_profile,
         options=normalized_options,
     )
+
+    # Bug #68 Fix: Generate unique run_id BEFORE workflow starts
+    # This ensures LangGraph checkpointing uses unique thread_id per run
+    # instead of falling back to "default" which causes checkpoint collisions
+    state.run_id = f"run_{uuid.uuid4().hex[:8]}_{int(datetime.now().timestamp())}"
 
     final_state = run_workflow(state)
 

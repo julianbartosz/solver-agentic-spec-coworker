@@ -50,6 +50,22 @@ def _hydrate_from_cache(state: WorkflowState) -> bool:
         engine = get_engine_type()
         cur = conn.cursor()
         
+        # Ensure the destination lists exist and start clean. Hydration must
+        # be deterministic per run; if we append into an already-populated
+        # state we can get confusing/incorrect counts.
+        if state.endpoints is None:
+            state.endpoints = []
+        else:
+            state.endpoints.clear()
+        if state.schemas is None:
+            state.schemas = []
+        else:
+            state.schemas.clear()
+        if state.entities is None:
+            state.entities = []
+        else:
+            state.entities.clear()
+
         # Hydrate endpoints
         if engine == "postgres":
             cur.execute("""
@@ -87,23 +103,41 @@ def _hydrate_from_cache(state: WorkflowState) -> bool:
             )
             state.endpoints.append(endpoint)
         
+        # Determine source_system_id for this cached spec, then hydrate all
+        # schema/entity rows for that source system.
+        if engine == "postgres":
+            cur.execute("""
+                SELECT source_system_id
+                FROM spec_silver.spec_documents
+                WHERE id = %s
+            """, (spec_doc_id,))
+        else:
+            cur.execute("""
+                SELECT source_system_id
+                FROM spec_documents
+                WHERE id = ?
+            """, (spec_doc_id,))
+
+        row = cur.fetchone()
+        source_system_id = row[0] if row else None
+        if not source_system_id:
+            logger.warning("Cache hydration: missing source_system_id for cached spec_document")
+            conn.close()
+            return False
+
         # Hydrate schemas
         if engine == "postgres":
             cur.execute("""
                 SELECT id, source_system_id, name, ref
                 FROM spec_silver.schemas
-                WHERE source_system_id = (
-                    SELECT source_system_id FROM spec_silver.spec_documents WHERE id = %s
-                )
-            """, (spec_doc_id,))
+                WHERE source_system_id = %s
+            """, (source_system_id,))
         else:
             cur.execute("""
                 SELECT id, source_system_id, name, ref
                 FROM schemas
-                WHERE source_system_id = (
-                    SELECT source_system_id FROM spec_documents WHERE id = ?
-                )
-            """, (spec_doc_id,))
+                WHERE source_system_id = ?
+            """, (source_system_id,))
         
         schema_rows = cur.fetchall()
         for row in schema_rows:
@@ -120,18 +154,14 @@ def _hydrate_from_cache(state: WorkflowState) -> bool:
             cur.execute("""
                 SELECT id, source_system_id, name, schema_id, description
                 FROM spec_silver.entities
-                WHERE source_system_id = (
-                    SELECT source_system_id FROM spec_silver.spec_documents WHERE id = %s
-                )
-            """, (spec_doc_id,))
+                WHERE source_system_id = %s
+            """, (source_system_id,))
         else:
             cur.execute("""
                 SELECT id, source_system_id, name, schema_id, description
                 FROM entities
-                WHERE source_system_id = (
-                    SELECT source_system_id FROM spec_documents WHERE id = ?
-                )
-            """, (spec_doc_id,))
+                WHERE source_system_id = ?
+            """, (source_system_id,))
         
         entity_rows = cur.fetchall()
         for row in entity_rows:
@@ -347,12 +377,16 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
     if state.cache_hit:
         logger.info("Cache hit detected, attempting DB hydration")
         if _hydrate_from_cache(state):
-            logger.info("Successfully hydrated Silver model from cache")
-            state.completed_steps.append("build_silver_api_model")
-            return state
+            # V1.2: Validate hydration actually produced endpoints
+            # If hydration succeeded but returned no data, fall back to parsing
+            if state.endpoints:
+                logger.info("Successfully hydrated Silver model from cache")
+                state.completed_steps.append("build_silver_api_model")
+                return state
+            else:
+                logger.warning("Cache hydration returned 0 endpoints, falling back to parsing")
         else:
             logger.warning("Cache hydration failed, falling back to parsing")
-            # Continue with normal parsing below
     
     # Get all parsed specs - V2 prefers parsed_specs, falls back to legacy
     all_specs: list[dict] = []

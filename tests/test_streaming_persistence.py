@@ -10,13 +10,147 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
+from integration_coworker.config import reset_settings
+from integration_coworker.persistence.sql_helpers import get_engine_type
+from integration_coworker.persistence.upsert import InsertDoNothingBuilder
+
 # Set up test environment before imports
 os.environ["USE_SQLITE"] = "true"
 os.environ["USE_MOCK_LLM"] = "true"
 
 
+def _table(name: str, *, engine: str) -> str:
+    return f"spec_silver.{name}" if engine == "postgres" else name
+
+
+def _placeholder(param_name: str, *, engine: str) -> str:
+    return f"%({param_name})s" if engine == "postgres" else f":{param_name}"
+
+
+def _ensure_spec_document(conn, *, code: str, display_name: str, uri: str, sha256: str, content_type: str):
+    """Create source_system + spec_document idempotently and return their IDs."""
+    engine = get_engine_type()
+    cur = conn.cursor()
+
+    source_builder = InsertDoNothingBuilder(
+        table="source_systems",
+        columns=["code", "display_name"],
+        conflict_columns=["code"],
+        schema="spec_silver" if engine == "postgres" else None,
+        engine_type=engine,
+    )
+    src_sql, src_params = source_builder.render({"code": code, "display_name": display_name})
+    cur.execute(src_sql, src_params)
+
+    cur.execute(
+        f"SELECT id FROM {_table('source_systems', engine=engine)} WHERE code = {_placeholder('code', engine=engine)}",
+        {"code": code},
+    )
+    source_system_id = cur.fetchone()[0]
+
+    doc_builder = InsertDoNothingBuilder(
+        table="spec_documents",
+        columns=["source_system_id", "uri", "sha256", "content_type"],
+        conflict_columns=["uri"],
+        schema="spec_silver" if engine == "postgres" else None,
+        engine_type=engine,
+    )
+    doc_sql, doc_params = doc_builder.render(
+        {
+            "source_system_id": source_system_id,
+            "uri": uri,
+            "sha256": sha256,
+            "content_type": content_type,
+        }
+    )
+    cur.execute(doc_sql, doc_params)
+
+    cur.execute(
+        f"SELECT id FROM {_table('spec_documents', engine=engine)} WHERE uri = {_placeholder('uri', engine=engine)}",
+        {"uri": uri},
+    )
+    spec_document_id = cur.fetchone()[0]
+
+    return source_system_id, spec_document_id
+
+
 class TestStreamingModule:
     """Tests for persistence/streaming.py functions."""
+
+    def test_stream_chunks_to_silver_idempotent(self):
+        """Repeated streaming of same chunks should not duplicate rows."""
+        from integration_coworker.persistence.streaming import stream_chunks_to_silver
+        from integration_coworker.persistence import db
+
+        db.init_schema()
+
+        conn = db.get_connection()
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_idem",
+            display_name="Test Idempotent",
+            uri="test://idem",
+            sha256="idem123",
+            content_type="application/yaml",
+        )
+        conn.commit()
+        conn.close()
+
+        test_chunks = [(0, "chunk"), (1, "chunk")]
+
+        first = stream_chunks_to_silver(iter(test_chunks), spec_document_id)
+        second = stream_chunks_to_silver(iter(test_chunks), spec_document_id)
+
+        assert first == second
+
+        conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM spec_chunks WHERE spec_document_id = ?", (spec_document_id,))
+        count = cur.fetchone()[0]
+        conn.close()
+
+        assert count == len(test_chunks)
+
+
+@pytest.mark.postgres
+def test_stream_chunks_to_silver_idempotent_postgres(monkeypatch):
+    if not os.environ.get("DATABASE_URL"):
+        pytest.skip("DATABASE_URL not set for Postgres test")
+
+    monkeypatch.setenv("USE_SQLITE", "false")
+    reset_settings()
+
+    from integration_coworker.persistence.streaming import stream_chunks_to_silver
+    from integration_coworker.persistence import db
+
+    db.init_schema()
+
+    conn = db.get_connection()
+    _, spec_document_id = _ensure_spec_document(
+        conn,
+        code="pg_idem",
+        display_name="PG Idempotent",
+        uri="pg://idem",
+        sha256="pgidem123",
+        content_type="application/yaml",
+    )
+    conn.commit()
+    conn.close()
+
+    test_chunks = [(0, "chunk"), (1, "chunk")]
+
+    first = stream_chunks_to_silver(iter(test_chunks), spec_document_id)
+    second = stream_chunks_to_silver(iter(test_chunks), spec_document_id)
+
+    assert first == second
+
+    conn = db.get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM spec_silver.spec_chunks WHERE spec_document_id = %s", (spec_document_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+
+    assert count == len(test_chunks)
     
     def test_stream_chunks_to_silver_basic(self):
         """Test basic chunk streaming to database."""
@@ -28,24 +162,14 @@ class TestStreamingModule:
         
         # Create test spec_document first
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test', 'Test')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://spec', 'abc123', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://spec'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test",
+            display_name="Test",
+            uri="test://spec",
+            sha256="abc123",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         
@@ -76,24 +200,14 @@ class TestStreamingModule:
         
         # Set up test data
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test_embed', 'Test Embed')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test_embed'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://embed', 'def456', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://embed'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_embed",
+            display_name="Test Embed",
+            uri="test://embed",
+            sha256="def456",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         
@@ -134,24 +248,14 @@ class TestStreamingModule:
         
         # Set up test data
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test_ids', 'Test IDs')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test_ids'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://ids', 'ghi789', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://ids'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_ids",
+            display_name="Test IDs",
+            uri="test://ids",
+            sha256="ghi789",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         
@@ -179,24 +283,14 @@ class TestLazyLoaderModule:
         
         # Set up test data
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test_iter', 'Test Iter')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test_iter'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://iter', 'jkl012', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://iter'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_iter",
+            display_name="Test Iter",
+            uri="test://iter",
+            sha256="jkl012",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         
@@ -225,24 +319,14 @@ class TestLazyLoaderModule:
         
         # Set up test data
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test_byid', 'Test ById')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test_byid'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://byid', 'mno345', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://byid'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_byid",
+            display_name="Test ById",
+            uri="test://byid",
+            sha256="mno345",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         
@@ -268,24 +352,14 @@ class TestLazyLoaderModule:
         
         # Set up test data
         conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO source_systems (code, display_name) 
-            VALUES ('test_count', 'Test Count')
-        """)
-        cur.execute("SELECT id FROM source_systems WHERE code = 'test_count'")
-        source_system_id = cur.fetchone()[0]
-        
-        cur.execute("""
-            INSERT OR IGNORE INTO spec_documents 
-                (source_system_id, uri, sha256, content_type)
-            VALUES (?, 'test://count', 'pqr678', 'application/yaml')
-        """, (source_system_id,))
-        cur.execute("""
-            SELECT id FROM spec_documents 
-            WHERE uri = 'test://count'
-        """)
-        spec_document_id = cur.fetchone()[0]
+        _, spec_document_id = _ensure_spec_document(
+            conn,
+            code="test_count",
+            display_name="Test Count",
+            uri="test://count",
+            sha256="pqr678",
+            content_type="application/yaml",
+        )
         conn.commit()
         conn.close()
         

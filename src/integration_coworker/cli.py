@@ -71,6 +71,214 @@ def _setup_logging(verbose: bool = False) -> None:
             lg.addHandler(handler)
 
 
+# =============================================================================
+# Auto-Resume Helper Functions (V2)
+# =============================================================================
+
+def _try_resume_run(
+    run_id: str,
+    json_output: bool,
+    verbose: bool,
+) -> Optional[str]:
+    """
+    Try to resume a specific run by ID.
+    
+    Returns run_id if checkpoint exists and is resumable, None otherwise.
+    """
+    try:
+        from integration_coworker.persistence.checkpoints import load_checkpoint, get_completed_nodes
+        
+        checkpoint = load_checkpoint(run_id)
+        if checkpoint:
+            completed = get_completed_nodes(run_id)
+            if completed and verbose:
+                _logger.debug(f"Found checkpoint for run {run_id} with {len(completed)} completed nodes")
+            return run_id
+        else:
+            if not json_output:
+                typer.echo(f"⚠ No checkpoint found for run {run_id}", err=True)
+            return None
+    except Exception as e:
+        if verbose:
+            _logger.debug(f"Could not check checkpoint for {run_id}: {e}")
+        return None
+
+
+def _try_auto_resume(
+    provider_code: Optional[str],
+    spec_refs: List[str],
+    json_output: bool,
+    verbose: bool,
+) -> Optional[str]:
+    """
+    Try to auto-detect an interrupted run to resume.
+    
+    Looks for the most recent incomplete run that matches:
+    - Same provider_code (if provided)
+    - Same spec_refs
+    
+    Returns run_id if found, None otherwise.
+    """
+    try:
+        from integration_coworker.persistence.db import get_connection, get_engine_type
+        from integration_coworker.persistence.checkpoints import get_completed_nodes
+        from integration_coworker.graph.runtime import WORKFLOW_NODE_ORDER
+        
+        engine = get_engine_type()
+        
+        # Find recent incomplete runs
+        # Bug #61 fix: Query checkpoints directly for provider_code (run_status.task_id may be NULL)
+        # Checkpoints store provider_code in state_json which is always populated
+        if engine == "postgres":
+            from integration_coworker.persistence.postgres import get_connection as pg_get_connection
+            
+            with pg_get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Find runs that are incomplete (status = 'running' or no persist_run_outcome)
+                    # Use checkpoints to get provider_code since run_status.task_id may be NULL
+                    if provider_code:
+                        cur.execute("""
+                            SELECT DISTINCT rs.run_id, rs.started_at
+                            FROM integration_gold.run_status rs
+                            JOIN integration_gold.run_checkpoints rc_plan 
+                                ON rs.run_id = rc_plan.run_id AND rc_plan.node_name = 'plan_run'
+                            WHERE rs.status = 'running'
+                            AND rc_plan.state_json->>'provider_code' = %s
+                            AND NOT EXISTS (
+                                SELECT 1 FROM integration_gold.run_checkpoints rc
+                                WHERE rc.run_id = rs.run_id
+                                AND rc.node_name = 'persist_run_outcome'
+                            )
+                            ORDER BY rs.started_at DESC
+                            LIMIT 5
+                        """, (provider_code,))
+                    else:
+                        cur.execute("""
+                            SELECT rs.run_id, rs.started_at
+                            FROM integration_gold.run_status rs
+                            WHERE rs.status = 'running'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM integration_gold.run_checkpoints rc
+                                WHERE rc.run_id = rs.run_id
+                                AND rc.node_name = 'persist_run_outcome'
+                            )
+                            ORDER BY rs.started_at DESC
+                            LIMIT 5
+                        """)
+                    
+                    rows = cur.fetchall()
+                    
+                    if rows:
+                        # Return the most recent incomplete run
+                        run_id = rows[0][0]
+                        if verbose:
+                            _logger.debug(f"Found {len(rows)} incomplete run(s), most recent: {run_id}")
+                        if not json_output:
+                            typer.echo(f"🔍 Found interrupted run: {run_id}")
+                        return run_id
+        else:
+            # SQLite fallback - Bug #61 fix: Query checkpoints for provider_code
+            conn = get_connection()
+            cur = conn.cursor()
+            
+            if provider_code:
+                cur.execute("""
+                    SELECT DISTINCT rs.run_id, rs.started_at FROM run_status rs
+                    JOIN run_checkpoints rc_plan ON rs.run_id = rc_plan.run_id
+                    WHERE rs.status = 'running'
+                    AND rc_plan.node_name = 'plan_run'
+                    AND json_extract(rc_plan.state_json, '$.provider_code') = ?
+                    AND rs.run_id NOT IN (
+                        SELECT run_id FROM run_checkpoints
+                        WHERE node_name = 'persist_run_outcome'
+                    )
+                    ORDER BY rs.started_at DESC
+                    LIMIT 5
+                """, (provider_code,))
+            else:
+                cur.execute("""
+                    SELECT rs.run_id, rs.started_at FROM run_status rs
+                    WHERE rs.status = 'running'
+                    AND rs.run_id NOT IN (
+                        SELECT run_id FROM run_checkpoints
+                        WHERE node_name = 'persist_run_outcome'
+                    )
+                    ORDER BY rs.started_at DESC
+                    LIMIT 5
+                """)
+            
+            rows = cur.fetchall()
+            conn.close()
+            
+            if rows:
+                run_id = rows[0][0]
+                if verbose:
+                    _logger.debug(f"Found {len(rows)} incomplete run(s), most recent: {run_id}")
+                if not json_output:
+                    typer.echo(f"🔍 Found interrupted run: {run_id}")
+                return run_id
+        
+        if verbose:
+            _logger.debug("No incomplete runs found for auto-resume")
+        return None
+        
+    except Exception as e:
+        if verbose:
+            _logger.debug(f"Auto-resume check failed: {e}")
+        return None
+
+
+def _handle_run_result(result, options, json_output: bool):
+    """
+    Handle the result of a run (normal or resumed).
+    
+    Extracted to avoid code duplication between normal and resumed runs.
+    """
+    # Check for errors in the result
+    has_errors = False
+    if result.report_markdown and "## Errors" in result.report_markdown:
+        error_section = result.report_markdown.split("## Errors", 1)[1].split("##", 1)[0]
+        if error_section.strip() and not error_section.strip().startswith("*(none)*"):
+            has_errors = True
+
+    if json_output:
+        output = {
+            "run_id": result.run_id,
+            "provider_code": result.task.provider_code if result.task else None,
+            "task_slug": result.task.task_slug if result.task else None,
+            "code_artifacts": len(result.code_artifacts),
+            "files_created": len([c for c in (result.repo_changes.changes if result.repo_changes else []) if c.change_type == "create"]),
+            "files_updated": len([c for c in (result.repo_changes.changes if result.repo_changes else []) if c.change_type == "update"]),
+            "dry_run": options.dry_run,
+            "status": "completed_with_errors" if has_errors else "completed",
+            "report_markdown": result.report_markdown
+        }
+        typer.echo(json.dumps(output, indent=2))
+    else:
+        status_icon = "⚠" if has_errors else "✓"
+        typer.echo(f"\n{status_icon} Run completed: {result.run_id}")
+        if result.task:
+            typer.echo(f"  Provider: {result.task.provider_code}")
+            typer.echo(f"  Task: {result.task.task_slug}")
+        typer.echo(f"  Code artifacts: {len(result.code_artifacts)}")
+        if result.repo_changes:
+            files_created = len([c for c in result.repo_changes.changes if c.change_type == "create"])
+            files_updated = len([c for c in result.repo_changes.changes if c.change_type == "update"])
+            typer.echo(f"  Files created: {files_created}")
+            typer.echo(f"  Files updated: {files_updated}")
+            typer.echo(f"  Dry run: {'Yes' if options.dry_run else 'No'}")
+
+        if has_errors:
+            typer.echo("\n⚠ Completed with errors - check report for details")
+
+        if result.report_markdown:
+            typer.echo("\n--- Full Report ---\n")
+            typer.echo(result.report_markdown)
+
+    if has_errors:
+        raise typer.Exit(code=1)
+
+
 app = typer.Typer(
     name="integration-coworker",
     help="Agentic API Integration Designer & Code Generator",
@@ -117,6 +325,21 @@ def run_integration(
         "--strict-codegen",
         help="V1.1: Enable strict code generation mode - apply auto-formatting and fail on validation errors",
     ),
+    constrained_codegen: bool = typer.Option(
+        False,
+        "--constrained-codegen",
+        help="V2.2: Enable constrained code generation - inject paths/fixtures from spec rather than LLM generation (reduces hallucination)",
+    ),
+    auto_resume: bool = typer.Option(
+        False,
+        "--auto-resume",
+        help="V2: Automatically resume from checkpoint if a previous run with same provider was interrupted",
+    ),
+    resume_run_id: Optional[str] = typer.Option(
+        None,
+        "--resume",
+        help="V2: Resume a specific interrupted run by its run_id",
+    ),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose debug logging"),
 ):
@@ -138,6 +361,12 @@ def run_integration(
         
         # With verbose debug logging
         integration-coworker run -s ./api.yaml -t "Create payment" --verbose
+        
+        # Auto-resume if interrupted (V2)
+        integration-coworker run -s ./api.yaml -t "Create payment" --auto-resume
+        
+        # Resume a specific run by ID (V2)
+        integration-coworker run -s ./api.yaml -t "Create payment" --resume run-abc123
     """
     # Setup logging based on verbose flag
     _setup_logging(verbose)
@@ -158,6 +387,7 @@ def run_integration(
         _logger.debug(f"Standalone flag: {standalone}")
         _logger.debug(f"No cache: {no_cache}")
         _logger.debug(f"Strict codegen: {strict_codegen}")
+        _logger.debug(f"Constrained codegen: {constrained_codegen}")
 
     # Handle --standalone as alias for --policy-mode inline
     if standalone:
@@ -177,7 +407,96 @@ def run_integration(
         policy_mode=policy_mode,  # V2.1 (GAP-02)
         no_cache=no_cache,  # V1.1 (FT-001)
         strict_codegen=strict_codegen,  # V1.1 (FT-008)
+        constrained_codegen=constrained_codegen,  # V2.2 (Dynamic Capability Fix #7)
     )
+
+    # V2: Auto-resume logic - check for interrupted runs
+    resuming_from = None
+    if resume_run_id:
+        # Explicit resume request
+        resuming_from = _try_resume_run(resume_run_id, json_output, verbose)
+    elif auto_resume and not dry_run:
+        # Auto-detect interrupted runs for this provider
+        resuming_from = _try_auto_resume(provider_code, spec_ref, json_output, verbose)
+    
+    if resuming_from:
+        # Resume from checkpoint
+        try:
+            from integration_coworker.persistence.checkpoints import load_checkpoint, get_completed_nodes
+            from integration_coworker.graph.runtime import run_from_node, WORKFLOW_NODE_ORDER
+            from integration_coworker.graph.state import WorkflowState
+            from integration_coworker.api.types import IntegrationResult
+            
+            checkpoint_state = load_checkpoint(resuming_from)
+            if checkpoint_state:
+                completed = get_completed_nodes(resuming_from)
+                
+                if not json_output:
+                    typer.echo(f"📂 Resuming run {resuming_from}")
+                    typer.echo(f"   Completed nodes: {len(completed)}")
+                    if completed:
+                        typer.echo(f"   Last checkpoint: {completed[-1]}")
+                    typer.echo("")
+                
+                # Find next node to run
+                next_node = None
+                for node in WORKFLOW_NODE_ORDER:
+                    if node not in completed:
+                        next_node = node
+                        break
+                
+                if next_node:
+                    if verbose:
+                        _logger.debug(f"Resuming from node: {next_node}")
+                    
+                    # Update checkpoint state with new options if needed
+                    checkpoint_state.options = options
+                    
+                    # Run from the next node with thread_id for LangGraph checkpointing
+                    # Bug #61 Fix: Pass run_id as thread_id for checkpoint isolation
+                    final_state = run_from_node(
+                        checkpoint_state, 
+                        next_node,
+                        thread_id=resuming_from  # Use run_id as thread for checkpoint lookup
+                    )
+                    
+                    # Build result from final state
+                    result = IntegrationResult(
+                        run_id=final_state.run_id or resuming_from,
+                        task=final_state.integration_task,
+                        code_artifacts=final_state.code_artifacts,
+                        repo_changes=final_state.repo_changes,
+                        report_markdown=final_state.report_markdown or "",
+                        persisted_ids=final_state.persisted_ids,
+                        endpoints=final_state.endpoints,
+                        schemas=final_state.schemas,
+                        entities=final_state.entities,
+                        workflow_nodes=final_state.workflow_nodes,
+                        workflow_edges=final_state.workflow_edges,
+                        endpoint_bindings=final_state.endpoint_bindings,
+                        policies=final_state.policies,
+                        cache_hit=final_state.cache_hit,
+                        spec_documents=final_state.spec_documents,
+                        doc_chunks=final_state.doc_chunks,
+                        plan=final_state.plan,
+                        errors=final_state.errors,
+                        completed_steps=final_state.completed_steps,
+                        provider_code=final_state.provider_code,
+                    )
+                    
+                    # Skip to result handling
+                    return _handle_run_result(result, options, json_output)
+                else:
+                    if not json_output:
+                        typer.echo(f"✓ Run {resuming_from} already completed - starting fresh run")
+                        typer.echo("")
+        except Exception as e:
+            if not json_output:
+                typer.echo(f"⚠ Could not resume run {resuming_from}: {e}", err=True)
+                typer.echo("   Starting fresh run instead...", err=True)
+                typer.echo("")
+            if verbose:
+                _logger.exception(f"Resume failed: {e}")
 
     try:
         result = design_and_generate_integration(
@@ -198,53 +517,8 @@ def run_integration(
             typer.echo(f"✗ Error: {str(e)}", err=True)
         raise typer.Exit(code=1)
 
-    # Check for errors in the result
-    has_errors = False
-    if result.report_markdown and "## Errors" in result.report_markdown:
-        # Parse report to check if there are actual errors
-        error_section = result.report_markdown.split("## Errors", 1)[1].split("##", 1)[0]
-        if error_section.strip() and not error_section.strip().startswith("*(none)*"):
-            has_errors = True
-
-    if json_output:
-        # Output only valid JSON to stdout
-        output = {
-            "run_id": result.run_id,
-            "provider_code": result.task.provider_code if result.task else None,
-            "task_slug": result.task.task_slug if result.task else None,
-            "code_artifacts": len(result.code_artifacts),
-            "files_created": len([c for c in (result.repo_changes.changes if result.repo_changes else []) if c.change_type == "create"]),
-            "files_updated": len([c for c in (result.repo_changes.changes if result.repo_changes else []) if c.change_type == "update"]),
-            "dry_run": options.dry_run,
-            "status": "completed_with_errors" if has_errors else "completed",
-            "report_markdown": result.report_markdown
-        }
-        typer.echo(json.dumps(output, indent=2))
-    else:
-        # Human-readable output
-        status_icon = "⚠" if has_errors else "✓"
-        typer.echo(f"\n{status_icon} Run completed: {result.run_id}")
-        if result.task:
-            typer.echo(f"  Provider: {result.task.provider_code}")
-            typer.echo(f"  Task: {result.task.task_slug}")
-        typer.echo(f"  Code artifacts: {len(result.code_artifacts)}")
-        if result.repo_changes:
-            files_created = len([c for c in result.repo_changes.changes if c.change_type == "create"])
-            files_updated = len([c for c in result.repo_changes.changes if c.change_type == "update"])
-            typer.echo(f"  Files created: {files_created}")
-            typer.echo(f"  Files updated: {files_updated}")
-            typer.echo(f"  Dry run: {'Yes' if options.dry_run else 'No'}")
-
-        if has_errors:
-            typer.echo("\n⚠ Completed with errors - check report for details")
-
-        if result.report_markdown:
-            typer.echo("\n--- Full Report ---\n")
-            typer.echo(result.report_markdown)
-
-    # Exit with non-zero code if there were errors
-    if has_errors:
-        raise typer.Exit(code=1)
+    # Use shared result handling (same as resumed runs)
+    _handle_run_result(result, options, json_output)
 
 
 @app.command("demo")
@@ -605,6 +879,81 @@ def show_status():
     typer.echo("")
 
 
+@app.command("resume")
+def resume_run_cmd(
+    run_id: str = typer.Argument(..., help="Run ID to resume (from previous interrupted run)"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+):
+    """
+    Resume an interrupted run from its last checkpoint.
+    
+    Use this command to continue a run that was interrupted (e.g., due to
+    network issues, process crash, or manual cancellation). The run will
+    resume from the last successfully completed node.
+    
+    To find incomplete runs, use 'integration-coworker status' or check
+    the run_status table in the database.
+    
+    Examples:
+        # Resume a specific run
+        integration-coworker resume run_abc123
+        
+        # Resume with JSON output (for CI/CD)
+        integration-coworker resume run_abc123 --json
+        
+        # Resume with verbose logging
+        integration-coworker resume run_abc123 --verbose
+    """
+    _setup_logging(verbose)
+    
+    if verbose:
+        _logger.debug(f"Attempting to resume run: {run_id}")
+    
+    # Check if checkpoint exists
+    resumable = _try_resume_run(run_id, json_output, verbose)
+    if not resumable:
+        if json_output:
+            typer.echo(json.dumps({"error": f"No checkpoint found for run {run_id}"}))
+        else:
+            typer.echo(f"✗ No checkpoint found for run: {run_id}", err=True)
+            typer.echo("  The run may have completed or never started.", err=True)
+            typer.echo("  Use 'integration-coworker status' to check run history.", err=True)
+        raise typer.Exit(code=1)
+    
+    try:
+        from integration_coworker.api.recovery import resume_run
+        
+        if not json_output:
+            typer.echo(f"🔄 Resuming run: {run_id}")
+            typer.echo("")
+        
+        result = resume_run(run_id)
+        
+        # Handle result using existing helper
+        _handle_run_result(result, None, json_output)
+        
+        # Determine exit code based on errors
+        has_errors = bool(result.errors) if hasattr(result, 'errors') else False
+        if has_errors:
+            raise typer.Exit(code=1)
+            
+    except ValueError as e:
+        if json_output:
+            typer.echo(json.dumps({"error": str(e)}))
+        else:
+            typer.echo(f"✗ Resume failed: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        if verbose:
+            _logger.exception("Resume failed with unexpected error")
+        if json_output:
+            typer.echo(json.dumps({"error": str(e)}))
+        else:
+            typer.echo(f"✗ Resume failed: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("init-db")
 def init_database(
     seed_kg: bool = typer.Option(True, "--seed-kg/--no-seed-kg", help="Seed Knowledge Graph with curated templates"),
@@ -888,7 +1237,7 @@ def health_check(
         if anthropic_key:
             try:
                 from langchain_anthropic import ChatAnthropic
-                llm = ChatAnthropic(model="claude-sonnet-4-20250514", max_tokens=10)
+                llm = ChatAnthropic(model="claude-sonnet-4-5-20250929", max_tokens=10)
                 llm.invoke("Say 'OK'")
                 llm_connectivity["anthropic"] = "ok"
             except ImportError:
@@ -1911,6 +2260,142 @@ def show_kg_confidence(
         else:
             typer.echo(f"✗ Error querying confidence: {e}", err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("cache-stats")
+def cache_stats(
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Show LLM response cache statistics (Plan 7).
+    
+    Displays cache hit rate, total requests, and connection status.
+    Requires Redis to be running (docker compose up redis).
+    
+    Examples:
+        # Show cache stats
+        integration-coworker cache-stats
+        
+        # JSON output for scripting
+        integration-coworker cache-stats --json
+    """
+    from integration_coworker.llm.cache import get_llm_cache
+    
+    cache = get_llm_cache()
+    
+    # Check if cache is available
+    is_available = cache.is_available()
+    stats = cache.get_stats()
+    stats_dict = stats.to_dict()
+    
+    if json_output:
+        output = {
+            "enabled": cache.enabled,
+            "available": is_available,
+            "redis_url": cache.redis_url,
+            "ttl_seconds": cache.ttl,
+            **stats_dict,
+        }
+        typer.echo(json.dumps(output, indent=2))
+    else:
+        typer.echo("LLM Response Cache Statistics")
+        typer.echo("=" * 40)
+        typer.echo("")
+        
+        if not cache.enabled:
+            typer.echo("⚠ Cache is DISABLED")
+            typer.echo("   Set LLM_CACHE_ENABLED=true to enable")
+            return
+        
+        if not is_available:
+            typer.echo("✗ Redis not available")
+            typer.echo(f"   URL: {cache.redis_url}")
+            typer.echo("")
+            typer.echo("   To start Redis:")
+            typer.echo("     docker compose up -d redis")
+            return
+        
+        typer.echo(f"✓ Cache ENABLED and connected")
+        typer.echo(f"   Redis URL: {cache.redis_url}")
+        typer.echo(f"   TTL: {cache.ttl}s ({cache.ttl // 3600}h)")
+        typer.echo("")
+        typer.echo("📊 Statistics:")
+        typer.echo(f"   Hits:     {stats_dict['hits']}")
+        typer.echo(f"   Misses:   {stats_dict['misses']}")
+        typer.echo(f"   Hit Rate: {stats_dict['hit_rate']}")
+        typer.echo(f"   Total:    {stats_dict['total_requests']} requests")
+        typer.echo("")
+
+
+@app.command("cache-clear")
+def cache_clear(
+    pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="Only clear keys matching pattern (e.g., 'llm:openai:*')"),
+    reset_stats: bool = typer.Option(False, "--reset-stats", "-r", help="Also reset cache statistics"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """
+    Clear the LLM response cache (Plan 7).
+    
+    Clears cached LLM responses from Redis. Use --pattern to selectively
+    clear entries (e.g., for a specific provider or model).
+    
+    Examples:
+        # Clear all cached responses
+        integration-coworker cache-clear
+        
+        # Clear only OpenAI responses
+        integration-coworker cache-clear --pattern "llm:openai:*"
+        
+        # Clear and reset statistics
+        integration-coworker cache-clear --reset-stats
+        
+        # Force clear without confirmation
+        integration-coworker cache-clear --force
+    """
+    from integration_coworker.llm.cache import get_llm_cache
+    
+    cache = get_llm_cache()
+    
+    # Check if cache is available
+    if not cache.is_available():
+        if json_output:
+            typer.echo(json.dumps({"error": "Redis not available", "status": "failed"}))
+        else:
+            typer.echo("✗ Redis not available", err=True)
+            typer.echo(f"   URL: {cache.redis_url}", err=True)
+        raise typer.Exit(code=1)
+    
+    # Confirmation prompt
+    if not force and not json_output:
+        pattern_msg = f" matching '{pattern}'" if pattern else ""
+        confirm = typer.confirm(f"Clear all cached LLM responses{pattern_msg}?")
+        if not confirm:
+            typer.echo("Aborted.")
+            raise typer.Exit(code=0)
+    
+    # Clear cache
+    deleted = cache.clear(pattern=pattern)
+    
+    # Reset stats if requested
+    stats_reset = False
+    if reset_stats:
+        stats_reset = cache.reset_stats()
+    
+    if json_output:
+        output = {
+            "status": "success",
+            "deleted_keys": deleted,
+            "pattern": pattern,
+            "stats_reset": stats_reset,
+        }
+        typer.echo(json.dumps(output, indent=2))
+    else:
+        typer.echo(f"✓ Cleared {deleted} cached entries")
+        if pattern:
+            typer.echo(f"   Pattern: {pattern}")
+        if stats_reset:
+            typer.echo("✓ Statistics reset")
 
 
 if __name__ == "__main__":

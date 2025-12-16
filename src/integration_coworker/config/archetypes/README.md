@@ -16,32 +16,32 @@ Each archetype file defines:
 
 ## Supported Providers
 
-- `openai`: OpenAI models (gpt-5.1, gpt-4o, gpt-4o-mini, etc.)
-- `anthropic`: Anthropic Claude models (claude-sonnet-4, claude-opus-4, etc.)
-- `google`: Google Gemini models (gemini-3-pro, gemini-2.0-flash) - ideal for large context tasks
+- `openai`: OpenAI models (gpt-4o, gpt-4o-mini, o1, o1-mini, etc.)
+- `anthropic`: Anthropic Claude models (claude-sonnet-4-5, claude-3-5-sonnet, etc.)
+- `google`: Google Gemini models (gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash) - ideal for large context tasks
 
 ## Model Assignment by Role
 
 | Role | Provider | Model | Use Case |
 |------|----------|-------|----------|
-| Planning | OpenAI | gpt-5.1 | Task understanding, workflow design, KG alignment |
-| Code Generation | Anthropic | claude-sonnet-4 | Client code, flow code, test generation |
+| Planning | OpenAI | gpt-4o | Task understanding, workflow design, KG alignment |
+| Code Generation | Anthropic | claude-sonnet-4-5 | Client code, flow code, test generation |
 | Extraction | OpenAI | gpt-4o-mini | Deterministic spec parsing, schema extraction |
-| Large Context | Google | gemini-3-pro | Repo analysis (when needed) |
+| Large Context | Google | gemini-2.5-flash | Repo analysis (when needed) |
 
 ### Node-to-Model Mapping
 
-**Planning Nodes (GPT-5.1):**
+**Planning Nodes (gpt-4o):**
 - `understand_task` - Analyzes task description
 - `plan_integration_flow` - Designs workflow graph
 - `plan_run` - Initializes execution plan
 - `align_task_with_kg` - Matches task to KG templates
 - `attach_policies_and_patterns` - Attaches auth, retry, error policies
 
-**Code Generation Nodes (Claude Sonnet 4):**
+**Code Generation Nodes (Claude Sonnet 4.5):**
 - `generate_code_and_tests` - Generates client, flow, and test code
 
-**Extraction Nodes (GPT-4o-mini):**
+**Extraction Nodes (gpt-4o-mini):**
 - `build_silver_api_model` - Parses API specs into Silver model
 
 **Pure Python Nodes (No LLM):**
@@ -58,7 +58,7 @@ Models are fully configurable via YAML - no code changes needed. To swap a model
    ```yaml
    model:
      provider: anthropic  # or openai, google
-     name: claude-sonnet-4-20250514  # any model the provider supports
+     name: claude-sonnet-4-5-20250929  # any model the provider supports
      temperature: 0.15
      max_tokens: 8192
    ```
@@ -88,10 +88,10 @@ name: generate_code_and_tests
 role: codegen
 
 model:
-  # Claude Sonnet 4 for code generation
+  # Claude Sonnet 4.5 for code generation
   # Change provider/name here to swap models without code changes
   provider: anthropic
-  name: claude-sonnet-4-20250514
+  name: claude-sonnet-4-5-20250929
   temperature: 0.15
   max_tokens: 8192
 

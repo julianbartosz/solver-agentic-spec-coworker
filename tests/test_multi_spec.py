@@ -13,6 +13,8 @@ import pytest
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 
 @pytest.fixture
 def payments_spec_path() -> str:

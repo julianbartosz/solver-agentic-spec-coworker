@@ -2,12 +2,52 @@
 Pytest configuration and shared fixtures for integration_coworker tests.
 """
 import hashlib
+import os
 import pytest
 import sqlite3
+import importlib.util
 from typing import List, Optional
 from unittest.mock import MagicMock
 
 from integration_coworker.persistence import db
+
+
+# =============================================================================
+# Pytest Markers
+# =============================================================================
+
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers", "postgres: marks tests as requiring Postgres (deselect with '-m \"not postgres\"')"
+    )
+    config.addinivalue_line(
+        "markers", "no_db: marks tests that don't need database reset"
+    )
+
+
+OPTIONAL_DEP_MARKERS = {
+    "requires_aiosqlite": ("aiosqlite",),
+    "requires_openpyxl": ("openpyxl",),
+    "requires_graphql": ("graphql",),
+    "requires_reportlab": ("reportlab",),
+    "requires_langgraph_checkpoint": (
+        "langgraph.checkpoint.sqlite",
+        "langgraph.checkpoint.postgres",
+    ),
+    "requires_simpleeval": ("simpleeval",),
+}
+
+
+def pytest_runtest_setup(item):
+    """Skip tests gracefully when optional dependencies are missing."""
+    for marker_name, module_names in OPTIONAL_DEP_MARKERS.items():
+        if item.get_closest_marker(marker_name):
+            for module_name in module_names:
+                if importlib.util.find_spec(module_name) is None:
+                    pytest.skip(
+                        f"Missing optional dependency '{module_name}'. Install with `pip install -e .[test]` to run these tests."
+                    )
 
 
 # =============================================================================
@@ -115,17 +155,13 @@ def mock_llm(monkeypatch):
     
     controller = MockLLMController()
     
-    # Patch call_llm and call_llm_json
+    # Patch call_llm_for_node (the current LLM function)
     def mock_call_llm(*args, **kwargs):
         return controller.get_response()
     
     try:
         monkeypatch.setattr(
-            "integration_coworker.llm.client.call_llm",
-            mock_call_llm
-        )
-        monkeypatch.setattr(
-            "integration_coworker.llm.client.call_llm_json",
+            "integration_coworker.llm.client.call_llm_for_node",
             mock_call_llm
         )
     except AttributeError:
@@ -184,3 +220,165 @@ def reset_db(request):
         # If cleanup fails, it's not critical
         pass
 
+
+# =============================================================================
+# Testcontainers PostgreSQL Fixtures
+# =============================================================================
+
+@pytest.fixture(scope="session")
+def postgres_container():
+    """
+    Session-scoped Postgres container via testcontainers.
+    
+    Starts a real Postgres instance in Docker for integration testing.
+    The container is reused across all tests in the session for speed.
+    """
+    try:
+        from testcontainers.postgres import PostgresContainer
+    except ImportError:
+        pytest.skip("testcontainers not installed: pip install testcontainers[postgresql]")
+    
+    # Check Docker is available
+    import subprocess
+    result = subprocess.run(["docker", "info"], capture_output=True)
+    if result.returncode != 0:
+        pytest.skip("Docker is not running or not available")
+    
+    # Start Postgres container with pgvector extension
+    # Use postgres:16 which has better extension support
+    # IMPORTANT: driver=None returns driverless URL (postgresql://...)
+    # Per testcontainers docs: https://testcontainers-python.readthedocs.io/en/latest/modules/postgres/README.html
+    # "To get a URL without a driver, pass in driver=None"
+    container = PostgresContainer(
+        image="pgvector/pgvector:pg16",
+        username="test_user",
+        password="test_pass",
+        dbname="test_db",
+        driver=None,  # Return plain libpq URL, not SQLAlchemy format
+    )
+    
+    with container as pg:
+        yield pg
+
+
+@pytest.fixture(scope="session")
+def postgres_dsn(postgres_container):
+    """
+    Return the DSN for the testcontainers Postgres instance.
+    
+    Format: postgresql://user:pass@host:port/dbname
+    
+    IMPORTANT: We build the DSN from container properties directly rather than
+    using get_connection_url() because:
+    
+    1. get_connection_url() is documented as "SQLAlchemy-compatible" (PyPI docs)
+    2. psycopg (v2 and v3) requires plain libpq DSN strings
+    3. Building from host/port/user/pass ensures correct format
+    
+    Reference: https://www.psycopg.org/psycopg3/docs/basic/install.html
+    "psycopg uses the libpq connection strings"
+    
+    By constructing from container kwargs, we avoid any SQLAlchemy dialect
+    injection and guarantee libpq-safe format.
+    """
+    # Build DSN from container properties (not get_connection_url)
+    # This is the psycopg-recommended way: keyword/value format
+    host = postgres_container.get_container_host_ip()
+    port = postgres_container.get_exposed_port(5432)
+    user = postgres_container.username
+    password = postgres_container.password
+    dbname = postgres_container.dbname
+    
+    # Construct plain libpq DSN (postgresql://user:pass@host:port/dbname)
+    dsn = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    
+    # VERIFY: DSN is libpq-safe (no SQLAlchemy dialect)
+    # Per psycopg docs, only plain postgresql:// URLs are supported
+    sqlalchemy_dialects = ["+psycopg", "+psycopg2", "+asyncpg", "+pg8000"]
+    for dialect in sqlalchemy_dialects:
+        if dialect in dsn:
+            raise ValueError(
+                f"postgres_dsn contains SQLAlchemy dialect '{dialect}': {dsn}\n"
+                f"psycopg requires plain libpq URLs (postgresql://...).\n"
+                f"This should not happen with direct construction."
+            )
+    
+    # Ensure it's actually postgresql://
+    if not dsn.startswith("postgresql://"):
+        raise ValueError(
+            f"postgres_dsn doesn't start with postgresql://: {dsn}\n"
+            f"Expected format: postgresql://user:pass@host:port/dbname"
+        )
+    
+    # Log for debugging
+    import logging
+    logging.getLogger(__name__).info(f"Built postgres DSN: postgresql://{user}:***@{host}:{port}/{dbname}")
+    
+    return dsn
+
+
+@pytest.fixture(scope="function")
+def postgres_env(postgres_dsn, monkeypatch):
+    """
+    Configure environment to use Postgres instead of SQLite.
+    
+    Sets DATABASE_URL and disables USE_SQLITE for this test.
+    Initializes the Postgres schema before the test runs.
+    """
+    # Set environment variables BEFORE importing/using the postgres module
+    monkeypatch.setenv("DATABASE_URL", postgres_dsn)
+    monkeypatch.setenv("USE_SQLITE", "false")
+    monkeypatch.delenv("BEADS_DB", raising=False)
+    
+    # CRITICAL: Reset cached settings and connection pool so they pick up new env vars
+    # This must happen AFTER setting env vars but BEFORE calling init_postgres_schema
+    import integration_coworker.config as config_module
+    config_module._settings = None  # Reset cached settings
+    
+    from integration_coworker.persistence import postgres as pg_persistence
+    pg_persistence.close_pool()  # Close and reset pool so it uses new DATABASE_URL
+    
+    # Initialize schema (all schemas including KG)
+    pg_persistence.init_all_schemas()
+    
+    yield postgres_dsn
+    
+    # Cleanup: truncate all tables for next test
+    try:
+        import psycopg
+        with psycopg.connect(postgres_dsn) as conn:
+            with conn.cursor() as cur:
+                # Get all tables in spec_silver schema
+                cur.execute("""
+                    SELECT table_name FROM information_schema.tables 
+                    WHERE table_schema = 'spec_silver'
+                """)
+                tables = [row[0] for row in cur.fetchall()]
+                
+                # Truncate in dependency order (children first)
+                truncate_order = [
+                    'file_validation_rules', 'file_fields', 'record_layouts', 'file_specs',
+                    'kg_workflow_steps', 'kg_edges', 'kg_nodes',
+                    'spec_chunks', 'endpoints', 'schemas', 'entities',
+                    'spec_sections', 'spec_documents', 'source_systems',
+                    'integration_runs'
+                ]
+                for table in truncate_order:
+                    if table in tables:
+                        cur.execute(f"TRUNCATE TABLE spec_silver.{table} CASCADE")
+                conn.commit()
+    except Exception:
+        pass  # Cleanup failure is not critical
+
+
+@pytest.fixture(scope="function")
+def postgres_connection(postgres_env):
+    """
+    Return a live psycopg connection to the test Postgres instance.
+    
+    Use this fixture when you need direct SQL access in tests.
+    """
+    import psycopg
+    conn = psycopg.connect(postgres_env)
+    yield conn
+    conn.close()

@@ -96,6 +96,7 @@ def _get_config_files_content(repo_root: Path) -> Dict[str, str]:
         "package.json",
         "pyproject.toml",
         "tsconfig.json",
+        "tsconfig.base.json",  # Bug #2 fix: Nx monorepos use this
         "requirements.txt",
         "setup.py",
         "Cargo.toml",
@@ -210,7 +211,7 @@ version: "1.0"
 profile:
   name: "<descriptive-name>"
   framework: "<detected-framework-or-custom>"
-  language: "<python|typescript|javascript>"
+  language: "<detected-language>"
 layout:
   integrations_root: "<path-to-integrations-directory>"
   tests_root: "<path-to-test-directory>"
@@ -251,7 +252,8 @@ def infer_repo_config(
     Returns:
         IntegrationCoworkerConfig if successful, None otherwise
     """
-    from integration_coworker.llm.client import call_llm
+    import time
+    from integration_coworker.llm.client import call_llm_for_node
     
     logger.info(f"Inferring repo config via LLM for: {repo_root}")
     
@@ -265,16 +267,48 @@ def infer_repo_config(
         repo_root, tree, config_files, existing_integrations
     )
     
+    # Bug #47 fix: Add retry with exponential backoff for rate limits
+    MAX_RETRIES = 3
+    response = None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Call LLM with verbose logging for debugging (Bug #39 fix)
+            logger.info(f"Calling LLM for repo config inference (attempt {attempt + 1}/{MAX_RETRIES}, prompt length: {len(prompt)} chars)")
+            logger.debug(f"Repo structure sample:\n{tree[:500]}..." if len(tree) > 500 else f"Repo structure:\n{tree}")
+            
+            # Use archetype-based LLM call (system_prompt is in archetype YAML)
+            response = call_llm_for_node("repo_config_inference", prompt)
+            
+            if response:
+                break  # Success, exit retry loop
+            
+            logger.warning(f"LLM returned empty response (attempt {attempt + 1})")
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            # Check for rate limit errors (429, rate limit, too many requests)
+            is_rate_limit = any(term in error_str for term in ['429', 'rate limit', 'too many requests', 'ratelimit'])
+            
+            if is_rate_limit and attempt < MAX_RETRIES - 1:
+                wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                logger.warning(f"Rate limited on repo config inference, waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.warning(f"LLM error during repo config inference: {e}")
+                if attempt == MAX_RETRIES - 1:
+                    logger.warning("Exhausted retries for LLM repo config inference, falling back to convention detection")
+                    return None
+    
+    # Log response for debugging
+    if not response:
+        logger.warning("LLM returned empty response for repo config inference after all retries")
+        return None
+    
     try:
-        # Call LLM
-        response = call_llm(
-            prompt,
-            task_type="repo_config_inference",
-            system_prompt=(
-                "You are an expert at analyzing code repositories and determining "
-                "appropriate file structures. Generate precise, valid YAML configurations."
-            ),
-        )
+        logger.info(f"LLM response received ({len(response)} chars)")
+        logger.debug(f"LLM response preview: {response[:500]}..." if len(response) > 500 else f"LLM response: {response}")
         
         # Parse YAML from response
         import yaml
@@ -284,17 +318,73 @@ def infer_repo_config(
         if "```yaml" in response:
             start = response.find("```yaml") + 7
             end = response.find("```", start)
-            yaml_content = response[start:end].strip()
+            if end > start:
+                yaml_content = response[start:end].strip()
+            else:
+                logger.warning("Found ```yaml but no closing ```, using full response")
         elif "```" in response:
             start = response.find("```") + 3
             end = response.find("```", start)
-            yaml_content = response[start:end].strip()
+            if end > start:
+                yaml_content = response[start:end].strip()
+            else:
+                logger.warning("Found ``` but no closing ```, using full response")
         
-        config_dict = yaml.safe_load(yaml_content)
+        if not yaml_content.strip():
+            logger.warning("Extracted YAML content is empty after parsing code fences")
+            return None
+        
+        logger.debug(f"Extracted YAML content ({len(yaml_content)} chars): {yaml_content[:300]}...")
+        
+        try:
+            config_dict = yaml.safe_load(yaml_content)
+        except yaml.YAMLError as yaml_err:
+            logger.warning(f"Failed to parse LLM response as YAML: {yaml_err}")
+            logger.debug(f"Raw YAML content that failed:\n{yaml_content[:500]}")
+            return None
         
         if not config_dict:
-            logger.warning("LLM returned empty config")
+            logger.warning("LLM returned empty config after YAML parsing")
             return None
+        
+        # Bug #90 Fix: Add default values for required fields if LLM didn't provide them
+        # This prevents validation failures when LLM returns partial config
+        if "profile" not in config_dict:
+            config_dict["profile"] = {}
+        
+        profile = config_dict["profile"]
+        if "name" not in profile:
+            # Generate name from framework or language
+            framework = profile.get("framework", "generic")
+            language = profile.get("language", "python")
+            profile["name"] = f"{framework}_{language}_profile"
+            logger.info(f"Added default profile.name: {profile['name']}")
+        
+        if "layout" not in config_dict:
+            config_dict["layout"] = {}
+        
+        layout = config_dict["layout"]
+        language = config_dict.get("profile", {}).get("language", "python")
+        
+        if "integrations_root" not in layout:
+            # Default based on language conventions
+            if language in ("python",):
+                layout["integrations_root"] = "src/integrations"
+            elif language in ("typescript", "javascript"):
+                layout["integrations_root"] = "src/integrations"
+            else:
+                layout["integrations_root"] = "integrations"
+            logger.info(f"Added default layout.integrations_root: {layout['integrations_root']}")
+        
+        if "tests_root" not in layout:
+            # Default based on language conventions
+            if language in ("python",):
+                layout["tests_root"] = "tests/integrations"
+            elif language in ("typescript", "javascript"):
+                layout["tests_root"] = "tests"
+            else:
+                layout["tests_root"] = "tests"
+            logger.info(f"Added default layout.tests_root: {layout['tests_root']}")
         
         # Add metadata
         if "metadata" not in config_dict:
@@ -320,10 +410,12 @@ def infer_repo_config(
             if save_config(config, config_path):
                 logger.info(f"Saved inferred config to {config_path}")
         
+        logger.info(f"LLM repo config inference successful: {config.profile.name if config.profile else 'unnamed'}")
         return config
         
     except Exception as e:
-        logger.error(f"Failed to infer repo config via LLM: {e}")
+        logger.error(f"Failed to infer repo config via LLM: {type(e).__name__}: {e}")
+        logger.debug("Full LLM inference exception:", exc_info=True)
         return None
 
 
@@ -354,7 +446,6 @@ def get_repo_profile_config_first(
         RepoProfile instance
     """
     from integration_coworker.repo.config_schema import load_config, config_to_profile
-    from integration_coworker.repo.profiles import detect_profile_from_repo
     
     repo_path = Path(repo_root)
     
@@ -392,21 +483,15 @@ def get_repo_profile_config_first(
                 profile.profile_source = "llm_inference"
                 return profile
         except Exception as e:
-            logger.warning(f"LLM inference failed, falling back to archetype: {e}")
+            logger.warning(f"LLM inference failed, falling back to heuristics: {e}")
     
     # -------------------------------------------------------------------------
-    # Priority 3: Archetype detection fallback (deprecated)
+    # Priority 3: Heuristic detection fallback
     # -------------------------------------------------------------------------
-    import warnings
-    warnings.warn(
-        "Archetype-based detection is deprecated. "
-        "Create a .integration-coworker.yaml config file or enable LLM inference. "
-        "See ADR-0002 for migration guidance.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    from integration_coworker.repo.detection import detect_repo_profile, build_effective_repo_profile
     
-    logger.info("Falling back to archetype detection (deprecated)")
-    profile = detect_profile_from_repo(repo_path)
-    profile.profile_source = "archetype_deprecated"
+    logger.info("Falling back to heuristic detection")
+    detected = detect_repo_profile(repo_path)
+    profile = build_effective_repo_profile(detected, str(repo_path))
+    profile.profile_source = "heuristic_fallback"
     return profile

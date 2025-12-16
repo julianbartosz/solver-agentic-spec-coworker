@@ -3,6 +3,9 @@ Integration Coworker Config Schema.
 
 Defines the Pydantic models for .integration-coworker.yaml config files.
 Per ADR-0002: Config-First with LLM Fallback.
+
+Bug #76 Fix: Language field now uses validated string instead of Literal,
+enabling support for any language defined in LANGUAGE_CONVENTIONS.
 """
 from __future__ import annotations
 
@@ -14,6 +17,13 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+# Supported languages - single source of truth
+# This list should match the keys in codegen/prompts.py LANGUAGE_CONVENTIONS
+SUPPORTED_LANGUAGES = frozenset({
+    "python", "typescript", "javascript", "go", "java", "ruby", "csharp"
+})
 
 
 # =============================================================================
@@ -31,9 +41,47 @@ class ProfileConfig(BaseModel):
         default=None,
         description="Framework hint for codegen style (e.g., 'fastapi', 'nextjs')",
     )
-    language: Literal["python", "typescript", "javascript"] = Field(
-        description="Primary programming language"
+    language: str = Field(
+        description="Primary programming language (e.g., 'python', 'typescript', 'go')"
     )
+    
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        """
+        Bug #76 Fix: Validate language against SUPPORTED_LANGUAGES.
+        Bug #89 Fix: Handle LLM returning multiple languages (e.g., 'python|typescript').
+        
+        Uses SUPPORTED_LANGUAGES as single source of truth, enabling
+        support for any language defined there without schema changes.
+        """
+        normalized = v.lower().strip()
+        
+        # Bug #89: Handle pipe-separated languages from LLM
+        # Take the first one as primary language
+        if "|" in normalized:
+            languages = [lang.strip() for lang in normalized.split("|")]
+            normalized = languages[0]  # Use first language as primary
+        
+        # Handle common aliases
+        aliases = {
+            "py": "python",
+            "ts": "typescript", 
+            "js": "javascript",
+            "golang": "go",
+            "c#": "csharp",
+            "cs": "csharp",
+        }
+        normalized = aliases.get(normalized, normalized)
+        
+        if normalized not in SUPPORTED_LANGUAGES:
+            # Universal Language Support: Warn but allow unknown languages
+            # This enables dynamic support for any language the LLM knows
+            logger.warning(
+                f"Language '{normalized}' is not in the core supported list. "
+                "Functionality may be limited (syntax validation, skeletons)."
+            )
+        return normalized
 
 
 class LayoutConfig(BaseModel):

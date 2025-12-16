@@ -337,7 +337,8 @@ class TestFlowCodeGeneration:
 class TestPolicyModeSelection:
     """Tests for policy mode selection logic."""
     
-    def test_client_code_uses_correct_generator(self, mock_state_inline, mock_state_runtime):
+    @pytest.mark.asyncio
+    async def test_client_code_uses_correct_generator(self, mock_state_inline, mock_state_runtime):
         """Verify _generate_client_code delegates to correct generator."""
         from integration_coworker.graph.nodes.generate_code_and_tests import (
             _generate_client_code,
@@ -345,7 +346,7 @@ class TestPolicyModeSelection:
         
         # Inline mode
         endpoint = mock_state_inline.endpoints[0]
-        inline_code = _generate_client_code(
+        inline_code = await _generate_client_code(
             state=mock_state_inline,
             provider_code="example_api",
             client_class="ExampleApiClient",
@@ -359,7 +360,7 @@ class TestPolicyModeSelection:
         
         # Runtime mode
         endpoint = mock_state_runtime.endpoints[0]
-        runtime_code = _generate_client_code(
+        runtime_code = await _generate_client_code(
             state=mock_state_runtime,
             provider_code="stripe",
             client_class="StripeClient",

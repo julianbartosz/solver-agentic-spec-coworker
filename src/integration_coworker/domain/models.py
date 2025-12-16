@@ -187,6 +187,230 @@ class Event:
     payload_schema_id: Optional[int] = None
 
 
+# ============================================================================
+# Silver Layer Models (File Spec Model)
+# ============================================================================
+
+class FileType(str, Enum):
+    """Type of file specification."""
+    CSV = "csv"
+    TSV = "tsv"
+    FIXED_WIDTH = "fixed_width"
+    XLSX = "xlsx"
+    XLS = "xls"
+    PIPE_DELIMITED = "pipe_delimited"
+    EDI_X12 = "edi_x12"
+    EDIFACT = "edifact"
+    OTHER_DELIMITED = "other_delimited"
+
+
+class FileFieldType(str, Enum):
+    """Data type for file fields."""
+    STRING = "string"
+    INTEGER = "integer"
+    DECIMAL = "decimal"
+    DATE = "date"
+    DATETIME = "datetime"
+    BOOLEAN = "boolean"
+    EMAIL = "email"
+    UUID = "uuid"
+    JSON = "json"
+    BINARY = "binary"
+
+
+class ValidationRuleType(str, Enum):
+    """Types of validation rules for file data."""
+    REQUIRED = "required"
+    RANGE = "range"
+    REGEX = "regex"
+    LOOKUP = "lookup"
+    CROSS_FIELD = "cross_field"
+    LENGTH = "length"
+    ENUM = "enum"
+    UNIQUE = "unique"
+    FORMAT = "format"
+
+
+@dataclass
+class FileSpec:
+    """
+    A file-based data specification (CSV, fixed-width, Excel, etc.).
+    
+    This is the Silver layer model for file integrations, parallel to
+    Endpoint for API integrations. It captures file format metadata
+    and links to the fields within the file.
+    
+    Per docs/FILE_INTEGRATION_V1_PLAN.md Section 5.1
+    """
+    id: Optional[int]
+    source_system_id: Optional[int]
+    name: str  # e.g., "daily_transactions", "customer_export"
+    file_type: str  # FileType enum value
+    spec_document_id: Optional[int] = None  # Link to source guide if applicable
+    encoding: str = "utf-8"
+    delimiter: Optional[str] = None  # For delimited files (,|\t|;|etc.)
+    has_header: bool = True
+    line_terminator: str = "\n"
+    quote_char: Optional[str] = '"'
+    escape_char: Optional[str] = None
+    description: Optional[str] = None
+    version: Optional[str] = None  # Spec/guide version
+    sample_uri: Optional[str] = None  # Link to sample file if available
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for persistence."""
+        return {
+            "id": self.id,
+            "source_system_id": self.source_system_id,
+            "spec_document_id": self.spec_document_id,
+            "name": self.name,
+            "file_type": self.file_type,
+            "encoding": self.encoding,
+            "delimiter": self.delimiter,
+            "has_header": self.has_header,
+            "line_terminator": self.line_terminator,
+            "quote_char": self.quote_char,
+            "escape_char": self.escape_char,
+            "description": self.description,
+            "version": self.version,
+            "sample_uri": self.sample_uri,
+        }
+
+
+@dataclass 
+class FileField:
+    """
+    A field within a file specification.
+    
+    Represents a column (delimited) or field (fixed-width) in a file.
+    Contains type information, position, and validation constraints.
+    
+    Per docs/FILE_INTEGRATION_V1_PLAN.md Section 5.1
+    """
+    id: Optional[int]
+    file_spec_id: Optional[int]
+    name: str  # Column/field name
+    field_type: str  # FileFieldType enum value
+    position: int  # 0-indexed column position (for delimited)
+    start_position: Optional[int] = None  # For fixed-width: start byte (1-indexed)
+    length: Optional[int] = None  # For fixed-width: field length
+    format_mask: Optional[str] = None  # e.g., "YYYYMMDD", "###.##"
+    nullable: bool = True
+    default_value: Optional[str] = None
+    validation_regex: Optional[str] = None
+    description: Optional[str] = None
+    sample_values: Optional[List[str]] = None  # Sample values for inference
+    inference_confidence: float = 1.0  # How confident are we in this inference
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for persistence."""
+        return {
+            "id": self.id,
+            "file_spec_id": self.file_spec_id,
+            "name": self.name,
+            "field_type": self.field_type,
+            "position": self.position,
+            "start_position": self.start_position,
+            "length": self.length,
+            "format_mask": self.format_mask,
+            "nullable": self.nullable,
+            "default_value": self.default_value,
+            "validation_regex": self.validation_regex,
+            "description": self.description,
+            "sample_values": self.sample_values,
+            "inference_confidence": self.inference_confidence,
+        }
+
+
+@dataclass
+class RecordLayout:
+    """
+    Record layout for fixed-width or multi-record files.
+    
+    Supports files with multiple record types (e.g., header, detail, trailer).
+    Each record type can have different field layouts.
+    
+    Per docs/FILE_INTEGRATION_V1_PLAN.md Section 5.1
+    """
+    id: Optional[int]
+    file_spec_id: Optional[int]
+    record_type: str  # e.g., "header", "detail", "trailer", "H", "D", "T"
+    identifier_field: Optional[str] = None  # Field name that identifies record type
+    identifier_value: Optional[str] = None  # Value that identifies this type
+    record_length: Optional[int] = None  # For fixed-width files
+    position: int = 0  # Order in file (0=any position, 1=first, -1=last)
+    min_occurrences: int = 0  # Minimum required occurrences
+    max_occurrences: Optional[int] = None  # Maximum allowed (None = unlimited)
+    description: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for persistence."""
+        return {
+            "id": self.id,
+            "file_spec_id": self.file_spec_id,
+            "record_type": self.record_type,
+            "identifier_field": self.identifier_field,
+            "identifier_value": self.identifier_value,
+            "record_length": self.record_length,
+            "position": self.position,
+            "min_occurrences": self.min_occurrences,
+            "max_occurrences": self.max_occurrences,
+            "description": self.description,
+        }
+
+
+@dataclass
+class FileValidationRule:
+    """
+    Validation rule for file data.
+    
+    Can apply to a specific field or the entire file (field_name=None).
+    Supports various rule types from simple required checks to complex
+    cross-field validations.
+    
+    Per docs/FILE_INTEGRATION_V1_PLAN.md Section 5.1
+    """
+    id: Optional[int]
+    file_spec_id: Optional[int]
+    field_name: Optional[str] = None  # None means file-level rule
+    rule_type: str = ValidationRuleType.REQUIRED  # ValidationRuleType enum value
+    rule_config: Dict[str, Any] = None  # Rule-specific configuration
+    error_message: Optional[str] = None
+    severity: str = "error"  # "error", "warning", "info"
+    
+    def __post_init__(self):
+        if self.rule_config is None:
+            self.rule_config = {}
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for persistence."""
+        return {
+            "id": self.id,
+            "file_spec_id": self.file_spec_id,
+            "field_name": self.field_name,
+            "rule_type": self.rule_type,
+            "rule_config": self.rule_config,
+            "error_message": self.error_message,
+            "severity": self.severity,
+        }
+
+
+@dataclass
+class FileFieldMapping:
+    """
+    Mapping between a file field and an entity field.
+    
+    Used to connect file fields to domain entities for transformation
+    and data loading purposes.
+    """
+    id: Optional[int]
+    file_field_id: Optional[int]
+    entity_id: Optional[int]
+    entity_field_name: str
+    transform_expression: Optional[str] = None  # e.g., "UPPER(value)", "DATE(value, '%Y%m%d')"
+    description: Optional[str] = None
+
+
 @dataclass
 class SpecChunkEmbedding:
     """Vector embedding of a spec document chunk for semantic search."""
@@ -300,6 +524,11 @@ class KGNodeType(str, Enum):
     # Pattern nodes are provider-agnostic workflow patterns
     # e.g., "pattern.crud_create", "pattern.list_pagination"
     PATTERN = "pattern"
+    # File integration nodes
+    FILE_SPEC = "file_spec"
+    FILE_FIELD = "file_field"
+    RECORD_LAYOUT = "record_layout"
+    FILE_PATTERN = "file_pattern"  # e.g., "pattern.file.header_detail_trailer"
 
 
 class KGEdgeRelation(str, Enum):
@@ -314,6 +543,12 @@ class KGEdgeRelation(str, Enum):
     # Pattern relationships
     IMPLEMENTS_PATTERN = "implements_pattern"  # workflow_template -> pattern
     DERIVED_FROM = "derived_from"  # pattern -> workflow_template (learning)
+    # File integration relationships
+    HAS_FIELD = "has_field"           # file_spec -> file_field
+    MAPS_TO = "maps_to"               # file_field -> entity_field
+    VALIDATED_BY = "validated_by"     # file_field -> validation_rule
+    DERIVES_FROM_GUIDE = "derives_from_guide"  # file_spec -> pdf_guide (provenance)
+    FILE_FLOWS_TO = "file_flows_to"   # file_spec -> endpoint (ETL target)
 
 
 @dataclass

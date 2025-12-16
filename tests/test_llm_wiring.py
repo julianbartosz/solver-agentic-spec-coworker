@@ -28,11 +28,11 @@ class TestArchetypeLoading:
         reset_archetype_cache()
         
         # Updated for new model configuration:
-        # - understand_task, plan_integration_flow use OpenAI (gpt-5.1) for planning
-        # - generate_code_and_tests uses Anthropic (claude-sonnet-4) for code writing
+        # - understand_task, plan_integration_flow use OpenAI (gpt-4o) for planning
+        # - generate_code_and_tests uses Anthropic (claude-sonnet-4-5) for code writing
         expected_configs = [
-            ("understand_task", {"provider": "openai", "model_prefix": "gpt-5.1"}),
-            ("plan_integration_flow", {"provider": "openai", "model_prefix": "gpt-5.1"}),
+            ("understand_task", {"provider": "openai", "model_prefix": "gpt-4o"}),
+            ("plan_integration_flow", {"provider": "openai", "model_prefix": "gpt-4o"}),
             ("generate_code_and_tests", {"provider": "anthropic", "model_prefix": "claude-sonnet"}),
             # build_report uses base archetype (openai)
         ]

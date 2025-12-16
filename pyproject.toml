@@ -27,17 +27,58 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "pypdf>=4.0.0",
     "pyyaml>=6.0",
+    "openpyxl>=3.1.0",
+    "SQLAlchemy>=2.0.0",
 ]
 
 [project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.23.5",
+    "testcontainers>=4.0.0",
+    "aiosqlite>=0.19.0",
+    "simpleeval>=1.0.0",
+    "graphql-core>=3.2.3",
+    "openpyxl>=3.1.2",
+    "reportlab>=4.0.5",
+    "langgraph-checkpoint-sqlite==3.0.0",
+    "langgraph-checkpoint-postgres==3.0.0",
+    "testcontainers>=4.0.0",
+    "SQLAlchemy>=2.0.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
+    "rfc8785>=0.1.0",  # RFC 8785 reference implementation for validation
 ]
 postgres = [
     "psycopg[binary]>=3.1.0",
     "psycopg_pool>=3.1.0",
+]
+cache = [
+    "redis>=5.0.0",
+]
+validation = [
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-go>=0.21.0",
+    "tree-sitter-java>=0.21.0",
+    "tree-sitter-ruby>=0.21.0",
+    "tree-sitter-c-sharp>=0.21.0",
+]
+docs = [
+    "mkdocs>=1.5,<2",
+    "mkdocs-material",
+    "mkdocs-redirects",
+    "mkdocs-autorefs==1.4.3",
+    "mkdocstrings[python]==0.24.3",
+    "mkdocstrings-python==1.10.0",
+    "pymdown-extensions",
+    "griffe>=0.37,<1.0",
 ]
 ui = [
     "streamlit>=1.28.0",
@@ -46,25 +87,62 @@ all = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
+    "pytest-asyncio>=0.23.5",
+    "aiosqlite>=0.19.0",
+    "simpleeval>=1.0.0",
+    "graphql-core>=3.2.3",
+    "openpyxl>=3.1.2",
+    "reportlab>=4.0.5",
+    "langgraph-checkpoint-sqlite==3.0.0",
+    "langgraph-checkpoint-postgres==3.0.0",
+    "testcontainers[postgresql]>=4.0.0",
     "psycopg[binary]>=3.1.0",
     "psycopg_pool>=3.1.0",
+    "redis>=5.0.0",
     "streamlit>=1.28.0",
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.4",
+    "mkdocstrings[python]>=0.24",
+    "mkdocs-gen-files>=0.5",
+    "mkdocs-literate-nav>=0.6",
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-go>=0.21.0",
+    "tree-sitter-java>=0.21.0",
+    "tree-sitter-ruby>=0.21.0",
+    "tree-sitter-c-sharp>=0.21.0",
+    "SQLAlchemy>=2.0.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["integration_coworker*"]
 
+[project.entry-points."mkdocs.plugins"]
+mermaid_fence_resolver = "integration_coworker.docs_plugins.mermaid_fence_resolver:MermaidFenceResolverPlugin"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
 norecursedirs = ["tests/fixtures/repos"]
 markers = [
     "no_db: mark test as not requiring database setup/teardown",
-    "perf_smoke: performance smoke tests with timing assertions"
+    "perf_smoke: performance smoke tests with timing assertions",
+    "postgres: mark test as requiring Postgres backend (use -m postgres to run)",
+    "sqlite: mark test as requiring SQLite backend (use -m sqlite to run)",
+    "requires_aiosqlite: mark tests that need aiosqlite/langgraph async sqlite checkpointing",
+    "requires_openpyxl: mark tests that need openpyxl for Excel parsing",
+    "requires_graphql: mark tests that need graphql-core for GraphQL parsing",
+    "requires_reportlab: mark tests that need reportlab for PDF guide generation",
+    "requires_langgraph_checkpoint: mark tests that need langgraph checkpoint extras (sqlite/postgres)",
+    "requires_simpleeval: mark tests that need simpleeval for safe expression evaluation",
+    "slow: mark test as slow (may involve network or heavy computation)",
+    "integration: mark test as integration test requiring external services"
 ]
 
 [tool.ruff]

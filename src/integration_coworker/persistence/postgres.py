@@ -33,14 +33,28 @@ _pool: Optional["ConnectionPool"] = None
 
 
 def _cleanup_pool():
-    """Cleanup handler to close the pool on exit."""
+    """
+    Cleanup handler to close the pool on exit.
+    
+    Bug #23 fix: Made more resilient to thread errors during Python shutdown.
+    When Python is shutting down, threads may be in inconsistent state
+    causing RuntimeError("cannot join current thread"). This is harmless
+    since the process is exiting anyway.
+    """
     global _pool
     if _pool is not None:
         try:
             _pool.close()
+        except RuntimeError as e:
+            # Bug #23: Ignore "cannot join current thread" during shutdown
+            if "cannot join" in str(e).lower():
+                pass  # Expected during Python shutdown
+            else:
+                pass  # Still ignore - we're shutting down anyway
         except Exception:
-            pass  # Ignore errors during cleanup
-        _pool = None
+            pass  # Ignore all errors during cleanup
+        finally:
+            _pool = None
 
 
 # Register cleanup handler
@@ -95,10 +109,16 @@ def get_connection() -> Generator["psycopg.Connection", None, None]:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM ...")
+    
+    Bug #49 fix: Suppress spurious rollback warnings when connection is in autocommit.
     """
+    import warnings
     pool = get_pool()
     with pool.connection() as conn:
-        yield conn
+        # Suppress psycopg's "executing rollback" warning for autocommit connections
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*executing rollback.*")
+            yield conn
 
 
 # =============================================================================
@@ -276,6 +296,82 @@ CREATE TABLE IF NOT EXISTS spec_silver.file_specs (
     description      TEXT,
     UNIQUE (source_system_id, name)
 );
+
+-- Extend file_specs with additional columns (idempotent)
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    spec_document_id BIGINT REFERENCES spec_silver.spec_documents(id);
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    line_terminator TEXT DEFAULT E'\\n';
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    quote_char TEXT DEFAULT '"';
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    escape_char TEXT;
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    version TEXT;
+ALTER TABLE spec_silver.file_specs ADD COLUMN IF NOT EXISTS 
+    sample_uri TEXT;
+
+-- file_fields: Fields/columns within a file spec
+CREATE TABLE IF NOT EXISTS spec_silver.file_fields (
+    id                    BIGSERIAL PRIMARY KEY,
+    file_spec_id          BIGINT NOT NULL REFERENCES spec_silver.file_specs(id) ON DELETE CASCADE,
+    name                  TEXT NOT NULL,
+    field_type            TEXT NOT NULL,
+    position              INT NOT NULL,
+    start_position        INT,              -- For fixed-width: start byte (1-indexed)
+    length                INT,              -- For fixed-width: field length
+    format_mask           TEXT,             -- e.g., "YYYYMMDD", "###.##"
+    nullable              BOOLEAN DEFAULT TRUE,
+    default_value         TEXT,
+    validation_regex      TEXT,
+    description           TEXT,
+    sample_values         JSONB DEFAULT '[]',
+    inference_confidence  DOUBLE PRECISION DEFAULT 1.0,
+    UNIQUE (file_spec_id, name)
+);
+
+-- record_layouts: For multi-record fixed-width files
+CREATE TABLE IF NOT EXISTS spec_silver.record_layouts (
+    id                BIGSERIAL PRIMARY KEY,
+    file_spec_id      BIGINT NOT NULL REFERENCES spec_silver.file_specs(id) ON DELETE CASCADE,
+    record_type       TEXT NOT NULL,
+    identifier_field  TEXT,
+    identifier_value  TEXT,
+    record_length     INT,
+    position          INT DEFAULT 0,        -- Order in file (0=any, 1=first, -1=last)
+    min_occurrences   INT DEFAULT 0,
+    max_occurrences   INT,
+    description       TEXT,
+    UNIQUE (file_spec_id, record_type)
+);
+
+-- file_validation_rules: Validation rules for file data
+CREATE TABLE IF NOT EXISTS spec_silver.file_validation_rules (
+    id            BIGSERIAL PRIMARY KEY,
+    file_spec_id  BIGINT NOT NULL REFERENCES spec_silver.file_specs(id) ON DELETE CASCADE,
+    field_name    TEXT,                     -- NULL for file-level rules
+    rule_type     TEXT NOT NULL,            -- required, range, regex, lookup, cross_field, etc.
+    rule_config   JSONB NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    severity      TEXT DEFAULT 'error'      -- error, warning, info
+);
+
+-- file_field_mappings: Map file fields to entity fields
+CREATE TABLE IF NOT EXISTS spec_silver.file_field_mappings (
+    id                    BIGSERIAL PRIMARY KEY,
+    file_field_id         BIGINT NOT NULL REFERENCES spec_silver.file_fields(id) ON DELETE CASCADE,
+    entity_id             BIGINT REFERENCES spec_silver.entities(id) ON DELETE SET NULL,
+    entity_field_name     TEXT NOT NULL,
+    transform_expression  TEXT,             -- e.g., "UPPER(value)", "DATE(value, '%Y%m%d')"
+    description           TEXT
+);
+
+-- Indexes for file-related tables
+CREATE INDEX IF NOT EXISTS idx_file_fields_spec ON spec_silver.file_fields(file_spec_id);
+CREATE INDEX IF NOT EXISTS idx_record_layouts_spec ON spec_silver.record_layouts(file_spec_id);
+CREATE INDEX IF NOT EXISTS idx_file_validation_rules_spec ON spec_silver.file_validation_rules(file_spec_id);
+CREATE INDEX IF NOT EXISTS idx_file_field_mappings_field ON spec_silver.file_field_mappings(file_field_id);
+CREATE INDEX IF NOT EXISTS idx_file_field_mappings_entity ON spec_silver.file_field_mappings(entity_id);
 
 -- message_specs: Event/message interface metadata
 CREATE TABLE IF NOT EXISTS spec_silver.message_specs (
@@ -604,26 +700,129 @@ CREATE TABLE IF NOT EXISTS kg.confidence_history (
 
 CREATE INDEX IF NOT EXISTS kg_confidence_history_node_idx ON kg.confidence_history(node_key);
 CREATE INDEX IF NOT EXISTS kg_confidence_history_time_idx ON kg.confidence_history(created_at);
+
+-- =============================================================================
+-- Dynamic Pattern Learning Tables (PL-001)
+-- Per docs/PATTERN_LEARNING_DESIGN.md
+-- =============================================================================
+
+-- kg.run_events: Event log for pattern discovery
+CREATE TABLE IF NOT EXISTS kg.run_events (
+    id               BIGSERIAL PRIMARY KEY,
+    run_id           TEXT NOT NULL REFERENCES integration_gold.run_status(run_id) ON DELETE CASCADE,
+    event_type       TEXT NOT NULL,              -- 'step_start', 'step_complete', 'step_error'
+    activity         TEXT NOT NULL,              -- step_key (e.g., "understand_task", "call_api")
+    activity_type    TEXT,                       -- step_type (e.g., "api_call", "validation")
+    position         INT,
+    timestamp        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    provider_code    TEXT,
+    endpoint_path    TEXT,                       -- for api_call steps
+    endpoint_method  TEXT,                       -- for api_call steps
+    attributes       JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS kg_run_events_run_idx ON kg.run_events(run_id);
+CREATE INDEX IF NOT EXISTS kg_run_events_activity_idx ON kg.run_events(activity);
+CREATE INDEX IF NOT EXISTS kg_run_events_provider_idx ON kg.run_events(provider_code);
+
+-- kg.pattern_candidates: Staging table for discovered patterns before promotion
+CREATE TABLE IF NOT EXISTS kg.pattern_candidates (
+    id                   BIGSERIAL PRIMARY KEY,
+    candidate_key        TEXT NOT NULL UNIQUE,
+    name                 TEXT NOT NULL,
+    description          TEXT,
+    canonical_sequence   JSONB NOT NULL,             -- Array of step signatures
+    support_count        INT NOT NULL DEFAULT 1,     -- How many runs match
+    first_seen_run_id    TEXT,
+    last_seen_run_id     TEXT,
+    status               TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'promoted', 'rejected', 'merged'
+    promoted_pattern_key TEXT,                       -- If promoted, the kg.nodes key
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS kg_pattern_candidates_status_idx ON kg.pattern_candidates(status);
+
+-- kg.pattern_matches: Record match decisions for explainability
+CREATE TABLE IF NOT EXISTS kg.pattern_matches (
+    id               BIGSERIAL PRIMARY KEY,
+    run_id           TEXT NOT NULL REFERENCES integration_gold.run_status(run_id) ON DELETE CASCADE,
+    pattern_key      TEXT NOT NULL,              -- kg.nodes key
+    match_score      DOUBLE PRECISION NOT NULL,
+    match_method     TEXT NOT NULL,              -- 'exact', 'semantic', 'rule'
+    explanation      JSONB,                      -- Match details for debugging
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS kg_pattern_matches_run_idx ON kg.pattern_matches(run_id);
+CREATE INDEX IF NOT EXISTS kg_pattern_matches_pattern_idx ON kg.pattern_matches(pattern_key);
+
+-- Add origin column to kg.nodes (migration-safe using DO block)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'kg' AND table_name = 'nodes' AND column_name = 'origin'
+    ) THEN
+        ALTER TABLE kg.nodes ADD COLUMN origin TEXT DEFAULT 'seeded';
+    END IF;
+END $$;
+
+-- Backfill NULL origin values to 'seeded' (defensive migration)
+UPDATE kg.nodes SET origin = 'seeded' WHERE origin IS NULL;
+
+-- Additional composite indexes for pattern learning queries
+CREATE INDEX IF NOT EXISTS kg_run_events_run_position_idx ON kg.run_events(run_id, position);
+CREATE INDEX IF NOT EXISTS kg_pattern_candidates_status_support_idx ON kg.pattern_candidates(status, support_count DESC);
+CREATE INDEX IF NOT EXISTS kg_nodes_type_origin_idx ON kg.nodes(node_type, origin) WHERE node_type = 'pattern';
+
+-- Dedupe constraint: prevent duplicate events in same run (run_id, position, activity, event_type)
+CREATE UNIQUE INDEX IF NOT EXISTS kg_run_events_dedup_idx ON kg.run_events(run_id, position, activity, event_type);
 """
 
 
-def init_postgres_schema() -> None:
+def _apply_full_schema(conn) -> None:
+    """Run all DDL statements for Postgres schemas using an open connection."""
+    with conn.cursor() as cur:
+        cur.execute(SPEC_SILVER_DDL)
+        cur.execute(INTEGRATION_GOLD_DDL)
+        cur.execute(REPO_META_DDL)
+        cur.execute(KG_DDL)
+    conn.commit()
+
+
+def init_all_schemas(conn=None) -> None:
     """
     Initialize all Postgres schemas and tables.
-    
+
+    If a connection is provided, uses it directly; otherwise manages its own.
     Creates spec_silver, integration_gold, repo_meta, and kg schemas with all tables.
+    Also seeds STANDARD_PATTERNS into kg.nodes (KG-002 fix).
     Safe to call multiple times (uses CREATE IF NOT EXISTS).
     """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            # Execute DDL in order (respecting foreign key dependencies)
-            cur.execute(SPEC_SILVER_DDL)
-            cur.execute(INTEGRATION_GOLD_DDL)
-            cur.execute(REPO_META_DDL)
-            cur.execute(KG_DDL)
-        conn.commit()
+    if conn is None:
+        with get_connection() as managed_conn:
+            _apply_full_schema(managed_conn)
+    else:
+        _apply_full_schema(conn)
 
     logger.info("Postgres schema initialized successfully (including kg schema)")
+    
+    # KG-002 Fix: Seed standard patterns into kg.nodes
+    # This enables cross-provider pattern matching from the start
+    try:
+        from integration_coworker.persistence.seed_kg import seed_standard_patterns
+        added, skipped = seed_standard_patterns()
+        if added > 0:
+            logger.info(f"Seeded {added} standard patterns into kg.nodes")
+    except Exception as e:
+        # Don't fail init if pattern seeding fails - it's not critical
+        logger.warning(f"Failed to seed standard patterns: {e}")
+
+
+def init_postgres_schema() -> None:
+    """Backward-compatible alias for init_all_schemas."""
+    init_all_schemas()
 
 
 def drop_all_schemas() -> None:

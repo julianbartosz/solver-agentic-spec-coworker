@@ -291,30 +291,52 @@ def _upsert_feedback_record(record: FeedbackRecord) -> Optional[int]:
             row = cur.fetchone()
             return row[0] if row else None
         else:
-            # SQLite version
-            cur.execute("""
-                INSERT INTO kg_feedback_records 
-                    (run_id, template_key, pattern_key, feedback_type, score, 
-                     comment, source, langsmith_feedback_id, created_at, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(run_id, COALESCE(langsmith_feedback_id, '')) 
-                DO UPDATE SET
-                    score = excluded.score,
-                    comment = excluded.comment,
-                    synced_at = datetime('now')
-            """, (
-                record.run_id,
-                record.template_key,
-                record.pattern_key,
-                record.feedback_type.value if isinstance(record.feedback_type, FeedbackType) else record.feedback_type,
-                record.score,
-                record.comment,
-                record.source.value if isinstance(record.source, FeedbackSource) else record.source,
-                record.langsmith_feedback_id,
-                record.created_at,
-            ))
-            conn.commit()
-            return cur.lastrowid
+            # SQLite version - use INSERT OR REPLACE approach
+            # First check if record exists (by run_id + langsmith_feedback_id if set)
+            if record.langsmith_feedback_id:
+                cur.execute("""
+                    SELECT id FROM kg_feedback_records 
+                    WHERE run_id = ? AND langsmith_feedback_id = ?
+                """, (record.run_id, record.langsmith_feedback_id))
+            else:
+                # For implicit signals, check by run_id + template_key + pattern_key
+                cur.execute("""
+                    SELECT id FROM kg_feedback_records 
+                    WHERE run_id = ? AND template_key = ? AND pattern_key = ?
+                    AND langsmith_feedback_id IS NULL
+                """, (record.run_id, record.template_key, record.pattern_key))
+            
+            existing = cur.fetchone()
+            
+            if existing:
+                # Update existing record
+                cur.execute("""
+                    UPDATE kg_feedback_records SET
+                        score = ?, comment = ?, synced_at = datetime('now')
+                    WHERE id = ?
+                """, (record.score, record.comment, existing[0]))
+                conn.commit()
+                return existing[0]
+            else:
+                # Insert new record
+                cur.execute("""
+                    INSERT INTO kg_feedback_records 
+                        (run_id, template_key, pattern_key, feedback_type, score, 
+                         comment, source, langsmith_feedback_id, created_at, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """, (
+                    record.run_id,
+                    record.template_key,
+                    record.pattern_key,
+                    record.feedback_type.value if isinstance(record.feedback_type, FeedbackType) else record.feedback_type,
+                    record.score,
+                    record.comment,
+                    record.source.value if isinstance(record.source, FeedbackSource) else record.source,
+                    record.langsmith_feedback_id,
+                    record.created_at,
+                ))
+                conn.commit()
+                return cur.lastrowid
             
     except Exception as e:
         logger.error(f"Failed to upsert feedback record: {e}")
@@ -484,3 +506,195 @@ def create_feedback(
             logger.warning(f"Failed to submit to LangSmith: {e}")
     
     return record_id
+
+
+# =============================================================================
+# PL-001: Feedback → Confidence Adjustment
+# =============================================================================
+
+def update_pattern_confidence_from_feedback(
+    pattern_key: str,
+    min_feedback_count: int = 3,
+) -> Optional[float]:
+    """
+    Update a pattern's confidence score based on accumulated feedback.
+    
+    Uses exponential moving average (EMA) to blend new feedback with
+    existing confidence. Only updates if sufficient feedback exists.
+    
+    Args:
+        pattern_key: The kg.nodes key for the pattern
+        min_feedback_count: Minimum feedback records to trigger update
+        
+    Returns:
+        New confidence score, or None if no update made
+    """
+    try:
+        conn = db.get_connection()
+        is_postgres = db.get_engine_type() == "postgres"
+        cur = conn.cursor()
+        
+        # Get current confidence
+        if is_postgres:
+            cur.execute("""
+                SELECT confidence_score FROM kg.nodes WHERE key = %s
+            """, (pattern_key,))
+        else:
+            cur.execute("""
+                SELECT confidence_score FROM kg_nodes WHERE key = ?
+            """, (pattern_key,))
+        
+        row = cur.fetchone()
+        if not row:
+            logger.warning(f"Pattern {pattern_key} not found")
+            return None
+        
+        old_confidence = row[0] or 0.5
+        
+        # Get feedback for this pattern
+        if is_postgres:
+            cur.execute("""
+                SELECT AVG(score), COUNT(*) 
+                FROM kg.feedback_records 
+                WHERE pattern_key = %s
+            """, (pattern_key,))
+        else:
+            cur.execute("""
+                SELECT AVG(score), COUNT(*) 
+                FROM kg_feedback_records 
+                WHERE pattern_key = ?
+            """, (pattern_key,))
+        
+        fb_row = cur.fetchone()
+        avg_score = fb_row[0]
+        fb_count = fb_row[1] or 0
+        
+        if fb_count < min_feedback_count or avg_score is None:
+            logger.debug(f"Not enough feedback for {pattern_key}: {fb_count} < {min_feedback_count}")
+            return None
+        
+        # Calculate new confidence using EMA
+        # alpha = 0.3 means new feedback contributes 30%, old confidence 70%
+        alpha = 0.3
+        new_confidence = alpha * avg_score + (1 - alpha) * old_confidence
+        new_confidence = max(0.1, min(1.0, new_confidence))  # Clamp to [0.1, 1.0]
+        
+        # Update the pattern
+        if is_postgres:
+            cur.execute("""
+                UPDATE kg.nodes 
+                SET confidence_score = %s, updated_at = NOW()
+                WHERE key = %s
+            """, (new_confidence, pattern_key))
+        else:
+            cur.execute("""
+                UPDATE kg_nodes 
+                SET confidence_score = ?, updated_at = datetime('now')
+                WHERE key = ?
+            """, (new_confidence, pattern_key))
+        
+        # Record in confidence history
+        if is_postgres:
+            cur.execute("""
+                INSERT INTO kg.confidence_history 
+                    (node_key, old_confidence, new_confidence, feedback_count, reason)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (pattern_key, old_confidence, new_confidence, fb_count, "feedback_ema"))
+        else:
+            cur.execute("""
+                INSERT INTO kg_confidence_history 
+                    (node_key, old_confidence, new_confidence, feedback_count, reason)
+                VALUES (?, ?, ?, ?, ?)
+            """, (pattern_key, old_confidence, new_confidence, fb_count, "feedback_ema"))
+        
+        conn.commit()
+        
+        logger.info(
+            f"Updated confidence for {pattern_key}: {old_confidence:.2f} → {new_confidence:.2f} "
+            f"(avg_score={avg_score:.2f}, count={fb_count})"
+        )
+        
+        return new_confidence
+        
+    except Exception as e:
+        logger.error(f"Failed to update confidence for {pattern_key}: {e}")
+        return None
+
+
+def apply_confidence_decay(decay_factor: float = 0.95, min_confidence: float = 0.1) -> int:
+    """
+    Apply confidence decay to unused patterns.
+    
+    Patterns that haven't been used recently have their confidence
+    reduced by the decay factor. This prevents stale patterns from
+    dominating.
+    
+    Args:
+        decay_factor: Multiply confidence by this (0.95 = 5% decay)
+        min_confidence: Don't decay below this threshold
+        
+    Returns:
+        Number of patterns decayed
+    """
+    try:
+        conn = db.get_connection()
+        is_postgres = db.get_engine_type() == "postgres"
+        cur = conn.cursor()
+        
+        # Find patterns not used in the last 30 days
+        if is_postgres:
+            cur.execute("""
+                SELECT key, confidence_score
+                FROM kg.nodes
+                WHERE node_type = 'pattern'
+                AND origin = 'learned'
+                AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '30 days')
+                AND confidence_score > %s
+            """, (min_confidence,))
+        else:
+            cur.execute("""
+                SELECT key, confidence_score
+                FROM kg_nodes
+                WHERE node_type = 'pattern'
+                AND origin = 'learned'
+                AND (last_used_at IS NULL OR last_used_at < datetime('now', '-30 days'))
+                AND confidence_score > ?
+            """, (min_confidence,))
+        
+        patterns = cur.fetchall()
+        decayed = 0
+        
+        for key, old_conf in patterns:
+            new_conf = max(min_confidence, old_conf * decay_factor)
+            
+            if is_postgres:
+                cur.execute("""
+                    UPDATE kg.nodes SET confidence_score = %s WHERE key = %s
+                """, (new_conf, key))
+                cur.execute("""
+                    INSERT INTO kg.confidence_history 
+                        (node_key, old_confidence, new_confidence, feedback_count, reason)
+                    VALUES (%s, %s, %s, 0, 'decay')
+                """, (key, old_conf, new_conf))
+            else:
+                cur.execute("""
+                    UPDATE kg_nodes SET confidence_score = ? WHERE key = ?
+                """, (new_conf, key))
+                cur.execute("""
+                    INSERT INTO kg_confidence_history 
+                        (node_key, old_confidence, new_confidence, feedback_count, reason)
+                    VALUES (?, ?, ?, 0, 'decay')
+                """, (key, old_conf, new_conf))
+            
+            decayed += 1
+        
+        conn.commit()
+        
+        if decayed > 0:
+            logger.info(f"Applied confidence decay to {decayed} unused patterns")
+        
+        return decayed
+        
+    except Exception as e:
+        logger.error(f"Failed to apply confidence decay: {e}")
+        return 0

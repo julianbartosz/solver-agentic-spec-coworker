@@ -24,6 +24,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions, IntegrationResult
 from integration_coworker.repo.profiles import SUBATOMIC_MOCK_PROFILE

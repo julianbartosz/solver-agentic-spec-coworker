@@ -11,6 +11,7 @@ import shutil
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.repo.profiles import SUBATOMIC_MOCK_PROFILE
+pytestmark = pytest.mark.requires_aiosqlite
 
 
 @pytest.fixture

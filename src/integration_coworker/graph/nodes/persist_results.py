@@ -9,9 +9,14 @@ Supports both Postgres (primary) and SQLite (fallback) using sql_helpers.
 Note: This is the legacy persist node, kept for backward compatibility.
 The new design uses checkpoint nodes: persist_silver_checkpoint, 
 persist_gold_checkpoint, and persist_run_outcome.
+
+Fix MULTI-001: Provider Namespacing
+- Endpoint keys include provider_code to prevent collision in multi-spec scenarios
+- E.g., stripe:/payments and paypal:/payments are distinct keys
 """
 from datetime import datetime, timezone
 import json
+from typing import Optional
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.persistence import db
@@ -25,6 +30,33 @@ UTC = timezone.utc
 # Schema prefixes for Postgres tables
 SILVER_SCHEMA = "spec_silver"
 GOLD_SCHEMA = "integration_gold"
+
+
+def get_qualified_endpoint_key(
+    method: str, 
+    path: str, 
+    operation_id: Optional[str] = None, 
+    provider_code: Optional[str] = None
+) -> tuple:
+    """
+    Generate a qualified endpoint key that includes provider namespace.
+    
+    Fix MULTI-001: In multi-spec scenarios, two different providers might have
+    the same path (e.g., /payments). This function ensures endpoints are keyed
+    by (provider, method, path, operation_id) to prevent collisions.
+    
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: Endpoint path (e.g., /v1/payments)
+        operation_id: Optional operation ID from the spec
+        provider_code: Provider namespace (e.g., 'stripe', 'paypal')
+        
+    Returns:
+        Tuple of (provider_code, method, path, operation_id) for use as dict key
+    """
+    # Normalize provider_code to lowercase, default to 'default' if not provided
+    normalized_provider = (provider_code or "default").lower()
+    return (normalized_provider, method.upper(), path, operation_id)
 
 
 def persist_results(state: WorkflowState) -> WorkflowState:
@@ -130,8 +162,10 @@ def persist_results(state: WorkflowState) -> WorkflowState:
             cur.execute(sql, (source_system_id, spec_document_id, endpoint.method, endpoint.path))
             endpoint_id = cur.fetchone()[0]
             endpoint.id = endpoint_id
-            # Create lookup key for bindings
-            key = (endpoint.method, endpoint.path, endpoint.operation_id)
+            # Fix MULTI-001: Create qualified lookup key including provider namespace
+            # This prevents collision when multiple specs have the same path (e.g., /payments)
+            ep_provider = getattr(endpoint, '_provider_code', None) or provider_code
+            key = get_qualified_endpoint_key(endpoint.method, endpoint.path, endpoint.operation_id, ep_provider)
             endpoint_ids_by_key[key] = endpoint_id
 
         # 5. Insert Entities
@@ -218,14 +252,20 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                     operation_id = op.get("operation_id")
                     method = op.get("method")
                     path = op.get("path")
+                    # Fix MULTI-001: Include provider in lookup
+                    op_provider = op.get("provider_code") or provider_code
 
-                    # Try to find by operation_id first, then by method+path
+                    # Try to find by qualified key first (provider + operation_id)
+                    # Then fall back to method+path matching within same provider
                     for key, ep_id in endpoint_ids_by_key.items():
-                        ep_method, ep_path, ep_op_id = key
+                        ep_provider, ep_method, ep_path, ep_op_id = key
+                        # Match provider first
+                        if op_provider and ep_provider != op_provider.lower():
+                            continue
                         if operation_id and ep_op_id == operation_id:
                             endpoint_id = ep_id
                             break
-                        elif method and path and ep_method == method and ep_path == path:
+                        elif method and path and ep_method == method.upper() and ep_path == path:
                             endpoint_id = ep_id
                             break
 
@@ -255,14 +295,15 @@ def persist_results(state: WorkflowState) -> WorkflowState:
 
         # 10. Insert CodeArtifacts
         # Per design doc Appendix B.3: unique key is (task_id, rel_path, artifact_type)
+        # Bug #53 fix: Include module_name in the INSERT columns
         for artifact in state.code_artifacts:
             sql = upsert_ignore(
                 "code_artifacts",
-                ["task_id", "artifact_type", "rel_path", "language", "content"],
+                ["task_id", "artifact_type", "rel_path", "language", "module_name", "content"],
                 ["task_id", "rel_path", "artifact_type"],
                 gold_schema
             )
-            cur.execute(sql, (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.content))
+            cur.execute(sql, (task_id, artifact.artifact_type, artifact.rel_path, artifact.language, artifact.module_name, artifact.content))
 
             sql = select_by_columns("code_artifacts", ["id"], ["task_id", "rel_path", "artifact_type"], gold_schema)
             cur.execute(sql, (task_id, artifact.rel_path, artifact.artifact_type))

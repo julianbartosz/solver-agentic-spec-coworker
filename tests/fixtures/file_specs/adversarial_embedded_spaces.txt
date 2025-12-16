@@ -1,0 +1,8 @@
+CUST0001John Smith          123 Main St, Apt 4B           +000123450020240115
+CUST0002Mary Jane O'Connor  456 Oak Ave, Suite 100        -000009999920240116
+CUST0003Robert Van Der Berg 789 Pine Rd                   +000000000120240117
+CUST0004Dr. Alice Johnson   321 Elm Blvd, Floor 3         +100000000020240118
+CUST0005Juan Carlos Garcia  555 Cedar Ln, Bldg A          -000250075020240119
+CUST0006Ann Marie Williams  111 Maple Dr, Unit B-12       +000567890020240120
+CUST0007Christopher Lee Jr  222 Birch St                  +000987654320240121
+CUST0008Maria Elena Santos  333 Willow Way, Apt 789       -000011122320240122

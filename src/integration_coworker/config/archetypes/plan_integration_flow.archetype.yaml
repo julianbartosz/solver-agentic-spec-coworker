@@ -7,10 +7,10 @@ role: planning
 inherits: _base
 
 model:
-  # GPT-5.1 for complex planning and reasoning
+  # gpt-4o for complex planning and reasoning
   # Change provider/name here to swap models without code changes
   provider: openai
-  name: gpt-5.1
+  name: gpt-4o
   temperature: 0.2
   max_tokens: 4096
 

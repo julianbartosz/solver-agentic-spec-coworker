@@ -6,9 +6,9 @@ Uses LangChain for automatic LangSmith tracing.
 Supports OpenAI, Anthropic, Google Gemini, and mock fallback for testing.
 
 Supported Providers:
-- OpenAI: gpt-5.1, gpt-4o, gpt-4o-mini, etc.
-- Anthropic: claude-sonnet-4, claude-opus-4, etc.
-- Google: gemini-3-pro, gemini-2.0-flash, etc. (large context windows)
+- OpenAI: gpt-4o, gpt-4o-mini, o1, o1-mini, etc.
+- Anthropic: claude-sonnet-4-5, claude-3-5-sonnet, etc.
+- Google: gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, etc. (large context windows)
 
 Model Configuration:
 Models are configured per-node via archetype YAML files in config/archetypes/.
@@ -28,6 +28,15 @@ LangSmith Integration:
 v2 Security (SEC-001):
 - All system prompts are hardened with safety preamble via harden_system_prompt()
 - Protects against prompt injection attacks in user-provided content
+
+Redis Cache (Plan 7):
+- LLM responses are cached in Redis when LLM_CACHE_ENABLED=true
+- Cache key: llm:<provider>:<model>:<task_type>:<sha256(prompt)>
+- Default TTL: 24 hours (configurable via LLM_CACHE_TTL)
+- Graceful degradation if Redis unavailable
+
+Bug #24 Fix: Added automatic retry with exponential backoff for rate limits (429)
+and transient API errors. Retries up to 3 times with 1-10 second waits.
 """
 import hashlib
 import json
@@ -35,17 +44,94 @@ import logging
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Literal
+from typing import Any, Dict, Optional, Protocol, Literal, Callable, TypeVar
 
-from integration_coworker.config import get_llm_config, get_settings
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+
+from integration_coworker.config import get_settings
 from integration_coworker.config.llm_mode import LLMMode, get_llm_mode
 from integration_coworker.llm.safety import harden_system_prompt
+from integration_coworker.llm.cache import get_llm_cache
 
 logger = logging.getLogger(__name__)
 
+# Type variable for retry wrapper
+T = TypeVar('T')
+
 # Supported LLM providers
 LLMProvider = Literal["openai", "anthropic", "google", "mock"]
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """
+    Determine if an exception is retryable (rate limit, transient error).
+    
+    Bug #24 Fix: Check for rate limit (429), server errors (5xx),
+    and transient network issues.
+    """
+    error_str = str(exc).lower()
+    
+    # Rate limit errors (429)
+    if "429" in error_str or "rate_limit" in error_str or "rate limit" in error_str:
+        return True
+    
+    # Credit/quota errors should NOT be retried (400, not transient)
+    if "credit" in error_str or "balance" in error_str or "quota" in error_str:
+        return False
+    
+    # Server errors (5xx) are transient
+    if any(code in error_str for code in ["500", "502", "503", "504"]):
+        return True
+    
+    # Connection/timeout errors
+    if any(term in error_str for term in ["timeout", "connection", "network"]):
+        return True
+    
+    return False
+
+
+def with_retry(fn: Callable[..., T]) -> Callable[..., T]:
+    """
+    Decorator to add retry logic with exponential backoff for LLM calls.
+    
+    Bug #24 Fix: Retries on rate limits (429), server errors (5xx),
+    and transient network issues. Maximum 3 attempts with 1-10 second waits.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs) -> T:
+        attempts = 0
+        max_attempts = 3
+        
+        while attempts < max_attempts:
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                attempts += 1
+                if attempts >= max_attempts or not _is_retryable_error(e):
+                    raise
+                
+                # Calculate backoff: 2^attempt seconds, capped at 10
+                wait_time = min(2 ** attempts, 10)
+                logger.warning(
+                    f"LLM call failed with retryable error (attempt {attempts}/{max_attempts}), "
+                    f"retrying in {wait_time}s: {e}"
+                )
+                import time
+                time.sleep(wait_time)
+        
+        # Should not reach here, but just in case
+        raise RuntimeError("Retry logic error")
+    
+    return wrapper
+
 
 # Context variable for current run_id (set by workflow runtime)
 _current_run_id: ContextVar[Optional[str]] = ContextVar("current_run_id", default=None)
@@ -320,6 +406,18 @@ class MockLLMClient:
                 "dependencies": [],
             }
 
+        # V1.2: Fallback for unmatched prompts - include task_slug if it looks like
+        # a task analysis prompt to prevent "missing task_slug" errors
+        if "task" in prompt_lower or "api" in prompt_lower or "integration" in prompt_lower:
+            return {
+                "task_slug": "mock_fallback_task",
+                "input_entities": [],
+                "output_entities": [],
+                "constraints": {},
+                "target_operations": [],
+                "mock": True,
+            }
+
         return {"mock": True, "prompt_preview": prompt[:100]}
 
     def _mock_extraction_response(self, prompt: str) -> str:
@@ -347,6 +445,26 @@ class MockLLMClient:
                 "return_result",
             ],
         })
+
+    async def complete_async(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """Async version of complete - returns same mock response."""
+        return self.complete(prompt, system_prompt, temperature, max_tokens)
+
+    async def complete_json_async(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Async version of complete_json - returns same mock response."""
+        return self.complete_json(prompt, system_prompt, temperature, max_tokens)
 
 
 @dataclass
@@ -418,6 +536,7 @@ class OpenAILLMClient:
         Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
         v2: System prompts are hardened with safety preamble (SEC-001).
         LLM-003: Supports RECORD/REPLAY modes for regression testing.
+        Plan 7: Checks Redis cache before making API call.
         """
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -441,6 +560,13 @@ class OpenAILLMClient:
                 f"Run with LLM_MODE=record first to capture interactions."
             )
 
+        # Plan 7: Check Redis cache before API call
+        cache = get_llm_cache()
+        cached_response = cache.get("openai", self.model, self.task_type, prompt, hardened_system)
+        if cached_response is not None:
+            logger.debug(f"Cache hit for OpenAI {self.model}, task_type={self.task_type}")
+            return cached_response
+
         llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
 
         messages = []
@@ -449,15 +575,19 @@ class OpenAILLMClient:
 
         metadata = self._build_metadata()
 
-        try:
-            # LangChain automatically handles LangSmith tracing
-            response = llm.invoke(
+        def _invoke_llm():
+            """Inner function for retry wrapper."""
+            return llm.invoke(
                 messages,
                 config={
                     "metadata": metadata,
                     "tags": [f"task:{self.task_type}", f"model:{self.model}"],
                 }
             )
+
+        try:
+            # Bug #24 Fix: Wrap LLM call with retry for rate limits and transient errors
+            response = with_retry(_invoke_llm)()
 
             result = response.content or ""
             
@@ -467,6 +597,9 @@ class OpenAILLMClient:
             # LLM-003: Save interaction if in RECORD mode
             if mode.should_record:
                 _save_interaction(prompt, hardened_system, self.model, result)
+
+            # Plan 7: Cache the result
+            cache.set("openai", self.model, self.task_type, prompt, hardened_system, result)
 
             return result
 
@@ -516,11 +649,11 @@ class AnthropicLLMClient:
     Anthropic Claude LLM client with LangSmith tracing.
     
     Uses LangChain's ChatAnthropic for automatic LangSmith integration.
-    Supports Claude models (Opus 4.5, Sonnet 4, etc.).
+    Supports Claude models (Opus 4.5, Sonnet 4.5, etc.).
     """
 
     api_key: str
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-5-20250929"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
     task_type: str = "default"
@@ -573,6 +706,7 @@ class AnthropicLLMClient:
         Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
         v2: System prompts are hardened with safety preamble (SEC-001).
         LLM-003: Supports RECORD/REPLAY modes for regression testing.
+        Plan 7: Checks Redis cache before making API call.
         """
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -596,6 +730,13 @@ class AnthropicLLMClient:
                 f"Run with LLM_MODE=record first to capture interactions."
             )
 
+        # Plan 7: Check Redis cache before API call
+        cache = get_llm_cache()
+        cached_response = cache.get("anthropic", self.model, self.task_type, prompt, hardened_system)
+        if cached_response is not None:
+            logger.debug(f"Cache hit for Anthropic {self.model}, task_type={self.task_type}")
+            return cached_response
+
         llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
 
         messages = []
@@ -604,8 +745,9 @@ class AnthropicLLMClient:
 
         metadata = self._build_metadata()
 
-        try:
-            response = llm.invoke(
+        def _invoke_llm():
+            """Inner function for retry wrapper."""
+            return llm.invoke(
                 messages,
                 config={
                     "metadata": metadata,
@@ -613,11 +755,18 @@ class AnthropicLLMClient:
                 }
             )
 
+        try:
+            # Bug #24 Fix: Wrap LLM call with retry for rate limits and transient errors
+            response = with_retry(_invoke_llm)()
+
             result = response.content or ""
             
             # LLM-003: Save interaction if in RECORD mode
             if mode.should_record:
                 _save_interaction(prompt, hardened_system, self.model, result)
+
+            # Plan 7: Cache the result
+            cache.set("anthropic", self.model, self.task_type, prompt, hardened_system, result)
 
             return result
 
@@ -662,14 +811,14 @@ class GoogleLLMClient:
     Google Gemini LLM client with LangSmith tracing.
     
     Uses LangChain's ChatGoogleGenerativeAI for automatic LangSmith integration.
-    Supports Gemini models (gemini-3-pro, gemini-2.0-flash, etc.).
+    Supports Gemini models (gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, etc.).
     
     Gemini models offer large context windows, making them ideal for 
     repo analysis and tasks requiring extensive context.
     """
 
     api_key: str
-    model: str = "gemini-3-pro"
+    model: str = "gemini-2.5-flash"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
     task_type: str = "default"
@@ -722,6 +871,7 @@ class GoogleLLMClient:
         Automatically traced in LangSmith when LANGCHAIN_TRACING_V2=true.
         v2: System prompts are hardened with safety preamble (SEC-001).
         LLM-003: Supports RECORD/REPLAY modes for regression testing.
+        Plan 7: Checks Redis cache before making API call.
         """
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -745,6 +895,13 @@ class GoogleLLMClient:
                 f"Run with LLM_MODE=record first to capture interactions."
             )
 
+        # Plan 7: Check Redis cache before API call
+        cache = get_llm_cache()
+        cached_response = cache.get("google", self.model, self.task_type, prompt, hardened_system)
+        if cached_response is not None:
+            logger.debug(f"Cache hit for Google {self.model}, task_type={self.task_type}")
+            return cached_response
+
         llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
 
         messages = []
@@ -753,14 +910,19 @@ class GoogleLLMClient:
 
         metadata = self._build_metadata()
 
-        try:
-            response = llm.invoke(
+        def _invoke_llm():
+            """Inner function for retry wrapper."""
+            return llm.invoke(
                 messages,
                 config={
                     "metadata": metadata,
                     "tags": [f"task:{self.task_type}", f"model:{self.model}", "provider:google"],
                 }
             )
+
+        try:
+            # Bug #24 Fix: Wrap LLM call with retry for rate limits and transient errors
+            response = with_retry(_invoke_llm)()
 
             result = response.content or ""
             
@@ -770,6 +932,9 @@ class GoogleLLMClient:
             # LLM-003: Save interaction if in RECORD mode
             if mode.should_record:
                 _save_interaction(prompt, hardened_system, self.model, result)
+
+            # Plan 7: Cache the result
+            cache.set("google", self.model, self.task_type, prompt, hardened_system, result)
 
             return result
 
@@ -820,6 +985,10 @@ def get_llm_client(
     """
     Get an LLM client for the specified task type.
     
+    .. deprecated::
+        Use :func:`get_llm_client_for_node` instead, which uses archetype YAML configs.
+        This function is kept for backwards compatibility but no longer reads from models.yaml.
+    
     Uses LLMMode from config to determine behavior (LLM-003):
     - REAL: Use real API clients
     - MOCK: Use MockLLMClient
@@ -853,7 +1022,9 @@ def get_llm_client(
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
-    config = get_llm_config(task_type)
+    # DEPRECATED: Previously called get_llm_config(task_type) to load from models.yaml.
+    # Now uses defaults - prefer get_llm_client_for_node() for new code.
+    config: Dict[str, Any] = {}
 
     # Determine provider from explicit arg, config, or default
     effective_provider = provider or config.get("provider", "openai")
@@ -951,7 +1122,7 @@ def _try_create_client_for_provider_from_config(
                 logger.debug(f"OpenAI fallback skipped: OPENAI_API_KEY not set")
             return None
         
-        model = config.get("model", "gpt-5.1") if not is_fallback else "gpt-5.1"
+        model = config.get("model", "gpt-4o") if not is_fallback else "gpt-4o"
         if is_fallback:
             logger.info(
                 f"Primary provider unavailable, falling back to OpenAI for task_type={task_type}, "
@@ -976,7 +1147,7 @@ def _try_create_client_for_provider_from_config(
                 logger.debug(f"Google fallback skipped: GOOGLE_API_KEY not set")
             return None
         
-        model = config.get("model", "gemini-3-pro") if not is_fallback else "gemini-3-pro"
+        model = config.get("model", "gemini-2.5-flash") if not is_fallback else "gemini-2.5-flash"
         if is_fallback:
             logger.info(
                 f"Primary provider unavailable, falling back to Google Gemini for task_type={task_type}, "
@@ -1098,7 +1269,7 @@ def _try_create_client_for_provider(
                 logger.debug(f"Anthropic fallback skipped: ANTHROPIC_API_KEY not set")
             return None
         
-        effective_model = model_name or "claude-sonnet-4-20250514"
+        effective_model = model_name or "claude-sonnet-4-5-20250929"
         if is_fallback:
             logger.info(
                 f"Primary provider unavailable, falling back to Anthropic for task_type={task_type}, "
@@ -1124,7 +1295,7 @@ def _try_create_client_for_provider(
                 logger.debug(f"OpenAI fallback skipped: OPENAI_API_KEY not set")
             return None
         
-        effective_model = model_name or "gpt-5.1"
+        effective_model = model_name or "gpt-4o"
         if is_fallback:
             logger.info(
                 f"Primary provider unavailable, falling back to OpenAI for task_type={task_type}, "
@@ -1151,7 +1322,7 @@ def _try_create_client_for_provider(
                 logger.debug(f"Google fallback skipped: GOOGLE_API_KEY not set")
             return None
         
-        effective_model = model_name or "gemini-3-pro"
+        effective_model = model_name or "gemini-2.5-flash"
         if is_fallback:
             logger.info(
                 f"Primary provider unavailable, falling back to Google Gemini for task_type={task_type}, "
@@ -1179,6 +1350,10 @@ def get_llm_client_for_node(node_name: str, strict: bool = False) -> LLMClient:
     """
     Get an LLM client configured for a specific LangGraph node.
     
+    .. deprecated:: 3.1
+        Use :func:`get_async_llm_client_for_node` from `async_client` module instead.
+        This function will be removed in a future version.
+    
     This is the recommended entry point for nodes. It loads the archetype
     YAML for the given node name and returns a properly configured client.
     
@@ -1193,6 +1368,13 @@ def get_llm_client_for_node(node_name: str, strict: bool = False) -> LLMClient:
         client = get_llm_client_for_node("understand_task")
         response = client.complete(prompt)
     """
+    import warnings
+    warnings.warn(
+        "get_llm_client_for_node is deprecated, use get_async_llm_client_for_node instead. "
+        "This function will be removed in a future version.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from integration_coworker.config import load_archetype
 
     archetype = load_archetype(node_name)
@@ -1222,80 +1404,75 @@ def is_mock_llm_mode() -> bool:
     return use_mock or (not has_openai_key and not has_anthropic_key)
 
 
-def call_llm(
+def call_llm_for_node(
+    node_name: str,
     prompt: str,
-    task_type: str = "default",
     system_prompt: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
 ) -> str:
     """
-    Convenience function to make an LLM call.
+    Make an LLM call using archetype configuration for a specific node.
+    
+    .. deprecated:: 3.1
+        Use :func:`call_llm_async_for_node` from `async_client` module instead.
+        This function now wraps the async version for backward compatibility.
+    
+    This is the recommended way to call LLMs from nodes. It loads the archetype
+    YAML for the given node name and uses its model configuration.
+    
+    Bug #90 Fix: Properly handles being called from within an async context
+    (e.g., from LangGraph nodes) by using a thread pool executor instead of
+    asyncio.run() which cannot be called from a running event loop.
     
     Args:
+        node_name: Name of the LangGraph node (e.g., "understand_task", "build_report")
         prompt: The user prompt
-        task_type: Type of task for config lookup
-        system_prompt: Optional system prompt
-        temperature: Optional temperature override
-        max_tokens: Optional max tokens override
+        system_prompt: Optional system prompt (overrides archetype default if provided)
+        temperature: Optional temperature override (uses archetype default if not provided)
+        max_tokens: Optional max tokens override (uses archetype default if not provided)
     
     Returns:
         The LLM response text
-    """
-    client = get_llm_client(task_type)
-    return client.complete(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-
-
-def call_llm_json(
-    prompt: str,
-    task_type: str = "default",
-    system_prompt: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    Convenience function to make an LLM call and parse JSON response.
-    
-    .. deprecated:: 1.0.0
-        Use :func:`call_llm` with TOON format instead for 30-40% token savings.
-        Import ``from_toon`` from ``integration_coworker.llm.toon`` to parse responses.
         
-        Example migration::
-        
-            # Before (deprecated):
-            response = call_llm_json(prompt, task_type="planning")
-            
-            # After (recommended):
-            from integration_coworker.llm.toon import from_toon
-            response_text = call_llm(toon_prompt, task_type="planning")
-            response = from_toon(response_text)
-    
-    Args:
-        prompt: The user prompt
-        task_type: Type of task for config lookup
-        system_prompt: Optional system prompt
-        temperature: Optional temperature override
-        max_tokens: Optional max tokens override
-    
-    Returns:
-        Parsed JSON dictionary
+    Example:
+        response = call_llm_for_node(
+            "understand_task",
+            prompt="Parse this task: Create a checkout session",
+        )
     """
     import warnings
+    import asyncio
+    import concurrent.futures
+    
     warnings.warn(
-        "call_llm_json is deprecated. Use call_llm with TOON format instead "
-        "for 30-40% token savings. See integration_coworker.llm.toon module.",
+        "call_llm_for_node is deprecated, use call_llm_async_for_node instead. "
+        "This function now wraps the async version for backward compatibility.",
         DeprecationWarning,
         stacklevel=2,
     )
-    client = get_llm_client(task_type)
-    return client.complete_json(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    from integration_coworker.llm.async_client import call_llm_async_for_node
+    
+    async def _call_async():
+        return await call_llm_async_for_node(
+            node_name=node_name,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    
+    # Bug #90 Fix: Check if we're already in an async context
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop is not None:
+        # We're inside an async context - use thread pool to run a new event loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, _call_async())
+            return future.result()
+    else:
+        # No event loop - create one directly
+        return asyncio.run(_call_async())

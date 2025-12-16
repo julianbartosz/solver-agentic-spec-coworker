@@ -29,6 +29,7 @@ from integration_coworker.domain.models import (
     IntegrationFlowNode,
     IntegrationFlowEdge,
     KGWorkflowTemplate,
+    WorkflowTemplate,
     Endpoint,
 )
 from integration_coworker.kg import (
@@ -36,6 +37,7 @@ from integration_coworker.kg import (
     query_templates_with_pattern_fallback,
     STANDARD_PATTERNS,
 )
+from integration_coworker.kg.pattern_discovery import record_pattern_match
 
 logger = logging.getLogger(__name__)
 
@@ -1042,6 +1044,46 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
         # V1.1: Track matched pattern for learning
         if best.get("template_id"):
             state.plan["matched_template_id"] = best.get("template_id")
+            
+            # V1.2 Pattern Learning: Record template match for confidence tracking
+            run_id = state.plan.get("run_id") or (state.metadata.get("run_id") if hasattr(state, "metadata") else None)
+            if run_id:
+                try:
+                    record_pattern_match(
+                        run_id=run_id,
+                        pattern_key=best.get("template_id"),
+                        match_score=best.get("score", 0.9),
+                        match_method="kg_template",
+                        explanation={
+                            "provider_code": provider,
+                            "task_description": task_description,
+                            "http_method": primary_http_method,
+                            "step_count": len(steps),
+                            "origin": best.get("origin", "seeded"),
+                            "source": template_source,
+                        },
+                    )
+                    logger.debug(
+                        "align_task_with_kg: recorded template match for template_id=%s",
+                        best.get("template_id"),
+                    )
+                except Exception as e:
+                    # Don't fail the workflow if match recording fails
+                    logger.warning("Failed to record template match: %s", e)
+        
+        # Bug #59 fix: Create WorkflowTemplate object and set on state
+        # This ensures persist_gold_checkpoint can persist the template
+        template_code = best.get("template_id") or best.get("code") or f"template_{provider}"
+        template_name = best.get("name") or template_code
+        template_desc = best.get("description") or f"Workflow template for {task_description}"
+        state.workflow_template = WorkflowTemplate(
+            id=None,  # Will be set by persist_gold_checkpoint
+            source_system_id=None,  # Will be set by persist_gold_checkpoint
+            code=template_code,
+            name=template_name,
+            description=template_desc,
+        )
+        logger.info(f"Created workflow_template: code={template_code}, name={template_name}")
     
     elif candidate_patterns:
         # V1.1 FT-005: Use cross-provider pattern
@@ -1056,6 +1098,36 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
         )
         # V1.1: Track matched pattern for learning
         state.plan["matched_pattern_id"] = best_pattern.get("template_id")
+        
+        # V1.2 Pattern Learning: Record pattern match for confidence tracking
+        pattern_id = best_pattern.get("template_id")
+        if pattern_id:
+            # Get run_id from state metadata if available
+            run_id = state.plan.get("run_id") or (state.metadata.get("run_id") if hasattr(state, "metadata") else None)
+            pattern_origin = best_pattern.get("source", "seeded")  # 'seeded', 'learned', 'builtin'
+            if run_id:
+                try:
+                    record_pattern_match(
+                        run_id=run_id,
+                        pattern_key=pattern_id,
+                        match_score=best_pattern.get("score", 0.8),
+                        match_method="cross_provider_pattern",
+                        explanation={
+                            "provider_code": provider,
+                            "task_description": task_description,
+                            "http_method": primary_http_method,
+                            "step_count": len(steps),
+                            "origin": pattern_origin,
+                        },
+                    )
+                    logger.debug(
+                        "align_task_with_kg: recorded pattern match for pattern_id=%s, run_id=%s",
+                        pattern_id,
+                        run_id,
+                    )
+                except Exception as e:
+                    # Don't fail the workflow if match recording fails
+                    logger.warning("Failed to record pattern match: %s", e)
     
     if not steps:
         # M5: Use smarter fallback that infers from endpoint structure
@@ -1165,6 +1237,21 @@ def align_task_with_kg(state: WorkflowState) -> WorkflowState:
         edges.append(edge)
 
     state.workflow_edges = edges
+
+    # Bug #59 fix: If no workflow_template was set from KG but we inferred a workflow,
+    # create a template for persistence so persist_gold_checkpoint can save it
+    if not state.workflow_template and steps:
+        # Create an inferred workflow template
+        template_source = state.plan.get("template_source", "inferred")
+        inferred_code = f"inferred_{provider}_{task_description[:30].replace(' ', '_').lower()}"
+        state.workflow_template = WorkflowTemplate(
+            id=None,
+            source_system_id=None,
+            code=inferred_code,
+            name=f"Inferred: {task_description[:50]}",
+            description=f"Workflow inferred from endpoint structure for task: {task_description}",
+        )
+        logger.info(f"Created inferred workflow_template: code={inferred_code}")
 
     state.completed_steps.append("align_task_with_kg")
     return state

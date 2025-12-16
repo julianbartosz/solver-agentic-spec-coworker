@@ -7,15 +7,18 @@ and common API patterns. This gives the LLM prior knowledge of:
 - Pagination patterns (cursor, offset)
 - Common error handling strategies
 - Webhook processing patterns
+- CRUD patterns for cross-provider learning (KG-002 fix)
 
 Called during `init-db` command to ensure the KG starts with useful templates.
 
 Per V2_IMPLEMENTATION_PLAN_SUPPLEMENT.md Section 3.
 """
+import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 
 from integration_coworker.persistence.db import get_connection, get_engine_type
+from integration_coworker.domain.models import KGNodeType
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +380,178 @@ def list_seeded_templates() -> List[Dict[str, Any]]:
     
     except Exception as e:
         logger.warning(f"Could not list templates: {e}")
+        return []
+    
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# KG-002 Fix: Seed STANDARD_PATTERNS into kg.nodes
+# =============================================================================
+
+def seed_standard_patterns() -> Tuple[int, int]:
+    """
+    Seed the STANDARD_PATTERNS from kg/__init__.py into kg.nodes.
+    
+    KG-002 Fix: This ensures all 7 standard patterns are available
+    for cross-provider pattern matching from the start, rather than
+    waiting for them to be created via learning.
+    
+    Returns:
+        Tuple of (patterns_added, patterns_skipped)
+    """
+    # Import here to avoid circular imports
+    from integration_coworker.kg import STANDARD_PATTERNS
+    
+    conn = get_connection()
+    engine = get_engine_type()
+    is_postgres = engine == "postgres"
+    
+    try:
+        cur = conn.cursor()
+        added = 0
+        skipped = 0
+        
+        for pattern_key, pattern_data in STANDARD_PATTERNS.items():
+            pattern_node_key = f"pattern.{pattern_key}"
+            
+            try:
+                # Check if pattern already exists
+                if is_postgres:
+                    cur.execute(
+                        "SELECT id FROM kg.nodes WHERE key = %s AND node_type = %s",
+                        (pattern_node_key, KGNodeType.PATTERN.value)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id FROM kg_nodes WHERE key = ? AND node_type = ?",
+                        (pattern_node_key, KGNodeType.PATTERN.value)
+                    )
+                
+                existing = cur.fetchone()
+                if existing:
+                    logger.debug(f"Pattern {pattern_key} already exists (id={existing[0]})")
+                    skipped += 1
+                    continue
+                
+                # Build properties JSON
+                properties = {
+                    "pattern_key": pattern_key,
+                    "http_methods": pattern_data.get("http_methods", []),
+                    "steps": pattern_data.get("steps", []),
+                    "path_pattern": pattern_data.get("path_pattern"),
+                    "keywords": pattern_data.get("keywords", []),
+                    "seeded": True,  # Mark as seeded vs learned
+                }
+                properties_json = json.dumps(properties)
+                
+                # Insert the pattern node (PL-001: include origin='seeded')
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO kg.nodes (
+                            node_type, key, name, provider_code, description,
+                            properties, confidence_score, usage_count, origin, created_at, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                        RETURNING id
+                    """, (
+                        KGNodeType.PATTERN.value,
+                        pattern_node_key,
+                        pattern_data["name"],
+                        None,  # Patterns are provider-agnostic
+                        pattern_data.get("description", ""),
+                        properties_json,
+                        1.0,  # High confidence for seeded patterns
+                        0,    # No usage yet
+                        "seeded",  # PL-001: Mark origin
+                    ))
+                    row = cur.fetchone()
+                    pattern_id = row[0] if row else None
+                else:
+                    cur.execute("""
+                        INSERT INTO kg_nodes (
+                            node_type, key, name, provider_code, description,
+                            properties, confidence_score, usage_count, origin, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    """, (
+                        KGNodeType.PATTERN.value,
+                        pattern_node_key,
+                        pattern_data["name"],
+                        None,
+                        pattern_data.get("description", ""),
+                        properties_json,
+                        1.0,
+                        0,
+                        "seeded",  # PL-001: Mark origin
+                    ))
+                    cur.execute("SELECT last_insert_rowid()")
+                    pattern_id = cur.fetchone()[0]
+                
+                logger.debug(f"Seeded pattern: {pattern_key} (id={pattern_id})")
+                added += 1
+                
+            except Exception as e:
+                logger.warning(f"Failed to seed pattern {pattern_key}: {e}")
+                skipped += 1
+        
+        conn.commit()
+        logger.info(f"Standard patterns seeding complete: {added} added, {skipped} skipped")
+        return (added, skipped)
+    
+    except Exception as e:
+        logger.error(f"Pattern seeding failed: {e}")
+        conn.rollback()
+        raise
+    
+    finally:
+        conn.close()
+
+
+def list_seeded_patterns() -> List[Dict[str, Any]]:
+    """
+    List all pattern nodes currently in kg.nodes.
+    
+    Returns:
+        List of pattern info dictionaries with id, key, name
+    """
+    conn = get_connection()
+    engine = get_engine_type()
+    is_postgres = engine == "postgres"
+    
+    try:
+        cur = conn.cursor()
+        
+        if is_postgres:
+            cur.execute("""
+                SELECT id, key, name, description, properties::text 
+                FROM kg.nodes 
+                WHERE node_type = %s 
+                ORDER BY key
+            """, (KGNodeType.PATTERN.value,))
+        else:
+            cur.execute("""
+                SELECT id, key, name, description, properties 
+                FROM kg_nodes 
+                WHERE node_type = ? 
+                ORDER BY key
+            """, (KGNodeType.PATTERN.value,))
+        
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "key": r[1],
+                "name": r[2],
+                "description": r[3],
+                "properties": r[4],
+            }
+            for r in rows
+        ]
+    
+    except Exception as e:
+        logger.warning(f"Could not list patterns: {e}")
         return []
     
     finally:

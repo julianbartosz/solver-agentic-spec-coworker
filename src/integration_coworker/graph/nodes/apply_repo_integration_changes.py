@@ -252,14 +252,20 @@ def apply_repo_integration_changes(state: WorkflowState) -> WorkflowState:
             result = _apply_repo_change(change, repo_root, backup_dir, is_dry_run)
             applied_changes.append(result)
 
-    # Generate __init__.py files for new directories
+    # Generate __init__.py files for new directories and ALL parent packages
+    # This ensures that importing nested packages works (e.g., integrations.clients.X
+    # requires both integrations/__init__.py AND integrations/clients/__init__.py)
     if not is_dry_run and state.code_artifacts:
-        created_dirs = set()
+        dirs_needing_init = set()
         for artifact in state.code_artifacts:
             target_path = repo_root / artifact.rel_path
-            created_dirs.add(target_path.parent)
+            # Walk up from the parent directory to repo_root, collecting all dirs
+            current = target_path.parent
+            while current != repo_root and current.is_relative_to(repo_root):
+                dirs_needing_init.add(current)
+                current = current.parent
 
-        for dir_path in created_dirs:
+        for dir_path in sorted(dirs_needing_init):  # Sort for deterministic order
             init_file = dir_path / "__init__.py"
             if not init_file.exists():
                 init_file.write_text("", encoding="utf-8")
@@ -270,6 +276,24 @@ def apply_repo_integration_changes(state: WorkflowState) -> WorkflowState:
                     "backed_up": False,
                     "auto_generated": True,
                 })
+
+    # Generate pyproject.toml with pytest config if it doesn't exist
+    # This ensures pytest can find and import the generated modules
+    if not is_dry_run:
+        pyproject_file = repo_root / "pyproject.toml"
+        if not pyproject_file.exists():
+            pyproject_content = '''[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+'''
+            pyproject_file.write_text(pyproject_content, encoding="utf-8")
+            logger.info(f"Created pyproject.toml with pytest config: {pyproject_file}")
+            applied_changes.append({
+                "path": str(pyproject_file),
+                "action": "created",
+                "backed_up": False,
+                "auto_generated": True,
+            })
 
     # Store results in plan
     state.plan["applied_changes"] = applied_changes
@@ -282,6 +306,9 @@ def apply_repo_integration_changes(state: WorkflowState) -> WorkflowState:
         logger.info(state.plan["dry_run_summary"])
     else:
         logger.info(f"Applied {len(applied_changes)} changes to {repo_root}")
+        # Bug #28 fix: Mark repo_changes as applied
+        if state.repo_changes:
+            state.repo_changes.applied = True
 
     state.completed_steps.append("apply_repo_integration_changes")
     return state

@@ -7,10 +7,10 @@ role: codegen
 inherits: _base
 
 model:
-  # Claude Sonnet 4 for code generation
+  # Claude Sonnet 4.5 for code generation
   # Change provider/name here to swap models without code changes
   provider: anthropic
-  name: claude-sonnet-4-20250514
+  name: claude-sonnet-4-5-20250929
   temperature: 0.15
   max_tokens: 8192
 

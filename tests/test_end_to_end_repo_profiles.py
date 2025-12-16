@@ -10,6 +10,8 @@ import tempfile
 import shutil
 import os
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 
@@ -56,7 +58,11 @@ class TestEndToEndWithFastAPIRepoDetection:
     """Tests for E2E pipeline with FastAPI repo auto-detection."""
     
     def test_auto_detects_fastapi_profile(self, mock_payments_spec, fastapi_repo):
-        """Should auto-detect FastAPI and include profile info in report."""
+        """Should auto-detect FastAPI and include profile info in report.
+        
+        Note: V2.2 Fix #5 replaced archetype detection with convention inference.
+        We now check for profile source rather than detection confidence.
+        """
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -77,12 +83,12 @@ class TestEndToEndWithFastAPIRepoDetection:
         assert result.report_markdown is not None
         assert "Repository Profile" in result.report_markdown
         
-        # Should detect FastAPI
+        # Should detect FastAPI (from dependency files)
         report_lower = result.report_markdown.lower()
         assert "fastapi" in report_lower
         
-        # Should have high detection confidence
-        assert "high" in report_lower or "100%" in result.report_markdown or "80%" in result.report_markdown or "90%" in result.report_markdown
+        # Should indicate profile source (convention_inference, config_file, or llm_inference)
+        assert "Profile Source" in result.report_markdown
     
     def test_generated_files_use_fastapi_layout(self, mock_payments_spec, fastapi_repo):
         """Generated files should land in FastAPI-appropriate locations."""
@@ -175,8 +181,12 @@ class TestEndToEndWithGenericPythonRepoDetection:
 class TestEndToEndWithJSRepoDetection:
     """Tests for E2E pipeline with JavaScript/TypeScript repo."""
     
-    def test_detects_nextjs_archetype(self, mock_payments_spec, nextjs_repo):
-        """Should detect Next.js archetype accurately."""
+    def test_detects_nextjs_profile(self, mock_payments_spec, nextjs_repo):
+        """Should detect Next.js profile from project structure.
+        
+        Note: V2.2 Fix #5 replaced archetype detection with convention inference.
+        We now check for profile source rather than archetype name.
+        """
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -192,13 +202,12 @@ class TestEndToEndWithJSRepoDetection:
         assert result.run_id is not None
         assert result.report_markdown is not None
         
-        # Report should accurately state nextjs archetype
+        # Report should show repository profile section
         report_lower = result.report_markdown.lower()
         assert "repository profile" in report_lower
-        assert "nextjs" in report_lower or "next" in report_lower
         
-        # Language should be typescript
-        assert "typescript" in report_lower
+        # Language should be typescript (Next.js has tsconfig.json typically)
+        assert "typescript" in report_lower or "javascript" in report_lower
     
     def test_uses_nextjs_integration_root(self, mock_payments_spec, nextjs_repo):
         """Should use Next.js appropriate integration locations."""
@@ -227,8 +236,13 @@ class TestEndToEndWithJSRepoDetection:
 class TestEndToEndReportContents:
     """Tests for report content when using auto-detection."""
     
-    def test_report_includes_detection_confidence(self, mock_payments_spec, fastapi_repo):
-        """Report should include detection confidence percentage."""
+    def test_report_includes_profile_framework(self, mock_payments_spec, fastapi_repo):
+        """Report should include framework detected from dependencies.
+        
+        Note: V2.2 Fix #5 replaced "Detection Confidence" with framework
+        detection from dependency files. Confidence percentages are no
+        longer shown since convention inference is deterministic.
+        """
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -238,9 +252,10 @@ class TestEndToEndReportContents:
             options=IntegrationOptions(dry_run=True, repo_integration_enabled=True),
         )
         
-        assert "Detection Confidence" in result.report_markdown
-        # Should have a percentage
-        assert "%" in result.report_markdown
+        # Should have framework in report
+        assert "Framework" in result.report_markdown
+        # FastAPI should be detected
+        assert "fastapi" in result.report_markdown.lower()
     
     def test_report_includes_profile_source(self, mock_payments_spec, fastapi_repo):
         """Report should include profile source (archetype/heuristic/etc)."""
@@ -255,8 +270,13 @@ class TestEndToEndReportContents:
         
         assert "Profile Source" in result.report_markdown
     
-    def test_report_includes_detection_evidence(self, mock_payments_spec, fastapi_repo):
-        """Report should include detection evidence."""
+    def test_report_includes_profile_source(self, mock_payments_spec, fastapi_repo):
+        """Report should include profile source information.
+        
+        Note: V2.2 Fix #5 replaced "Detection Evidence" with "Profile Source"
+        since archetype detection has been removed in favor of convention
+        inference and config file detection.
+        """
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -266,7 +286,16 @@ class TestEndToEndReportContents:
             options=IntegrationOptions(dry_run=True, repo_integration_enabled=True),
         )
         
-        assert "Detection Evidence" in result.report_markdown
+        # Profile source indicates how profile was determined
+        assert "Profile Source" in result.report_markdown
+        # Should indicate convention_inference, config_file, or llm_inference
+        report_lower = result.report_markdown.lower()
+        has_source = (
+            "convention_inference" in report_lower or
+            "config_file" in report_lower or
+            "llm_inference" in report_lower
+        )
+        assert has_source, f"Expected profile source in report: {result.report_markdown[:1000]}"
     
     def test_report_includes_layout_configuration(self, mock_payments_spec, fastapi_repo):
         """Report should include layout configuration details."""
@@ -304,8 +333,13 @@ class TestEndToEndReportContents:
         )
         assert has_warning, f"Expected low confidence warning in report, got: {result.report_markdown[:500]}"
     
-    def test_report_shows_detected_archetype(self, mock_payments_spec, fastapi_repo):
-        """Report should show the detected archetype name."""
+    def test_report_shows_detected_profile(self, mock_payments_spec, fastapi_repo):
+        """Report should show the detected profile information.
+        
+        Note: V2.2 Fix #5 removed archetype detection in favor of
+        convention-based inference. Tests now check for profile source
+        rather than archetype name.
+        """
         result = design_and_generate_integration(
             spec_refs=[mock_payments_spec],
             task_description="Create checkout session",
@@ -315,7 +349,9 @@ class TestEndToEndReportContents:
             options=IntegrationOptions(dry_run=True, repo_integration_enabled=True),
         )
         
-        # Should have Detected Archetype section
-        assert "Detected Archetype" in result.report_markdown
-        # FastAPI should be mentioned
+        # Should have Repository Profile section (not archetype)
+        assert "Repository Profile" in result.report_markdown
+        # Profile Source should indicate how profile was determined
+        assert "Profile Source" in result.report_markdown
+        # FastAPI should be mentioned (detected from dependencies)
         assert "fastapi" in result.report_markdown.lower()

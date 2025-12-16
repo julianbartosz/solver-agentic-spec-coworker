@@ -15,6 +15,8 @@ from unittest.mock import patch, MagicMock
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 # Tests that require real LLM output (mock LLM produces placeholder code with issues)
 # Skip if USE_MOCK_LLM is set OR if OPENAI_API_KEY appears invalid
 _openai_key = os.environ.get("OPENAI_API_KEY", "")

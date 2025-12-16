@@ -9,7 +9,7 @@ V1.1 FT-014: Enhanced Reporting
 """
 import logging
 from integration_coworker.graph.state import WorkflowState
-from integration_coworker.llm import call_llm
+from integration_coworker.llm import call_llm_for_node, call_llm_async_for_node
 
 logger = logging.getLogger(__name__)
 
@@ -235,12 +235,14 @@ def _add_what_i_did_section(lines: list, state: WorkflowState) -> None:
         lines.append("")
 
 
-def build_report(state: WorkflowState) -> WorkflowState:
+async def build_report(state: WorkflowState) -> WorkflowState:
     """
     Reads: All state fields
     Writes: report_markdown
     
     Generates structured report, with optional LLM-enhanced executive summary.
+    
+    V3.1: Async implementation for concurrent execution.
     """
     lines = []
 
@@ -294,7 +296,7 @@ def build_report(state: WorkflowState) -> WorkflowState:
     try:
         structured_report = _build_structured_metrics(state)
         summary_prompt = _build_summary_prompt(structured_report, state)
-        summary = call_llm(summary_prompt, task_type="report")
+        summary = await call_llm_async_for_node("build_report", summary_prompt)
 
         # Check if we got a real summary (not mock placeholder)
         if summary and len(summary) > 20 and not summary.startswith("Mock response"):
@@ -433,6 +435,8 @@ def build_report(state: WorkflowState) -> WorkflowState:
 
         if rp.profile_source:
             source_desc = {
+                "config_file": "✅ Loaded from `.integration-coworker.yaml` config file",
+                "llm_inference": "🤖 LLM-generated config (saved to `.integration-coworker.yaml`)",
                 "archetype": "Used archetype defaults (high confidence)",
                 "archetype+heuristic": "Archetype with heuristic refinement",
                 "heuristic": "Inferred via heuristics (no archetype match)",
@@ -442,12 +446,18 @@ def build_report(state: WorkflowState) -> WorkflowState:
             }.get(rp.profile_source, rp.profile_source)
             lines.append(f"**Profile Source**: {source_desc}")
 
+            # Prompt user to review LLM-generated config
+            if rp.profile_source == "llm_inference":
+                lines.append("")
+                lines.append("> 📝 **Action Required**: The LLM generated a `.integration-coworker.yaml` config file in your repo root. "
+                           "Please review this file to ensure the detected layout and conventions match your project structure. "
+                           "You can edit it to customize where integration code is placed.")
+
         # Add low confidence warning
         if rp.detection_confidence is not None and rp.detection_confidence < 0.6:
             lines.append("")
             lines.append("> ⚠️ **Low Detection Confidence**: Layout inference may be unreliable. "
                         "Consider providing an explicit `repo_profile` to ensure correct file placement.")
-            lines.append(f"**Profile Source**: {source_desc}")
 
         if rp.detection_evidence:
             lines.append("")
@@ -558,14 +568,19 @@ def build_report(state: WorkflowState) -> WorkflowState:
         lines.append("")
 
     # V4 Observability: Run Journey (derived from completed_steps + errors + timings)
-    # Add build_report and persist_run_outcome to completed_steps for accurate progress display
-    # (these nodes will complete after this visualization, but we know they will succeed)
+    # Bug #82 Fix: Do NOT add persist_run_outcome to completed_steps here!
+    # The timed_node wrapper checks completed_steps to skip already-run nodes,
+    # so pre-adding persist_run_outcome causes it to be skipped entirely.
+    # Only add build_report (which is completing now) for accurate progress display.
     state.completed_steps.append("build_report")
-    state.completed_steps.append("persist_run_outcome")
+    # Note: persist_run_outcome will add itself after it actually runs
+    
+    # For visualization purposes, we calculate completed + pending separately
+    visualization_completed = list(state.completed_steps) + ["persist_run_outcome"]
     
     lines.append("## Run Journey")
     lines.append("")
-    _add_journey_visualization(lines, state)
+    _add_journey_visualization(lines, state, include_pending=["persist_run_outcome"])
     lines.append("")
 
     lines.append("---")
@@ -615,7 +630,7 @@ _NODE_JOURNEY_INFO = {
 }
 
 
-def _add_journey_visualization(lines: list, state: WorkflowState) -> None:
+def _add_journey_visualization(lines: list, state: WorkflowState, include_pending: list = None) -> None:
     """
     V4 Observability: Add visual journey representation.
     
@@ -624,8 +639,18 @@ def _add_journey_visualization(lines: list, state: WorkflowState) -> None:
     - ⚠️ Completed with warnings
     - ❌ Failed
     - ⏭️ Skipped
+    
+    Args:
+        lines: Output lines to append to
+        state: Workflow state
+        include_pending: Nodes to treat as "will complete" for visualization (Bug #82 fix)
     """
+    # Bug #82 Fix: Create a combined set for visualization that includes pending nodes
+    # but don't modify state.completed_steps directly
     completed = set(state.completed_steps)
+    if include_pending:
+        completed.update(include_pending)
+    
     errors_in_nodes = set()
     
     # Try to identify which nodes had errors

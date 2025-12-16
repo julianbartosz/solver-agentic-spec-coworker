@@ -28,7 +28,12 @@ def _serialize_state(state: "WorkflowState") -> Dict[str, Any]:
     - Dataclass serialization
     - Circular reference prevention
     - Large field truncation
+    - Bug #67 Fix: Convert integers exceeding 64-bit range to strings
     """
+    # PostgreSQL BIGINT max: 2^63-1 = 9223372036854775807
+    INT64_MAX = 2**63 - 1
+    INT64_MIN = -(2**63)
+    
     def to_serializable(obj, depth: int = 0):
         # Prevent infinite recursion
         if depth > 10:
@@ -44,7 +49,16 @@ def _serialize_state(state: "WorkflowState") -> Dict[str, Any]:
             return {k: to_serializable(v, depth + 1) for k, v in obj.items()}
         elif hasattr(obj, 'value'):  # Enum
             return obj.value
-        elif isinstance(obj, (str, int, float, bool)):
+        elif isinstance(obj, bool):
+            # Check bool before int since bool is subclass of int
+            return obj
+        elif isinstance(obj, int):
+            # Bug #67 Fix: Convert large integers that exceed PostgreSQL BIGINT range
+            # This prevents "Integer exceeds 64-bit range" errors with large specs
+            if obj > INT64_MAX or obj < INT64_MIN:
+                return str(obj)
+            return obj
+        elif isinstance(obj, (str, float)):
             return obj
         elif isinstance(obj, datetime):
             return obj.isoformat()

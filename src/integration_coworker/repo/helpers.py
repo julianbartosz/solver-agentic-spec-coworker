@@ -89,6 +89,10 @@ def generate_settings_block(provider_code: str, base_url: Optional[str] = None) 
     
     Per Appendix G.4: Deterministic settings insertion.
     
+    Uses dict literal instead of ProviderSettings class to avoid requiring
+    additional imports in target files. The target repo can define its own
+    ProviderSettings type if needed.
+    
     Args:
         provider_code: Provider code
         base_url: API base URL (optional)
@@ -99,11 +103,12 @@ def generate_settings_block(provider_code: str, base_url: Optional[str] = None) 
     if base_url is None:
         base_url = f"https://api.{provider_code}.com"
 
+    # Use dict literal for portability - no dependency on ProviderSettings class
     lines = [
-        f'INTEGRATIONS["{provider_code}"] = ProviderSettings(',
-        f'    api_base_url="{base_url}",',
-        "    timeout_s=30,",
-        "    retries=3,",
-        ")",
+        f'INTEGRATIONS["{provider_code}"] = {{',
+        f'    "api_base_url": "{base_url}",',
+        '    "timeout_s": 30,',
+        '    "retries": 3,',
+        "}",
     ]
     return "\n".join(lines)

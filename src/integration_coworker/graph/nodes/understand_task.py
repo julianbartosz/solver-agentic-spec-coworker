@@ -24,7 +24,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import IntegrationTask
-from integration_coworker.llm import call_llm
+from integration_coworker.llm import call_llm_for_node, call_llm_async_for_node
 from integration_coworker.llm.toon import from_toon, to_toon, toon_response_format
 from integration_coworker.llm.sanitizer import (
     sanitize_task_description,
@@ -263,19 +263,21 @@ def _fallback_heuristic_understanding(state: WorkflowState) -> IntegrationTask:
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
 )
-def _call_llm_with_retry(prompt: str) -> Dict[str, Any]:
+async def _call_llm_with_retry(prompt: str) -> Dict[str, Any]:
     """
     LLM call with exponential backoff (V2 Section 3.13).
     
     V2.2: Uses TOON format for 30-40% token savings.
+    V3.0: Uses call_llm_for_node for archetype-based config.
+    V3.1: Async implementation using call_llm_async_for_node.
     
     Retries up to 3 times with exponential backoff:
     - Attempt 1: immediate
     - Attempt 2: wait 1s
     - Attempt 3: wait 2s
     """
-    # Call LLM and get TOON-formatted response
-    response_text = call_llm(prompt, task_type="understand_task")
+    # Call LLM using archetype-based async function
+    response_text = await call_llm_async_for_node("understand_task", prompt)
     
     # Parse TOON response to dict
     if not response_text:
@@ -389,7 +391,7 @@ def _extract_resource_noun(task_description: str) -> str:
     return "resource"
 
 
-def understand_task(state: WorkflowState) -> WorkflowState:
+async def understand_task(state: WorkflowState) -> WorkflowState:
     """
     Reads: task_description, provider_code, endpoints, entities
     Writes: integration_task, task_source, degraded_mode, degraded_reason
@@ -407,6 +409,8 @@ def understand_task(state: WorkflowState) -> WorkflowState:
     V2.1 Enhancement (Section 13.4):
     - Applies input sanitization to detect and neutralize prompt injection (SEC-002)
     - Logs warning if suspicious patterns detected in task description
+    
+    V3.1: Async implementation for concurrent execution.
     """
     if not state.task_description:
         state.errors.append("No task_description provided")
@@ -434,7 +438,7 @@ def understand_task(state: WorkflowState) -> WorkflowState:
     try:
         # V2: Try LLM-based understanding with retry
         prompt = _build_understand_task_prompt(state)
-        llm_response = _call_llm_with_retry(prompt)
+        llm_response = await _call_llm_with_retry(prompt)
         
         # Success - LLM returned valid response
         logger.info(f"Using LLM response for task understanding: {llm_response.get('task_slug')}")

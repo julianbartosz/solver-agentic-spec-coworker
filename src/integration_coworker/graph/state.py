@@ -22,7 +22,13 @@ from integration_coworker.domain.models import (
     CodeArtifact,
     SpecChunkEmbedding,
     WorkflowTemplate,
+    # File Integration V1
+    FileSpec,
+    FileField,
+    RecordLayout,
+    FileValidationRule,
 )
+from integration_coworker.sources.base import ParsedSpec
 from integration_coworker.repo.models import RepoProfile, RepoChangeSet, RepoSnapshot
 from integration_coworker.api.types import IntegrationOptions
 
@@ -55,6 +61,13 @@ class WorkflowState:
     entities: List[Entity] = field(default_factory=list)
     relationships: List[EntityRelationship] = field(default_factory=list)
     events: List[Event] = field(default_factory=list)
+
+    # File Integration V1 (Silver layer - parallel to API model)
+    # Per docs/FILE_INTEGRATION_V1_PLAN.md
+    file_specs: List[FileSpec] = field(default_factory=list)
+    file_fields: List[FileField] = field(default_factory=list)
+    record_layouts: List[RecordLayout] = field(default_factory=list)
+    file_validation_rules: List[FileValidationRule] = field(default_factory=list)
 
     # Embeddings (Silver-adjacent)
     spec_chunk_embeddings: List[SpecChunkEmbedding] = field(default_factory=list)
@@ -94,7 +107,7 @@ class WorkflowState:
 
     # Multi-spec support (V2 Section 3.12)
     pending_specs: List[Dict[str, Any]] = field(default_factory=list)
-    parsed_specs: List[Dict[str, Any]] = field(default_factory=list)
+    parsed_specs: List[ParsedSpec] = field(default_factory=list)  # V1 File Integration: typed ParsedSpec
 
     # Degraded mode tracking (V2 Section 3.13)
     degraded_mode: bool = False

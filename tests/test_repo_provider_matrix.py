@@ -415,40 +415,51 @@ class TestProviderFactoryMatrix:
 # =============================================================================
 
 class TestProfileDetectionMatrix:
-    """Test profile detection across multiple framework types."""
+    """Test profile detection across multiple framework types.
+    
+    Note: Per ADR-0002, archetype-based detection is deprecated.
+    The new detection pipeline returns generic profiles based on language,
+    with framework detection delegated to config files or LLM inference.
+    This test verifies correct language detection for each setup.
+    """
     
     @pytest.mark.no_db
     def test_detection_matrix_coverage(self, tmp_path):
-        """Verify detection works for each major framework."""
+        """Verify detection returns correct language-based profiles.
+        
+        Per ADR-0002, framework-specific profiles are now obtained via
+        config files or LLM inference, not heuristic detection. This test
+        verifies that language detection works correctly (Python vs TypeScript).
+        """
         test_cases = [
-            # (name, setup_fn, expected_framework)
-            ("fastapi", self._setup_fastapi, "fastapi"),
-            ("flask", self._setup_flask, "flask"),
-            ("django", self._setup_django, "django"),
-            ("nextjs", self._setup_nextjs, "nextjs"),
-            ("express", self._setup_express, "express"),
-            ("nestjs", self._setup_nestjs, "nestjs"),
+            # (name, setup_fn, expected_language)
+            ("fastapi", self._setup_fastapi, "python"),
+            ("flask", self._setup_flask, "python"),
+            ("django", self._setup_django, "python"),
+            ("nextjs", self._setup_nextjs, "typescript"),
+            ("express", self._setup_express, "typescript"),
+            ("nestjs", self._setup_nestjs, "typescript"),
         ]
         
         results = []
-        for name, setup_fn, expected in test_cases:
+        for name, setup_fn, expected_lang in test_cases:
             # Create isolated directory for each case
             case_dir = tmp_path / name
             case_dir.mkdir()
             setup_fn(case_dir)
             
             profile = detect_profile_from_repo(case_dir)
-            match = profile.framework == expected
-            results.append((name, expected, profile.framework, match))
+            match = profile.language == expected_lang
+            results.append((name, expected_lang, profile.language, match))
         
         # Report failures with details
         failures = [r for r in results if not r[3]]
         if failures:
             msg = "\n".join(
-                f"  {name}: expected {expected}, got {actual}"
+                f"  {name}: expected language {expected}, got {actual}"
                 for name, expected, actual, _ in failures
             )
-            pytest.fail(f"Profile detection failures:\n{msg}")
+            pytest.fail(f"Language detection failures:\n{msg}")
     
     def _setup_fastapi(self, path: Path):
         """Set up FastAPI markers."""

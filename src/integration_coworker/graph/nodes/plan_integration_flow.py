@@ -8,6 +8,8 @@ Per design doc Section 5.5:
 - Archetype: plan_integration_flow.archetype.yaml
 - Provider: Anthropic (claude-3-sonnet) - complex workflow planning
 - Strategy: chain_of_thought with best-of-n sampling
+
+V3.0: Converted to async for scalability (ASYNC_MIGRATION_PLAN.md)
 """
 import logging
 from collections import deque
@@ -16,7 +18,7 @@ from typing import List, Tuple
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.domain.models import IntegrationFlowNode, IntegrationFlowEdge
 from integration_coworker.domain.models import EndpointBinding
-from integration_coworker.llm import get_llm_client_for_node
+from integration_coworker.llm import get_async_llm_client_for_node
 from integration_coworker.llm.toon import from_toon
 from integration_coworker.codegen.field_mappings import (
     generate_field_mappings,
@@ -160,7 +162,7 @@ Rules:
 """
 
 
-def plan_integration_flow(state: WorkflowState) -> WorkflowState:
+async def plan_integration_flow(state: WorkflowState) -> WorkflowState:
     """
     Reads: integration_task, workflow_nodes, workflow_edges, endpoints, plan
     Writes: endpoint_bindings
@@ -169,6 +171,8 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
     - Validates flow structure (start/end nodes, connectivity, positions)
     - Creates EndpointBinding scaffolds for each api_call node
     - Uses LLM to enhance binding mappings when available
+    
+    V3.0: Converted to async for scalability (ASYNC_MIGRATION_PLAN.md)
     """
     if not state.workflow_nodes:
         state.errors.append("No workflow_nodes from align_task_with_kg")
@@ -217,7 +221,9 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
         if target_operations:
             # Try to match first target operation to this node
             target_op = target_operations[0] if target_operations else None
-            if target_op:
+            # Bug #14 Fix: Ensure target_op is a dict, not a string
+            # LLM may return malformed target_operations as strings
+            if target_op and isinstance(target_op, dict):
                 operation_id = target_op.get("operation_id")
                 method = target_op.get("method")
                 path = target_op.get("path")
@@ -225,6 +231,13 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
                 for endpoint in state.endpoints:
                     if endpoint.operation_id == operation_id or \
                        (endpoint.method == method and endpoint.path == path):
+                        matched_endpoint = endpoint
+                        break
+            elif target_op and isinstance(target_op, str):
+                # Handle case where LLM returned a string (e.g., operation_id only)
+                logger.warning(f"target_operation is a string, not dict: {target_op}")
+                for endpoint in state.endpoints:
+                    if endpoint.operation_id == target_op or target_op in endpoint.path:
                         matched_endpoint = endpoint
                         break
 
@@ -245,12 +258,12 @@ def plan_integration_flow(state: WorkflowState) -> WorkflowState:
             except Exception as e:
                 logger.warning(f"Schema mapping generation failed: {e}")
 
-            # Optionally enhance with LLM
+            # Optionally enhance with LLM (sync factory, async methods)
             try:
-                client = get_llm_client_for_node(NODE_NAME)
+                client = get_async_llm_client_for_node(NODE_NAME)
 
                 prompt = _build_binding_prompt(state, api_node, matched_endpoint)
-                llm_response_text = client.complete(prompt)
+                llm_response_text = await client.complete_async(prompt)
 
                 # V2: Removed string-based mock detection (LLM-006)
                 # If LLM returns invalid TOON, the parse will fail and we keep schema mappings

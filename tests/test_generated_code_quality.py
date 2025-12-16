@@ -15,6 +15,8 @@ import pytest
 from pathlib import Path
 from typing import List
 
+pytestmark = pytest.mark.requires_aiosqlite
+
 from integration_coworker.api.entrypoint import design_and_generate_integration
 from integration_coworker.api.types import IntegrationOptions
 from integration_coworker.domain.models import CodeArtifact

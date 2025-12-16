@@ -84,4 +84,19 @@ __all__ = [
     "IntegrationError",
     "TransientIntegrationError",
     "AuthIntegrationError",
+    # Test Execution (M5+)
+    "is_test_execution_enabled",
+    "execute_tests",
+    "generate_vscode_test_task",
+    "TestExecutionResult",
+    "TestStatus",
 ]
+
+# Test execution (always local, not part of standalone runtime)
+from integration_coworker.runtime.test_execution import (
+    is_test_execution_enabled,
+    execute_tests,
+    generate_vscode_test_task,
+    TestExecutionResult,
+    TestStatus,
+)
