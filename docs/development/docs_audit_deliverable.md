@@ -23,7 +23,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/development/code-tour.md | development/code-tour.md | Code Tour | authoritative | 2025-12-09, 5575B, in2, out2, nav:yes |
 | docs/development/contributing.md | development/contributing.md | Contributing | authoritative | 2025-12-09, 3474B, in2, out2, nav:yes |
 | docs/development/dependency_bumps.md | development/dependency_bumps.md | Dependency bump playbook (docs tooling) | authoritative | 2025-12-16, 2124B, in0, out0, nav:yes |
-| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16446B, in0, out0, nav:yes |
+| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16939B, in0, out0, nav:yes |
 | docs/development/docs_tooling.md | development/docs_tooling.md | Docs tooling | authoritative | 2025-12-16, 1075B, in0, out0, nav:yes |
 | docs/development/maintenance.md | development/maintenance.md | Maintenance + Historical Notes | authoritative | 2025-12-16, 2659B, in0, out1, nav:yes |
 | docs/development/testing.md | development/testing.md | Testing Guide | authoritative | 2025-12-09, 5180B, in2, out2, nav:yes |

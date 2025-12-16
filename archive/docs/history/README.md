@@ -16,7 +16,7 @@ For up-to-date documentation, see:
 
 - [`../development/architecture.md`](../development/architecture.md) — System architecture and behavior reference
 - [`../GETTING_STARTED.md`](../GETTING_STARTED.md) — Setup and first run guide
-- [`milestones/DEMO_GUIDE.md`](milestones/DEMO_GUIDE.md) — Demo execution guide
+- Demo execution guide: see `scripts/demo-*.sh` and `docs/operations/validation.md` (this archive copy is intentionally not served)
 - [`../development/code-tour.md`](../development/code-tour.md) — Codebase walkthrough
-- [`implementation/LLM_CONFIG_GUIDE.md`](implementation/LLM_CONFIG_GUIDE.md) — LLM configuration guide
-- [`implementation/FUTURE_PLANS.md`](implementation/FUTURE_PLANS.md) — Roadmap for V3/V4
+- LLM configuration: see `docs/GETTING_STARTED.md` (this archive copy is intentionally not served)
+- Future plans: historical only (this archive copy is intentionally not served)
