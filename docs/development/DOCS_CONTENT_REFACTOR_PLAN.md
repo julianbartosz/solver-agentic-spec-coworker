@@ -177,3 +177,48 @@ After each batch (and stop on first failure):
 1. `mkdocs build --strict`
 2. `python -m pytest tests/test_mkdocs.py -q`
 3. `python scripts/docs_audit.py`
+
+---
+
+## Status / What changed (Dec 2025)
+
+This refactor plan has been **executed through Batch D**.
+
+### Completed batches
+
+- **Batch A (Operations truth):** `docs/operations/*` are now the canonical operator runbooks.
+- **Batch B (GETTING_STARTED precision):** `docs/GETTING_STARTED.md` was de-duplicated and kept as the invariant Ops entrypoint.
+- **Batch C (Decisions pruning):** `docs/decisions/adr-0001-initial-architecture.md` is marked superseded (referencing newer ADRs).
+- **Batch D (Development slimming):** one-off dev audit/plan artifacts were moved out of `docs/` into `archive/docs/development/`, and old URLs are preserved via redirects to canonical dev pages.
+
+### Redirects added / maintained
+
+Redirects are configured in `mkdocs.yml` via `redirect_maps`.
+
+- `ARCHITECTURE.md` → `development/architecture.md`
+- Legacy top-level ops pages → canonical ops runbooks:
+  - `db_setup_postgres.md` → `operations/db-postgres.md`
+  - `PROD_VALIDATION_PLAYBOOK.md` → `operations/validation.md`
+  - `PROD_TEST_MATRIX.md` → `operations/validation.md`
+  - `AZURE_DEPLOYMENT.md` → `operations/deployment.md`
+  - `DEPLOYMENT_PLAN.md` → `operations/deployment.md`
+  - `DISTRIBUTION_STRATEGY.md` → `operations/deployment.md`
+- Dev slimdown redirects (old published URLs maintained; no redirects into `archive/`):
+  - `development/ARCHITECTURE_AUDIT_P0_REST.md` → `development/architecture.md`
+  - `development/ARCHITECTURE_AUDIT_P1.md` → `development/architecture.md`
+  - `development/ARCHITECTURE_AUDIT_P2.md` → `development/architecture.md`
+  - `development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md` → `development/architecture.md`
+  - `development/ARCHITECTURE_AUDIT_QUESTIONS.md` → `development/maintenance.md`
+  - `development/ARCHITECTURE_REWRITE_PLAN.md` → `development/maintenance.md`
+  - `development/DEPRECATION_CLEANUP_AUDIT.md` → `development/maintenance.md`
+  - `development/PRODUCTION_SPEC_SWEEP.md` → `development/maintenance.md`
+  - `development/ASYNC_MIGRATION_PLAN.md` → `development/maintenance.md`
+
+### Current docs surface size
+
+- Markdown files under `docs/`: **44** (as of 2025-12-16).
+
+### Invariants check
+
+- `GETTING_STARTED.md` remains in nav as **Ops Runbook → Getting Started (Ops)**.
+- `GETTING_STARTED.md` is **not redirected**.

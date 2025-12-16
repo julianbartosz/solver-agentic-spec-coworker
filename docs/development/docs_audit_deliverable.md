@@ -16,7 +16,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/api-reference/entrypoint.md | api-reference/entrypoint.md | Entrypoint API | authoritative | 2025-12-09, 3356B, in3, out2, nav:yes |
 | docs/api-reference/types.md | api-reference/types.md | Types | authoritative | 2025-12-09, 4263B, in2, out2, nav:yes |
 | docs/api-reference/workflow-state.md | api-reference/workflow-state.md | WorkflowState | authoritative | 2025-12-09, 5201B, in2, out2, nav:yes |
-| docs/development/DOCS_CONTENT_REFACTOR_PLAN.md | — | DOCS CONTENT REFACTOR PLAN (v1) | supporting | 2025-12-16, 10439B, in0, out0, nav:no |
+| docs/development/DOCS_CONTENT_REFACTOR_PLAN.md | — | DOCS CONTENT REFACTOR PLAN (v1) | supporting | 2025-12-16, 12730B, in0, out0, nav:no |
 | docs/development/DOCS_SLIMDOWN_PLAN.md | — | DOCS SLIMDOWN PLAN (v1) | supporting | 2025-12-16, 8796B, in0, out0, nav:no |
 | docs/development/architecture.md | development/architecture.md | Architecture Reference | authoritative | 2025-12-09, 7007B, in4, out2, nav:yes |
 | docs/development/changelog.md | development/changelog.md | Changelog | authoritative | 2025-12-09, 1841B, in1, out1, nav:yes |
