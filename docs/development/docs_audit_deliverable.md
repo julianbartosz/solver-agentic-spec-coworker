@@ -11,21 +11,13 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 
 | fs_path | nav_path | H1 | status flags | evidence (date, bytes, inbound, outbound, in_nav) |
 |---|---|---|---|
+| docs/ARCHITECTURE.md | — | Architecture | supporting | 2025-12-16, 40160B, in0, out1, nav:no |
 | docs/GETTING_STARTED.md | GETTING_STARTED.md | Ops Runbook: Getting Started | authoritative | 2025-12-16, 11053B, in0, out3, nav:yes |
 | docs/api-reference/entrypoint.md | api-reference/entrypoint.md | Entrypoint API | authoritative | 2025-12-09, 3356B, in3, out2, nav:yes |
 | docs/api-reference/types.md | api-reference/types.md | Types | authoritative | 2025-12-09, 4263B, in2, out2, nav:yes |
 | docs/api-reference/workflow-state.md | api-reference/workflow-state.md | WorkflowState | authoritative | 2025-12-09, 5201B, in2, out2, nav:yes |
-| docs/development/ARCHITECTURE_AUDIT_P0_REST.md | development/ARCHITECTURE_AUDIT_P0_REST.md | Architecture Audit: Remaining P0 Questions | authoritative | 2025-12-12, 30713B, in0, out0, nav:yes |
-| docs/development/ARCHITECTURE_AUDIT_P1.md | development/ARCHITECTURE_AUDIT_P1.md | Architecture Audit: P1 Questions | authoritative | 2025-12-12, 32705B, in0, out0, nav:yes |
-| docs/development/ARCHITECTURE_AUDIT_P2.md | development/ARCHITECTURE_AUDIT_P2.md | Architecture Audit: P2 Questions | authoritative | 2025-12-12, 28825B, in0, out0, nav:yes |
-| docs/development/ARCHITECTURE_AUDIT_QUESTIONS.md | development/ARCHITECTURE_AUDIT_QUESTIONS.md | Architecture Audit Question Set (v2) | authoritative | 2025-12-09, 19922B, in0, out0, nav:yes |
-| docs/development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md | development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md | Architecture Audit: Runtime/Workflow + Data/State Views | authoritative | 2025-12-12, 17106B, in0, out0, nav:yes |
-| docs/development/ARCHITECTURE_REWRITE_PLAN.md | development/ARCHITECTURE_REWRITE_PLAN.md | ARCHITECTURE.md Rewrite Plan | authoritative | 2025-12-12, 17264B, in0, out0, nav:yes |
-| docs/development/ASYNC_MIGRATION_PLAN.md | development/ASYNC_MIGRATION_PLAN.md | Async-Everywhere Migration Plan | authoritative | 2025-12-12, 16108B, in0, out0, nav:yes |
-| docs/development/DEPRECATION_CLEANUP_AUDIT.md | development/DEPRECATION_CLEANUP_AUDIT.md | Deprecation & Legacy Code Cleanup Audit | authoritative | 2025-12-12, 8618B, in0, out0, nav:yes |
 | docs/development/DOCS_CONTENT_REFACTOR_PLAN.md | — | DOCS CONTENT REFACTOR PLAN (v1) | supporting | 2025-12-16, 10439B, in0, out0, nav:no |
 | docs/development/DOCS_SLIMDOWN_PLAN.md | — | DOCS SLIMDOWN PLAN (v1) | supporting | 2025-12-16, 8796B, in0, out0, nav:no |
-| docs/development/PRODUCTION_SPEC_SWEEP.md | development/PRODUCTION_SPEC_SWEEP.md | Production Spec Sweep (Dec 12, 2025) | authoritative | 2025-12-12, 6946B, in0, out0, nav:yes |
 | docs/development/architecture.md | development/architecture.md | Architecture Reference | authoritative | 2025-12-09, 7007B, in4, out2, nav:yes |
 | docs/development/changelog.md | development/changelog.md | Changelog | authoritative | 2025-12-09, 1841B, in1, out1, nav:yes |
 | docs/development/code-tour.md | development/code-tour.md | Code Tour | authoritative | 2025-12-09, 5575B, in2, out2, nav:yes |
@@ -33,6 +25,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/development/dependency_bumps.md | development/dependency_bumps.md | Dependency bump playbook (docs tooling) | authoritative | 2025-12-16, 2124B, in0, out0, nav:yes |
 | docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16446B, in0, out0, nav:yes |
 | docs/development/docs_tooling.md | development/docs_tooling.md | Docs tooling | authoritative | 2025-12-16, 1075B, in0, out0, nav:yes |
+| docs/development/maintenance.md | development/maintenance.md | Maintenance + Historical Notes | authoritative | 2025-12-16, 2659B, in0, out1, nav:yes |
 | docs/development/testing.md | development/testing.md | Testing Guide | authoritative | 2025-12-09, 5180B, in2, out2, nav:yes |
 | docs/features/knowledge-graph.md | features/knowledge-graph.md | Knowledge Graph | authoritative | 2025-12-09, 3949B, in3, out2, nav:yes |
 | docs/features/llm-cache.md | features/llm-cache.md | LLM Response Cache | authoritative | 2025-12-09, 3839B, in2, out2, nav:yes |
@@ -40,13 +33,14 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 | docs/features/recovery.md | features/recovery.md | Recovery | authoritative | 2025-12-09, 3348B, in2, out2, nav:yes |
 | docs/gen_cli_reference.py | — | gen_cli_reference.py | generated,supporting | 2025-12-09, 2828B, in0, out0, nav:no |
 | docs/getting-started/configuration.md | getting-started/configuration.md | Configuration | authoritative | 2025-12-09, 3940B, in2, out2, nav:yes |
-| docs/getting-started/installation.md | getting-started/installation.md | Installation | authoritative | 2025-12-09, 1771B, in1, out1, nav:yes |
-| docs/getting-started/quickstart.md | getting-started/quickstart.md | Quickstart | authoritative | 2025-12-09, 1383B, in2, out3, nav:yes |
+| docs/getting-started/installation.md | getting-started/installation.md | Installation | authoritative | 2025-12-09, 1771B, in2, out1, nav:yes |
+| docs/getting-started/quickstart.md | getting-started/quickstart.md | Quickstart | authoritative | 2025-12-09, 1383B, in3, out3, nav:yes |
 | docs/index.md | index.md | Integration Co-Worker | authoritative | 2025-12-09, 2185B, in0, out5, nav:yes |
 | docs/operations/db-postgres.md | operations/db-postgres.md | Database: Postgres + pgvector | authoritative | 2025-12-16, 2061B, in2, out0, nav:yes |
 | docs/operations/deployment.md | operations/deployment.md | Deployment | authoritative | 2025-12-16, 1589B, in2, out0, nav:yes |
 | docs/operations/index.md | operations/index.md | Operations | authoritative | 2025-12-16, 634B, in0, out3, nav:yes |
 | docs/operations/validation.md | operations/validation.md | Validation | authoritative | 2025-12-16, 1156B, in2, out0, nav:yes |
+| docs/plans/09-mkdocs-documentation.md | — | Implementation Plan: MkDocs Documentation Site | supporting | 2025-12-16, 14280B, in0, out2, nav:no |
 | docs/user-guide/cli-reference.md | user-guide/cli-reference.md | CLI Reference | authoritative,generated | 2025-12-09, 3616B, in4, out2, nav:yes |
 | docs/user-guide/specs.md | user-guide/specs.md | Supported Spec Formats | authoritative | 2025-12-09, 2264B, in2, out2, nav:yes |
 | docs/user-guide/web-ui.md | user-guide/web-ui.md | Web UI | authoritative | 2025-12-09, 2047B, in2, out2, nav:yes |
@@ -64,15 +58,6 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 - Development
   - Entrypoint: docs/development/architecture.md (nav:yes in4)
   - Contributing files:
-    - docs/development/ARCHITECTURE_AUDIT_P0_REST.md
-    - docs/development/ARCHITECTURE_AUDIT_P1.md
-    - docs/development/ARCHITECTURE_AUDIT_P2.md
-    - docs/development/ARCHITECTURE_AUDIT_QUESTIONS.md
-    - docs/development/ARCHITECTURE_AUDIT_RUNTIME_DATA.md
-    - docs/development/ARCHITECTURE_REWRITE_PLAN.md
-    - docs/development/ASYNC_MIGRATION_PLAN.md
-    - docs/development/DEPRECATION_CLEANUP_AUDIT.md
-    - docs/development/PRODUCTION_SPEC_SWEEP.md
     - docs/development/architecture.md
     - docs/development/changelog.md
     - docs/development/code-tour.md
@@ -93,15 +78,21 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
     - docs/features/recovery.md
 
 - Getting Started
-  - Entrypoint: docs/getting-started/configuration.md (nav:yes in2)
+  - Entrypoint: docs/getting-started/quickstart.md (nav:yes in3)
   - Contributing files:
     - docs/getting-started/configuration.md
     - docs/getting-started/installation.md
     - docs/getting-started/quickstart.md
 
+- Plans
+  - Entrypoint: docs/plans/09-mkdocs-documentation.md (nav:no in0)
+  - Contributing files:
+    - docs/plans/09-mkdocs-documentation.md
+
 - Top-level (misc/ops/audits)
   - Entrypoint: docs/operations/db-postgres.md (nav:yes in2)
   - Contributing files:
+    - docs/ARCHITECTURE.md
     - docs/GETTING_STARTED.md
     - docs/gen_cli_reference.py
     - docs/operations/db-postgres.md
@@ -164,7 +155,81 @@ The overlap notes below only reference headings that appear in the appendix (H1�
   ## Quick Reference
 
 === docs/ARCHITECTURE.md ===
-  (missing from inventory; check ignore rules)
+  # Architecture
+  ### Core Value Proposition
+  ### Key Technologies
+  ## 2. Quick Start Reference
+  ### Minimum Environment Examples
+  # Optional: ANTHROPIC_API_KEY for planning/codegen
+  # Optional: tracing
+  ### Python API Entry Point
+  ### CLI Commands
+  ## 3. System Architecture
+  ### 3.1 Entry Points
+  ### 3.2 Workflow Engine
+  ### 3.3 Node Catalog
+  ## 4. Data Model
+  ### 4.1 WorkflowState Structure
+  ### 4.2 Bronze–Silver–Gold Medallion Model
+  ### 4.3 Checkpoint Invariants
+  ### 4.4 Domain Models
+  ## 5. Database Schema
+  ### 5.1 Tables by Schema
+  ### 5.2 Postgres vs SQLite
+  ### 5.3 Connection Management
+  ### 5.4 Migrations
+  ## 6. LLM Integration
+  ### 6.1 Archetype System
+  ### 6.2 Provider Support
+  ### 6.3 LLM Modes
+  ### 6.4 Caching
+  ### 6.5 Retry Behavior
+  ### 6.6 Deprecations
+  ## 7. Security & Safety
+  ### 7.1 Input Sanitization
+  ### 7.2 Prompt Hardening
+  ### 7.3 Code Security Validation
+  ### 7.4 Content Policy
+  ### 7.5 Secrets Handling
+  ### 7.6 Known Security Gaps
+  ## 8. Observability
+  ### 8.1 LangSmith Tracing
+  ### 8.2 Trace Metadata
+  ### 8.3 Token Usage Tracking
+  ### 8.4 Run Inspection Tools
+  ## 9. Configuration
+  ### 9.1 Environment Variables
+  ### 9.2 Settings Hierarchy
+  ### 9.3 Feature Flags
+  ## 10. Performance & Reliability
+  ### 10.1 Streaming Persistence (V3)
+  ### 10.2 Parallel Execution
+  ### 10.3 Timeouts and Limits
+  ### 10.4 Degraded Mode
+  ### 10.5 Template Fallbacks
+  ## 11. Recovery & Resume
+  ### 11.1 Dual-Layer Checkpointing
+  ### 11.2 Skip Detection
+  ### 11.3 Resume Behavior
+  ## 12. Repository Integration
+  ### 12.1 Repo Profile System
+  ### 12.2 Known Archetypes
+  ### 12.3 Confidence Thresholds
+  ### 12.4 Integration Limitations
+  ## 13. Knowledge Graph
+  ### 13.1 Hybrid Retrieval (KG + Semantic Search)
+  ### 13.2 KG Learning
+  ## 14. Testing
+  ### 14.1 Testing Strategy
+  ### 14.2 Mock Modes
+  ## 15. Known Limitations
+  ### Functional Limitations
+  ### Operational Limitations
+  ### Security Limitations
+  ## 16. Appendices
+  ### 16.1 Node Execution Flow
+  ### 16.2 WorkflowState Field Summary
+  ### 16.3 Key Invariants Summary
 
 === docs/architecture_overview.md ===
   (missing from inventory; check ignore rules)
