@@ -22,9 +22,9 @@ The persistence checkpoints are:
 •	persist_run_outcome for run_status, RAG metrics, KG learning rows, and repo_meta tables
 
 All models below reside in:
-•	domain/models.py
-•	repo/models.py
-•	api/types.py
+•	src/integration_coworker/domain/models.py
+•	src/integration_coworker/repo/models.py
+•	src/integration_coworker/api/types.py
 
 and are imported into the LangGraph nodes and persistence layer.
  

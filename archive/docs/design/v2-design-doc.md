@@ -2,8 +2,8 @@
 Title: Agentic API Integration Designer & Code Generator
 Author: Julian Bartosz
 Reviewers: Karl Simon, Aaron Sosa
-Version / Status: v1.1
-Date: 2025-11-20
+Version / Status: v2 (draft)
+Date: 2025-12-16
 
 1. Overview
 1.1 Problem Statement
@@ -43,10 +43,13 @@ o	Authentication
 o	Logging + redaction
 o	Idempotency + transient retries
 o	Pagination + rate limits
+Historical Note (v1)
+The above success criteria describe the initial local-process milestone that established end-to-end correctness. Later sections distinguish that milestone from the v2 design targets.
 Operational Targets
 •	End-to-end run (spec → workflow → code → repo updates → report) in <5 minutes
 •	Store Silver + Gold in Postgres
 •	Single Python function + CLI entrypoint
+•	IntegrationOptions includes strict modes and codegen-style controls (for example strict_codegen, policy_mode)
 •	Primary value over raw LLM use through consistent patterns, knowledge graph reuse, and automatic wiring into the repo
 
 1.2 Objectives & Success Criteria
@@ -60,13 +63,18 @@ Build a Python LangGraph workflow that, given an integration task + API spec(s),
 •	Persisted Silver/Gold records and a human-readable run report
 
 1.3 Non-Goals
-Out of scope for v1:
+Out of scope for the initial local-process milestone (v1):
 •	Production deployment stack
 •	Full ETL/ELT pipelines into analytics warehouses
 •	Non-Python runtimes
 •	Custom LLM training or fine-tuning
 
-v1 runs on a local developer machine with a local or shared Postgres instance and is designed as an internal integration co-worker rather than a hosted service.
+The initial milestone runs on a local developer machine with a local or shared Postgres instance and is designed as an internal integration co-worker rather than a hosted service.
+
+Future Deployment Target (v2)
+This document distinguishes between the v1 local-process runtime and an additional v2 deployment target: a long-running service.
+The service target is not part of v1 scope. It exists to support repeated execution, centralized observability, and controlled access to persistent state and repository workspaces.
+The v2 service target would execute the same LangGraph workflow with explicit operational boundaries, including run admission control, multi-run concurrency controls, and stricter credential and log-handling policies.
 
 1.4 High-Level Solution Summary
 The solution consists of three major components:
@@ -128,6 +136,8 @@ v1 also supports structured non-HTTP sources that describe integration surfaces 
 •	Message-based or event-driven interfaces that describe topics, queues, and payload schemas
 
 For these inputs, the spec_silver.file_specs and spec_silver.message_specs tables hold source-specific metadata and link back to the same Schema, Entity, and Event tables used for HTTP. The build_silver_api_model node creates Schema, SchemaField, Entity, and Event rows for both HTTP and non-HTTP inputs whenever the source provides enough structure.
+
+For file-oriented inputs, a dedicated build_silver_file_model node runs after build_silver_api_model to populate file-related Silver records and to attach file-derived entities when the source provides sufficient structure.
 
 Unstructured guides such as PDF or free-form HTML for CSV/EDI or message contracts follow the text-only rules from Appendix A.3.7. The workflow still writes a Silver surface for these sources, records gaps in diagnostics fields, and lets later runs reprocess the same inputs as extraction rules improve.
 
@@ -205,12 +215,14 @@ External systems for v1:
 •	Local logging and metrics for supplementary diagnostics
 v1 assumes a local or developer-controlled environment. A later phase may move the same workflow into a managed GCP or Azure runtime once the local end-to-end workflow is stable. Cloud deployment is not in scope for v1.
 
+The long-running service target described in Section 1.3 is treated as a later-phase deployment target and does not change the v1 system context.
+
 3.2 Runtime Deployment (v1)
 Runtime behavior is controlled by IntegrationOptions. Two flags are central:
 •	dry_run: when True, the system runs the full graph, builds a report in memory, and does not write to Postgres. No records are inserted or updated in spec_silver, integration_gold, the kg schema, integration_gold.run_status, or repo_meta.
 •	repo_integration_enabled: when False, the graph skips all nodes that inspect or change a repository, even if repo_root is present in the input.
 The plan_run node reads these options and decides whether the run is repo-aware. It sets plan["use_repo"] based on repo_root and IntegrationOptions.repo_integration_enabled.
-The three persistence nodes, persist_silver_checkpoint, persist_gold_checkpoint, and persist_run_outcome, read IntegrationOptions.dry_run. When dry_run is True they skip all database writes and leave persisted_ids empty, but they still compute in-memory summaries for the run and attach them to plan and report_markdown. When dry_run is False, persist_silver_checkpoint and persist_gold_checkpoint write Silver and Gold data and spec_chunks, and persist_run_outcome writes run_status, RAG metrics, KG learning rows, and repo_meta tables.
+The four persistence nodes, persist_silver_checkpoint, persist_gold_checkpoint, persist_kg_learning, and persist_run_outcome, read IntegrationOptions.dry_run. When dry_run is True they skip all database writes. In this mode, persisted_ids is still populated with in-memory status markers (for example run_status="completed_dry_run") and the workflow still produces plan and report_markdown. When dry_run is False, persist_silver_checkpoint and persist_gold_checkpoint write Silver and Gold data (and spec_chunks when embeddings are present), persist_kg_learning writes KG templates and embeddings, and persist_run_outcome writes run_status, RAG metrics, and repo_meta tables.
 apply_repo_integration_changes also respects dry_run. When dry_run is True, it does not change files on disk and records intended file changes only in RepoChangeSet. When dry_run is False it writes RepoChangeSet to the filesystem.
 The reference runtime for v1 is a local process. Developers run the graph on a laptop or workstation against a local or shared Postgres instance. v1 does not include a production deployment stack. A later phase can lift the same workflow into a managed GCP or Azure environment after the local runs are stable.
 
@@ -258,7 +270,7 @@ Repo integration concepts (see Appendix D):
 •	RepoProfile
 •	RepoSnapshot
 •	RepoChangeSet and FileChange
-These types are defined in domain/models.py, repo/models.py, and api/types.py and RepoProfile and RepoChangeSet appear in WorkflowState; RepoSnapshot and FileChange are internal helper types used by repo nodes.
+These types are defined in src/integration_coworker/domain/models.py, src/integration_coworker/repo/models.py, and src/integration_coworker/api/types.py and RepoProfile and RepoChangeSet appear in WorkflowState; RepoSnapshot and FileChange are internal helper types used by repo nodes.
 
 4.2 Logical Data Schema
 The logical data model spans three layers: Silver (spec_silver), Gold (integration_gold), and the knowledge graph (kg).
@@ -284,10 +296,15 @@ The system stores persistent state in Postgres 15 with the following schemas:
 
 All primary keys use BIGSERIAL / BIGINT. The spec_silver.spec_chunks.embedding column uses VECTOR(1536) to match the configured embedding dimension.
 
-Database writes in v1 occur only at three checkpoint nodes:
+Database writes in v1 occur primarily at three checkpoint nodes:
 •	persist_silver_checkpoint writes spec_silver.source_systems, spec_silver.spec_documents, spec_silver.spec_sections, and the core Silver tables (schemas, fields, entities, entity_relationships, events, endpoints, endpoint_parameters), and spec_silver.spec_chunks when embeddings are present. It also backfills ids and foreign keys on in-memory Silver objects.
 •	persist_gold_checkpoint writes integration_gold.integration_tasks and the other Gold tables (workflow_templates, integration_flow_nodes, integration_flow_edges, endpoint_bindings, policies, code_artifacts). It backfills ids on the corresponding in-memory Gold objects.
-•	persist_run_outcome writes integration_gold.run_status, integration_gold.rag_eval_metrics, KG learning tables in the kg schema, and repo_meta.integrations and repo_meta.files for repo-aware runs.
+•	persist_run_outcome writes integration_gold.run_status, integration_gold.rag_eval_metrics, and repo_meta.integrations and repo_meta.files for repo-aware runs.
+
+Knowledge graph writes in v1 occur in a dedicated node:
+•	persist_kg_learning writes KG learning rows to kg.nodes, kg.edges, kg.workflow_steps, and kg.step_bindings.
+
+In addition, plan_run attempts to create an initial integration_gold.run_status row (status="running") before checkpoints are written, to satisfy run checkpoint foreign key constraints. This insertion is treated as non-fatal when the database is unavailable.
 
 Each checkpoint runs in its own transaction. Between checkpoints, LangGraph nodes work with in-memory drafts and keep intermediate state in WorkflowState and LangSmith traces.
 
@@ -445,6 +462,8 @@ o	Parses OpenAPI specs into openapi_spec when present.
 •	build_silver_api_model
 o	Converts openapi_spec or text-only doc_chunks into Silver drafts: schemas, entities, relationships, events, endpoints, and endpoint_parameters.
 o	Applies the deterministic rules in Appendix A.3.
+•	build_silver_file_model
+o	Builds file-oriented Silver drafts (for example file specs and file fields) when file-oriented inputs are present.
 •	embed_spec_chunks
 o	Computes embeddings for doc_chunks.
 o	Produces spec_chunk_embeddings entries that map chunk indices to embedding vectors.
@@ -458,12 +477,19 @@ o	Converts templates and Silver drafts into workflow_nodes and workflow_edges.
 o	Creates EndpointBinding scaffolds for api_call nodes as in Appendix C.3 and Appendix H.5.
 •	attach_policies_and_patterns
 o	Attaches Policy objects to nodes and endpoints based on auth, retry, pagination, logging, and rate limit patterns.
-•	attach_repo_context
-o	Builds repo context when repo_root or a markdown file path is present.
-o	Sets repo_markdown_context and, when needed, infers a RepoProfile.
 •	generate_code_and_tests
 o	Generates CodeArtifact instances for clients, workflows, and tests.
 o	Refines EndpointBinding mappings when possible using schemas and the planned flow.
+•	persist_gold_checkpoint
+o	Upserts Gold tables for the integration task and flow.
+o	In dry runs, skips database writes.
+•	persist_kg_learning
+o	Writes learned KG templates and steps when the run produces a valid workflow.
+o	Updates existing templates when a new run has higher coverage or validation scores.
+o	In dry runs, skips database writes.
+•	attach_repo_context
+o	Builds repo context when repo_root or a markdown file path is present.
+o	Sets repo_markdown_context and, when needed, infers a RepoProfile.
 •	analyze_repo_layout
 o	For repo runs, maps CodeArtifact entries to target paths using RepoProfile.layout_hints and archetype rules.
 o	Computes router and settings changes for FastAPI-style repos using markers and builds a RepoChangeSet.
@@ -475,13 +501,6 @@ o	Checks Silver and Gold drafts and repo changes against flow semantics in Appen
 •	persist_silver_checkpoint
 o	Upserts Silver tables and spec_chunks rows.
 o	In dry runs, skips database writes.
-•	persist_gold_checkpoint
-o	Upserts Gold tables for the integration task and flow.
-o	In dry runs, skips database writes.
-•	persist_kg_learning
-o	Writes learned KG templates and steps when the run produces a valid workflow.
-o	Updates existing templates when a new run has higher coverage or validation scores.
-o	In dry runs, skips database writes.
 •	persist_run_outcome
 o	Writes run_status, RAG metrics, and repo_meta tables.
 o	In dry runs, skips database writes.
@@ -489,16 +508,21 @@ o	In dry runs, skips database writes.
 o	Renders a human-readable report into report_markdown.
 •	handle_error
 o	Aggregates error messages and sets plan["failed"] = True while leaving drafts intact.
-Each node appends its name to completed_steps on success. Nodes do not write to disk or the database except apply_repo_integration_changes and the three persistence nodes.
+
+Note on file integration terminology.
+This document uses “file-oriented inputs” as a category for spec sources that are not OpenAPI documents. A concrete proposal for file integration (SpecSource routing, Silver file model tables, and related codegen artifacts) is captured in `archive/docs/reports/FILE_INTEGRATION_V1_PLAN.md`. That plan is treated here as a design reference rather than a statement of implemented behavior.
+Each node appends its name to completed_steps on success. Nodes do not write to disk or the database except apply_repo_integration_changes and the four persistence nodes.
+
+The four persistence nodes are persist_silver_checkpoint, persist_gold_checkpoint, persist_kg_learning, and persist_run_outcome.
 
 5.4 Graph Topology
 The graph has a main happy path and two variants: repo-aware and repo-less.
 Core path:
-•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → persist_silver_checkpoint → embed_spec_chunks → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → persist_gold_checkpoint → persist_kg_learning → generate_code_and_tests → validate_integration_design → persist_run_outcome → build_report
+•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → build_silver_file_model → embed_spec_chunks → persist_silver_checkpoint → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → generate_code_and_tests → persist_gold_checkpoint → persist_kg_learning → validate_integration_design → build_report → persist_run_outcome
 Repo-aware path:
-•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → persist_silver_checkpoint → embed_spec_chunks → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → persist_gold_checkpoint → persist_kg_learning → attach_repo_context → generate_code_and_tests → analyze_repo_layout → apply_repo_integration_changes → validate_integration_design → persist_run_outcome → build_report
+•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → build_silver_file_model → embed_spec_chunks → persist_silver_checkpoint → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → generate_code_and_tests → persist_gold_checkpoint → persist_kg_learning → attach_repo_context → analyze_repo_layout → apply_repo_integration_changes → validate_integration_design → build_report → persist_run_outcome
 Repo-less path:
-•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → persist_silver_checkpoint → embed_spec_chunks → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → persist_gold_checkpoint → persist_kg_learning → generate_code_and_tests → validate_integration_design → persist_run_outcome → build_report
+•	plan_run → ingest_spec → detect_and_parse_spec → build_silver_api_model → build_silver_file_model → embed_spec_chunks → persist_silver_checkpoint → understand_task → align_task_with_kg → plan_integration_flow → attach_policies_and_patterns → generate_code_and_tests → persist_gold_checkpoint → persist_kg_learning → validate_integration_design → build_report → persist_run_outcome
 The entry node is plan_run. The terminal node is build_report. Persistence occurs at three checkpoint nodes (persist_silver_checkpoint, persist_gold_checkpoint, persist_run_outcome) plus a dedicated persist_kg_learning node for knowledge graph updates. Any node may route to handle_error on failure, then onward to persist_run_outcome and build_report so an error run still produces a status and report.
 
 5.5 Prompting & Agent Configuration
@@ -580,7 +604,7 @@ The kg schema includes embedding columns or companion tables for text fields in 
 
 The retrieval layer treats these KG rows as a first-class source of context. For KG reads, nodes first pick a start set by walking the graph structure (templates, steps, bindings, endpoints) and apply embeddings only inside that set to rank or trim candidates, not as a direct vector index over all kg.* rows.
 
-persist_run_outcome keeps the KG embeddings in sync with template changes by writing summary_embedding values for workflow_templates, workflow_steps, and step_bindings during KG learning.
+persist_kg_learning keeps the KG embeddings in sync with template changes by writing summary_embedding values for workflow_templates, workflow_steps, and step_bindings during KG learning.
 
 When a node reads from the vector index or the knowledge graph, it receives TOON records encoded as YAML fragments. The retrieval layer passes these fragments into prompts as YAML blocks rather than as JSON.
 
@@ -697,11 +721,13 @@ High-level sequence:
 1.	plan_run sets high-level run metadata and repo usage flags.
 2.	ingest_spec reads raw spec content into spec_documents and doc_chunks for all spec_refs. The node records a stable mapping from chunk indices to source documents in plan.
 3.	detect_and_parse_spec and build_silver_api_model populate in-memory Silver drafts for HTTP and non-HTTP sources by constructing Schemas, fields, endpoints, entities, relationships, events, and section groupings.
-4.	persist_silver_checkpoint writes Silver tables and backfills ids on in-memory objects, including SpecSection rows in spec_silver.spec_sections so section-level checks and retrieval queries can use this structure.
-5.	embed_spec_chunks computes embeddings for doc_chunks and writes SpecChunkEmbedding entries into state.
-6.	Downstream nodes build Gold drafts, repo changes, and code artifacts.
-7.	persist_gold_checkpoint writes Gold tables for the integration task and flow.
-8.	persist_run_outcome writes run_status, RAG metrics, KG learning rows, and repo_meta rows for repo-aware runs.
+4.	build_silver_file_model populates file-oriented Silver drafts when file-oriented inputs are present.
+5.	embed_spec_chunks computes embeddings for doc_chunks.
+6.	persist_silver_checkpoint writes Silver tables and backfills ids on in-memory objects, including SpecSection rows in spec_silver.spec_sections so section-level checks and retrieval queries can use this structure.
+7.	Downstream nodes build Gold drafts, repo changes, and code artifacts.
+8.	persist_gold_checkpoint writes Gold tables for the integration task and flow.
+9.	persist_kg_learning writes learned KG templates and steps when the run produces a valid workflow.
+10.	persist_run_outcome writes run_status, RAG metrics, and repo_meta rows for repo-aware runs.
 
 Silver and Gold tables hold rows only after their checkpoint nodes commit. The SpecSection dataclass groups related source material and is part of WorkflowState. The persist_silver_checkpoint node writes SpecSection rows to spec_silver.spec_sections so section-level diagnostics and retrieval queries can use this structure for all supported source types, including non-HTTP specs that describe CSV or message schemas.
 
@@ -841,6 +867,54 @@ This produces a compact debug bundle for pair debugging or automation.
 8.4 Environments and LLM Accounts
 Local development can use a personal Anthropic or OpenAI account, or a team account, for LLM calls. Keys are stored in environment variables. Shared and hosted environments must use organization-managed accounts and secret storage (e.g., cloud secret manager). The code treats the LLM client as a pluggable dependency so that keys and providers change by configuration, not by code changes.
 
+8.5 Agent Harness Alignment (v2)
+This project can be understood as a domain-specific “agent harness” for integration design and code generation. The LangGraph workflow is the orchestrator, but several harness-like capabilities are implemented in the surrounding runtime. This section compares the current implementation to the “agent harness” capability set described in LangChain’s deepagents documentation, and identifies which ideas are worth adopting in v2.
+
+8.5.1 What is already similar enough (do not chase naming)
+Checkpointing and resume.
+•	The workflow already supports checkpoint-based recovery and resume.
+o	LangGraph native checkpoint savers (Postgres and SQLite fallbacks) are wired in `src/integration_coworker/graph/runtime.py` via `checkpointer_context`, `async_checkpointer_context`, and `get_checkpointer`.
+o	The CLI includes “auto-resume” and “resume by run_id” features that detect interrupted runs and resume from persisted checkpoints (see `src/integration_coworker/cli.py`).
+This covers the practical need that “cross-step state durability” provides in a harness, even if it is not expressed as a generic StoreBackend.
+
+Filesystem access abstraction.
+•	Repository inspection is already implemented behind a provider abstraction rather than ad-hoc file IO.
+o	`repo_context_from_source` and `filesystem_repo_context_provider` delegate to `LocalRepoProvider` and a provider selector (`get_provider`) to build a `RepoSnapshot` (see `src/integration_coworker/repo/context.py`).
+This is operationally similar to a “FilesystemBackend” concept, even though it is domain-shaped around repositories rather than generic virtual files.
+
+8.5.2 Where adopting harness ideas is beneficial for v2
+Large-result eviction → run artifact spooling.
+•	The workflow produces large intermediate payloads (repo snapshots, extracted spec structures, long markdown contexts, generated code bundles). Without an explicit spooling policy, these payloads increase memory pressure, reduce debuggability, and can encourage over-logging.
+•	v2 should add a run artifact store that writes large blobs to `data/runs/<run_id>/...` (or a DB-backed artifact table) and keeps only:
+o	A stable pointer (path/key)
+o	A short summary (counts + hashes)
+in `WorkflowState`.
+This is the closest analogue to deepagents “large tool result eviction”, but applied to node/state payloads rather than tool return values.
+
+Human-in-the-loop (HITL) gates for destructive operations.
+•	`dry_run` prevents writes, but does not provide controlled approval for writes.
+•	v2 should introduce an approval gate before applying repo changes, especially for the long-running service target. This gate should be narrow and explicit (repo edits, DB writes in non-dry-run mode), rather than interrupting every operation.
+
+Standardized repo IO boundary (“tool surface”).
+•	v2 should formalize a small internal API for repo IO (list/glob/grep/read/write/edit) implemented on top of the existing provider layer.
+•	The goal is not to become a general agent framework, but to create a single policy boundary for path validation, size limits, symlink handling, and audit logging.
+
+Selective “subagent” delegation via subgraphs.
+•	The deepagents “subagent” abstraction is best approximated in this codebase by explicitly bounded subgraphs (or dedicated nodes) with tight input/output contracts.
+•	Recommended v2 uses:
+o	Isolated review loops (policy review, code self-review, validation diagnosis) that return a single compact result
+o	Parallelizable, specialized work (e.g., generate tests for one module) bounded by cost/concurrency limits
+This preserves reproducibility (checkpoints + run artifacts) while avoiding the debugging complexity of unconstrained multi-agent spawning.
+
+8.5.3 Practical v2 adoption checklist
+The recommended “agent harness” alignment work in v2 is intentionally narrow and should be validated via existing gates:
+•	Run artifact spooling: verify artifact pointers are stable per `run_id` and that strict docs and production validation runs remain debuggable.
+•	HITL gates: ensure repo writes remain reviewable (dry-run + explicit apply step) and safe for the long-running service target.
+•	Repo IO boundary: centralize path validation, size limits, and audit logging.
+Verification hooks that already exist in-repo:
+•	Docs gate: `make docs-verify` (strict MkDocs build + docs tests + docs audit).
+•	Production-style validation: see scripts under `scripts/` (for example `scripts/test_production_*.py` and `scripts/verify_production_readiness.py`) and the validation matrix referenced by the docs.
+
 9. Testing & Validation Plan
 9.1 Unit & Integration Tests
 Unit tests:
@@ -896,80 +970,98 @@ The system writes a compact summary of these metrics for each run into integrati
 
 10. Rollout, Milestones & Project Plan
 10.1 Phased Delivery
-Phase 0 — Design & Scaffolding
-Scope:
-•	Align on problem + value
-•	Finalize architecture (LangGraph, Silver/Gold, KG role)
-•	Select storage/vector/graph libraries
-•	Create reference service repository
-Output:
-•	This design doc
-•	Minimal coworker repo scaffold
-•	Reference service repository
 
-Phase 1 — Silver Ingestion for Multiple Specs
-Scope:
-•	Implement Bronze + Silver ingestion
-•	Ingest 5–10 public specs
-•	Populate spec_silver tables for documents, endpoints, schemas, fields, and entities
-•	Use SpecSection to group related parts of each specification during extraction and write these sections into spec_silver.spec_sections as part of persist_silver_checkpoint
-Output:
-•	Stable ingestion pipeline
-•	Basic retrieval API
+v2 Phases and Deliverables (Dec 2025)
+This section defines an aggressive, calendar-anchored v2 delivery plan. It is written as an execution plan rather than an architectural specification. “Production-ready” in this context means the system meets the explicit production validation matrix, has a repeatable runbook, and passes the repo’s production-style validation scripts against Postgres and at least one real LLM provider.
 
-Phase 2 — Task Understanding & Integration Planning
+Phase V2.0 — Stabilization and Freeze Candidate (Now → 2025-12-19)
 Scope:
-•	Add understand_task, align_task_with_kg, plan_integration_flow
-•	Define initial KG schema
-•	Encode 2+ domain workflows per provider
-Output:
-•	Workflow graphs for canonical tasks
-•	Qualitative engineering review
+•	Stabilize the existing end-to-end workflow under production-like validation (Postgres + repo integration + real LLM calls)
+•	Confirm correctness of checkpoint semantics, dry-run semantics, and repo change application across representative target repos
+•	Lock down operational defaults for retries, caching, and logging boundaries (no secrets in logs; clear failure modes)
+•	Document the supported command surfaces (CLI + Python entrypoint) and produce one canonical “production run recipe”
+Deliverables:
+•	A “freeze candidate” build on the main v2 branch
+•	A minimal runbook with failure triage flow (node-level diagnosis + DB/LLM diagnostics)
+•	Production validation scripts pass on at least one representative provider+task set
 
-Phase 3 — Policy & Pattern Application
+Checkpoint Meeting — 2025-12-19
+Agenda and exit criteria:
+•	Review production validation results and bug log since the last checkpoint
+•	Agree on any remaining must-fix items for the final milestone
+•	Declare “feature freeze” for the Dec 22 push (only fixes and documentation allowed after this meeting)
+
+Phase V2.1 — Hardening Sprint and Final Readiness (2025-12-20 → 2025-12-22)
 Scope:
-•	Define policies: auth, retry, pagination, logging
-•	Implement attach_policies_and_patterns
-Output:
-•	Policy-enriched integration flows
-•	Early measurement of consistency
+•	Resolve all must-fix bugs identified at the Dec 19 checkpoint
+•	Harden deterministic replay and run recovery workflows sufficiently for regression and incident triage (LLM record/replay + checkpoint recovery surfaces)
+•	Complete production readiness documentation (validation matrix, runbook, and operator-facing “known failure classes”)
+•	Confirm reproducibility of the production validation suite on a clean environment
+Deliverables:
+•	Production-ready v2 release candidate (tagged)
+•	Passing production validation suite with archived artifacts (logs, run reports, DB schema validation)
+•	A minimal “release checklist” that can be repeated for future releases
 
-Phase 4 — Code Generation, Validation & Repo Wiring
-Scope:
-•	Implement generate_code_and_tests + validate_integration_design
-•	Add templates for clients, workflows, config, tests
-•	Define a repo_profile that reflects expected layout
-•	Write artifacts into reference repo or target directory
-•	Surface the first end-to-end run through a local CLI and a simple Streamlit or Gradio page that wraps the Python entrypoint
-Output:
-•	First end-to-end generated integrations that include wiring into the mock repo
-•	Basic validation/test paths
+FINAL Milestone — 2025-12-22 (Production Ready)
+Acceptance criteria:
+•	All production validation gates pass (per PRODUCTION_VALIDATION_MATRIX and automation scripts)
+•	The system can be executed reliably end-to-end with Postgres + a real LLM provider using documented environment setup
+•	A run produces: Silver + Gold persistence, repo change set (when enabled), run report, and an auditable error story on failure
+•	Docs gate passes (mkdocs strict build + docs tests + docs audit)
 
-Phase 5 — Generalized Repo Analysis & Automatic Integration
-Scope:
-•	Refine analyze_repo_layout + apply_repo_integration_changes to work with the mock repo and with a pluggable repo profile
-•	Prepare the node contracts for later use with Subatomic internal repo loaders
-•	Expand registration patterns beyond the initial reference service
-Output:
-•	Stable change sets for the Subatomic mock repo that are reviewable in Git
-•	A reusable repo profile and node contracts for future internal loaders
+10.0.1 v2 Refinements and Future Work
+This section records targeted refinements that extend the initial local-process milestone into a more complete v2 system. The refinements focus on repeatability, broader applicability across repositories and languages, and more explicit operational boundaries.
 
-Phase 6 — Evaluation, Refinement, DX
-Scope:
-•	Run the RAG/GraphRAG evaluation harness against the reference task set and expand the labeled scenarios.
-•	Refine prompts, templates, KG content, and retrieval settings guided by LangSmith traces and run metrics stored in integration_gold.rag_eval_metrics.
-•	Integrate the generator and evaluation harness into the development workflow (CLI, notebooks, PR helper, local web UI) so that engineers can run and inspect evaluation runs locally.
-Output:
-•	Stable v1 ready for internal adoption, with cost and performance characteristics tracked in LangSmith and in integration_gold.rag_eval_metrics
+Multi-language support (v2)
+The current workflow and artifact model are Python-first. In v2, multi-language support is treated as an explicit product surface with a single internal contract:
+•	A language-neutral IntegrationFlow and EndpointBinding layer remains the canonical representation of the designed integration.
+•	Language-specific generators render that canonical model into artifacts for the target runtime (for example Python, TypeScript, or Go).
 
-10.2 Key Milestones
-•	M1 (Phase 0): Design and scaffolding complete — target: 11-21-2025
-•	M2 (Phase 1): Silver ingestion for 3 providers + 10 specs — target: 11-25-2025
-•	M3 (Phase 2): Task understanding + planning for one provider — target: 11-27-2025
-•	M4 (Phase 3): KG-backed patterns for two workflows — target: 12-1-2025
-•	M5 (Phase 4): First end-to-end integration (code + tests + design) — target: 12-5-2025
-•	M6 (Phase 5): Evaluation harness + RAG/KG metrics — target: 12-9-2025
-•	M7 (Phase 6): v1 ready for internal adoption — target: 12-12-2025
+Planned refinements:
+•	Introduce a LanguageProfile that selects templates, runtime dependencies, formatting/linting entrypoints, and repository wiring conventions.
+•	Refactor generate_code_and_tests into (a) language-neutral planning outputs and (b) per-language rendering passes, so evaluation can compare multiple languages for the same flow.
+•	Extend validation to include language-specific compile/typecheck gates (for example mypy/ruff for Python, tsc/eslint for TypeScript) while reusing the same semantic validation rules for EndpointBinding consistency.
+•	Add a minimal multi-language test harness that executes “import/compile + smoke test” per generated module set and stores results in the run report.
+
+File ingestion wiring (v2)
+The system currently treats “file-oriented inputs” as first-class spec sources at the Silver model level, but the end-to-end ingestion and downstream code generation are not yet fully wired as a default path.
+In v2, file ingestion work focuses on a complete path from input source → Silver file records → task planning → code artifacts.
+
+Planned refinements:
+•	Adopt a SpecSource routing layer for file-oriented inputs and align extraction, validation, and embedding behavior with the plan in `archive/docs/reports/FILE_INTEGRATION_V1_PLAN.md`.
+•	Wire build_silver_file_model so it consistently populates file_specs, file_fields, and record-layout metadata when the source provides sufficient structure.
+•	Extend generate_code_and_tests with file-specific templates (parsers, validators, record mappers) and a test suite that runs on fixture files.
+•	Extend validate_integration_design to treat file schemas as binding targets alongside HTTP endpoints.
+
+Other v2 refinements
+Beyond language expansion and file ingestion wiring, the v2 design calls out additional refinements that increase reliability and operational leverage:
+•	Long-running service deployment. Formalize a service runtime around the same LangGraph workflow (see Section 1.3) with run admission control, concurrency limits, and per-run workspace isolation.
+•	Determinism and replay.
+o	Implemented: LLM-level record/replay exists for regression-oriented runs.
+  - The synchronous LLM client supports REAL/MOCK/RECORD/REPLAY modes and persists request/response pairs under `.llm_recordings` keyed by a deterministic SHA-256 hash of (model, system_prompt, prompt). See `src/integration_coworker/llm/client.py` (“Record/Replay Support (LLM-003)”).
+  - This mechanism enables deterministic re-execution of LLM calls for a fixed prompt + hardened system prompt, but it does not (yet) guarantee end-to-end determinism of the full workflow.
+o	Partially implemented: workflow recovery/checkpoint resume is present.
+  - The project includes a workflow checkpoint persistence module with `save_checkpoint`/`load_checkpoint` and size-limiting exclusions for large spec fields. See `src/integration_coworker/persistence/checkpoints.py`.
+o	Planned: elevate replay to a first-class run-level feature by persisting (a) prompt inputs, (b) retrieval identifiers, and (c) stable artifact hashes per node, so regressions can be localized to specific nodes/config changes.
+•	Evaluation hardening.
+o	Implemented (minimal): the schema includes per-run evaluation storage for RAG-oriented metrics.
+  - `persist_run_outcome` writes to `integration_gold.rag_eval_metrics` (currently as a basic summary row keyed by `run_id`). See `src/integration_coworker/graph/nodes/persist_run_outcome.py`.
+o	Planned: expand labeled tasks and introduce regression thresholds over (a) semantic policy validation and (b) language-specific build/typecheck gates.
+•	Policy and safety refinement.
+o	Implemented: a semantic content policy layer flags insecure credential usage patterns and data leakage patterns in generated code, with a test-oriented whitelist. See `src/integration_coworker/llm/content_policy.py`.
+o	Implemented: policy attachment can include redaction configuration (for example `redact_fields`) as part of policy drafting in `attach_policies_and_patterns`. See `src/integration_coworker/graph/nodes/attach_policies_and_patterns.py` (redaction fields).
+o	Planned: treat policy attachment as a versioned layer (policy versioning / policy bundles) so policies can be upgraded without changing flow semantics, and make redaction guarantees enforceable end-to-end (logs, reports, persisted artifacts).
+•	Repo profile expansion.
+o	Implemented: RepoProfile coverage extends beyond a single reference structure.
+  - Generic profiles exist for multiple languages (Python, TypeScript, JavaScript, Go, Java, Ruby, C#) and there is additional framework detection and backward-compatible profiles. See `src/integration_coworker/repo/profiles.py`.
+o	Planned: deepen repo support for additional monorepo layouts and enforce stricter patch-application constraints in repo wiring.
+•	Incremental updates.
+o	Partially implemented: select nodes support idempotent or cache-hydration fast paths.
+  - The Silver API model builder has a cache-hydration path (`state.cache_hit=True`) that hydrates model entities from the database instead of reparsing. See `src/integration_coworker/graph/nodes/build_silver_api_model.py` (“V1.1 Spec Caching (FT-001)”).
+o	Planned: spec diffs and partial regeneration so a run can update a subset of endpoints/bindings/code artifacts without recomputing the entire integration.
+
+Notes on legacy milestones
+Earlier phase numbering and dates referenced the initial local-process milestone (v1). Those are retained in this document only as historical context; the v2 plan above is the active delivery schedule.
 
 10.3 Risk Management
 Key Risks and Mitigations

@@ -381,6 +381,11 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
             # If hydration succeeded but returned no data, fall back to parsing
             if state.endpoints:
                 logger.info("Successfully hydrated Silver model from cache")
+                # V3 State Slimming: Clear large spec data even on cache hit
+                state.openapi_spec = None
+                state.parsed_specs = []
+                if state.plan is not None and "openapi_specs" in state.plan:
+                    state.plan["openapi_specs"] = []
                 state.completed_steps.append("build_silver_api_model")
                 return state
             else:
@@ -439,6 +444,15 @@ def build_silver_api_model(state: WorkflowState) -> WorkflowState:
 
     except Exception as e:
         state.errors.append(f"Failed to build Silver API model: {str(e)}")
+
+    # V3 State Slimming: Clear large spec data after extraction
+    # The data is now in endpoints, schemas, entities - no need to carry it forward
+    # This prevents LangSmith payload size errors for large specs (Stripe: 7MB -> 300MB+)
+    state.openapi_spec = None
+    state.parsed_specs = []
+    if state.plan is not None and "openapi_specs" in state.plan:
+        state.plan["openapi_specs"] = []  # Clear from plan too
+    logger.debug("Cleared openapi_spec, parsed_specs, and plan['openapi_specs'] after Silver model extraction")
 
     state.completed_steps.append("build_silver_api_model")
     return state

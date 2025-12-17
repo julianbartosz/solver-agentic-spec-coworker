@@ -4,11 +4,45 @@ Path utilities for spec-driven code generation.
 Derives paths and import statements based on RepoProfile layout_hints
 rather than hardcoded assumptions.
 """
+import json
 import re
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from integration_coworker.graph.state import WorkflowState
 from integration_coworker.repo.models import RepoProfile
+
+
+def get_openapi_spec_dict(state: WorkflowState) -> Optional[Dict[str, Any]]:
+    """
+    Safely get openapi_spec as a dict from workflow state.
+    
+    Handles cases where openapi_spec might be:
+    - None
+    - A dict (normal case)
+    - A JSON string (needs parsing)
+    
+    Args:
+        state: WorkflowState containing the spec
+        
+    Returns:
+        Parsed dict or None if unavailable/invalid
+    """
+    spec = state.openapi_spec
+    if spec is None:
+        return None
+    
+    if isinstance(spec, dict):
+        return spec
+    
+    if isinstance(spec, str):
+        try:
+            parsed = json.loads(spec)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    
+    return None
 
 
 def path_to_module(path: str) -> str:
@@ -180,8 +214,9 @@ def derive_base_url(state: WorkflowState) -> str:
         return state.source_system.base_url
 
     # Strategy 2: Check OpenAPI spec servers
-    if state.openapi_spec:
-        servers = state.openapi_spec.get("servers", [])
+    spec = get_openapi_spec_dict(state)
+    if spec:
+        servers = spec.get("servers", [])
         if servers and isinstance(servers, list) and len(servers) > 0:
             first_server = servers[0]
             if isinstance(first_server, dict) and "url" in first_server:
@@ -192,8 +227,8 @@ def derive_base_url(state: WorkflowState) -> str:
                 return url
 
     # Strategy 3: Try to construct from spec info
-    if state.openapi_spec:
-        info = state.openapi_spec.get("info", {})
+    if spec:
+        info = spec.get("info", {})
         title = info.get("title", "")
         if title:
             # Create a reasonable placeholder based on API name

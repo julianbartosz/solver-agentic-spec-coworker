@@ -19,6 +19,11 @@ try:
     import psycopg
     from psycopg_pool import ConnectionPool
     HAS_PSYCOPG = True
+    # Bug #49 fix: Suppress "rolling back returned connection" warnings from psycopg_pool
+    # These are informational but noisy - our _quiet_reset handles rollbacks properly
+    # Note: The actual logger is "psycopg.pool" (not "psycopg_pool")
+    logging.getLogger('psycopg.pool').setLevel(logging.CRITICAL)
+    logging.getLogger('psycopg_pool').setLevel(logging.CRITICAL)
 except ImportError:
     HAS_PSYCOPG = False
     psycopg = None
@@ -61,6 +66,57 @@ def _cleanup_pool():
 atexit.register(_cleanup_pool)
 
 
+def _quiet_reset(conn: "psycopg.Connection") -> None:
+    """
+    Reset handler for connection pool that silently rolls back dirty connections.
+    
+    Bug #49 fix: Prevents "rolling back returned connection" warning spam from 
+    psycopg_pool when connections are returned in INTRANS state. This happens
+    when code paths don't explicitly commit/rollback, which is common in 
+    read-only operations and error paths.
+    
+    This is safe because:
+    1. We're only rolling back uncommitted changes (no data loss)
+    2. If the caller wanted to commit, they should have done so explicitly
+    3. The warning provides no actionable information (we know some code paths
+       don't commit, it's by design for read operations)
+    """
+    from psycopg.pq import TransactionStatus
+    
+    # Check if connection is in a transaction state (not IDLE)
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        # Connection is in a transaction - silently rollback
+        try:
+            conn.rollback()
+        except Exception:
+            pass  # Ignore rollback errors - connection may be broken
+
+
+def _add_keepalive_params(url: str) -> str:
+    """
+    Add TCP keepalive parameters to a PostgreSQL connection URL.
+    
+    This prevents 'connection is closed' errors during long-running workflows
+    by sending periodic keepalive probes.
+    
+    Keepalive settings:
+    - keepalives=1: Enable TCP keepalives
+    - keepalives_idle=60: Start keepalive probes after 60s idle
+    - keepalives_interval=10: Send probes every 10s
+    - keepalives_count=5: Consider connection dead after 5 failed probes
+    """
+    if "keepalives" not in url:
+        separator = "&" if "?" in url else "?"
+        keepalive_params = (
+            f"{separator}keepalives=1"
+            "&keepalives_idle=60"
+            "&keepalives_interval=10"
+            "&keepalives_count=5"
+        )
+        return url + keepalive_params
+    return url
+
+
 def get_pool() -> "ConnectionPool":
     """
     Get or create the Postgres connection pool.
@@ -69,6 +125,9 @@ def get_pool() -> "ConnectionPool":
     
     Note: Does NOT use dict_row factory - returns tuple rows for consistency
     with SQLite's Row factory (which supports both index and column name access).
+    
+    Bug #49 fix: Uses custom reset handler to suppress "rolling back" warnings.
+    Connection keepalive: Adds TCP keepalive to prevent connection timeouts.
     """
     global _pool
 
@@ -80,12 +139,15 @@ def get_pool() -> "ConnectionPool":
 
     if _pool is None:
         settings = get_settings()
+        # Add keepalive parameters to prevent connection timeouts
+        db_url = _add_keepalive_params(settings.database.url)
         _pool = ConnectionPool(
-            settings.database.url,
+            db_url,
             min_size=2,
             max_size=20,  # V1.1: Increased from 10 for headroom
             timeout=5.0,  # V1.1: Increased from 1.0 for reliability
             open=True,  # V1.2: Explicit open=True to fix psycopg_pool deprecation warning
+            reset=_quiet_reset,  # Bug #49: Suppress rollback warnings
             # No row_factory - use default tuple rows for consistency with SQLite
         )
 

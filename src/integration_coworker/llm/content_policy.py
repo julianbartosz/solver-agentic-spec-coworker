@@ -19,6 +19,8 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Set, Dict, Any
 
+from integration_coworker.codegen.path_fixer import PathFixer
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +128,11 @@ class ContentPolicyEnforcer:
         self.valid_paths = valid_paths or set()
         self.valid_methods = valid_methods or {"GET", "POST", "PUT", "PATCH", "DELETE"}
         self.base_urls = base_urls or set()
+        
+        # Initialize PathFixer for fuzzy matching truncated paths
+        self._path_fixer: Optional[PathFixer] = None
+        if self.valid_paths:
+            self._path_fixer = PathFixer(list(self.valid_paths))
         
         # Compile regex patterns
         self._credential_patterns = [
@@ -310,13 +317,20 @@ class ContentPolicyEnforcer:
         return '/'.join(segments)
     
     def _is_valid_path(self, path: str) -> bool:
-        """Check if a path matches any valid path (with pattern matching)."""
+        """Check if a path matches any valid path (with pattern matching and fuzzy matching)."""
         if path in self.valid_paths:
             return True
         
         # Try matching with path parameter wildcards
         for valid_path in self.valid_paths:
             if self._paths_match(path, valid_path):
+                return True
+        
+        # Try fuzzy matching for truncated paths (e.g., /ChannelSenders -> /v1/Services/{ServiceSid}/ChannelSenders)
+        if self._path_fixer:
+            best_match, confidence = self._path_fixer._find_best_match(path)
+            if best_match and confidence >= 0.65:
+                logger.debug(f"Fuzzy path match: '{path}' -> '{best_match}' (confidence: {confidence:.2f})")
                 return True
         
         return False

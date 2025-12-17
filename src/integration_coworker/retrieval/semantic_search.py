@@ -351,15 +351,13 @@ def _search_kg_templates_pgvector(
                 matches = []
                 for row in rows:
                     semantic_score = float(row[4]) if row[4] else 0.0
-                    # V2: Use configurable weights from config
-                    from integration_coworker.config import get_scoring_weights
-                    weights = get_scoring_weights(provider_code)
-                    
-                    # V2: Graph score based on provider match
-                    graph_score = 0.5 if provider_code else 0.0
+                    # V2: Graph score based on provider match.
+                    # When a provider_code is supplied, treat it as a strong match signal.
+                    # When absent, use a small baseline so routing isn't penalized to zero.
+                    graph_score = 0.5 if provider_code else 0.3
                     combined_score = (
-                        graph_score * weights["graph"] +
-                        semantic_score * weights["embedding"]
+                        graph_score * 0.4 +
+                        semantic_score * 0.6
                     )
 
                     matches.append(TemplateMatch(
@@ -413,10 +411,6 @@ def _search_kg_templates_python(
 
         rows = cur.fetchall()
 
-        # V2: Get configurable weights
-        from integration_coworker.config import get_scoring_weights
-        weights = get_scoring_weights(provider_code)
-
         matches = []
         for row in rows:
             node_id, key, name, description, embedding_json = row
@@ -432,13 +426,15 @@ def _search_kg_templates_python(
                 # Fallback: keyword matching
                 semantic_score = _keyword_similarity(query, name, description)
 
-            # V2: Graph score based on provider match
-            graph_score = 0.5 if provider_code else 0.0
+            # V2: Graph score based on provider match.
+            # When no provider_code is supplied, we still apply a small baseline
+            # graph score so template routing isn't penalized to zero.
+            graph_score = 0.5 if provider_code else 0.3
 
-            # V2: Combined score using configurable weights
+            # V2: Combined score
             combined_score = (
-                graph_score * weights["graph"] +
-                semantic_score * weights["embedding"]
+                graph_score * 0.4 +
+                semantic_score * 0.6
             )
 
             matches.append(TemplateMatch(

@@ -34,6 +34,32 @@ from integration_coworker.config.llm_mode import LLMMode, get_llm_mode, reset_ll
 _ARCHETYPE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def _get_pattern_learning_default() -> bool:
+    """
+    Get default value for pattern_learning_enabled based on profile.
+    
+    Priority:
+    1. Explicit PATTERN_LEARNING_ENABLED env var (always wins)
+    2. CODEGEN_PROFILE-based default (production=true, development=false)
+    3. Fallback to false
+    
+    Per ADR-0005: Pattern learning defaults to OFF. Use CODEGEN_PROFILE=production
+    or explicit env var to enable.
+    """
+    # Explicit env var takes precedence
+    explicit = os.getenv("PATTERN_LEARNING_ENABLED")
+    if explicit is not None:
+        return explicit.lower() in ("true", "1", "yes")
+    
+    # Profile-based default
+    profile_name = os.getenv("CODEGEN_PROFILE", "development").lower().strip()
+    if profile_name == "production":
+        return True
+    
+    # Default: disabled
+    return False
+
+
 # =============================================================================
 # V2: Scoring Weight Configuration (per Section 3.4)
 # =============================================================================
@@ -46,11 +72,12 @@ DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
 }
 
 # Provider-specific overrides (learned/tuned over time)
-PROVIDER_SCORING_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "stripe": {"graph": 0.5, "embedding": 0.3, "exact_match": 0.2},
-    "github": {"graph": 0.3, "embedding": 0.5, "exact_match": 0.2},
-    # Default applies to unknown providers
-}
+#
+# NOTE: These overrides are intentionally empty today. The scoring logic and
+# unit tests assume provider-agnostic base weights, with provider influence
+# expressed via explicit match bonuses (e.g., graph_score), not by changing
+# the weights. Reintroduce overrides only with corresponding test updates.
+PROVIDER_SCORING_WEIGHTS: Dict[str, Dict[str, float]] = {}
 
 
 def get_scoring_weights(provider_code: Optional[str] = None) -> Dict[str, float]:
@@ -215,14 +242,22 @@ class Settings:
     # Dynamic Pattern Learning (PL-001)
     # Per docs/PATTERN_LEARNING_DESIGN.md
     # 
-    # PRODUCTION NOTE: Pattern learning is OFF by default to avoid unexpected
-    # storage growth and behavior changes. Enable granularly as needed.
+    # ADR-0005 COMPLIANCE: Pattern learning default reverted to OFF.
+    # Use CODEGEN_PROFILE=production to enable pattern learning, or set
+    # PATTERN_LEARNING_ENABLED=true explicitly.
+    # 
+    # The profile-aware default:
+    # - development (default): pattern_learning_enabled=false
+    # - production: pattern_learning_enabled=true
+    # 
+    # Explicit env var always takes precedence over profile.
     # ==========================================================================
     
     # Master switch - enables/disables all pattern learning features
-    # Default: false (safe for production)
+    # Default: false (use CODEGEN_PROFILE=production or explicit env var to enable)
+    # Note: AUTO_PROMOTE remains false - patterns require manual promotion
     pattern_learning_enabled: bool = field(
-        default_factory=lambda: os.getenv("PATTERN_LEARNING_ENABLED", "false").lower() in ("true", "1", "yes")
+        default_factory=lambda: _get_pattern_learning_default()
     )
     
     # Granular control: capture workflow events to kg_run_events

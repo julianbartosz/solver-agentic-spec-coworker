@@ -30,6 +30,7 @@ import operator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Annotated, Dict, List, Optional, Sequence, TypedDict
+from typing import TYPE_CHECKING
 
 from integration_coworker.domain.models import (
     SourceSystem,
@@ -51,10 +52,17 @@ from integration_coworker.domain.models import (
     CodeArtifact,
     SpecChunkEmbedding,
     WorkflowTemplate,
+    # File Integration V1
+    FileSpec,
+    FileField,
+    RecordLayout,
+    FileValidationRule,
 )
 from integration_coworker.repo.models import RepoProfile, RepoChangeSet, RepoSnapshot
 from integration_coworker.api.types import IntegrationOptions
 
+if TYPE_CHECKING:  # pragma: no cover
+    from integration_coworker.graph.state import WorkflowState
 
 # =============================================================================
 # Custom Reducers for Parallel Execution
@@ -161,6 +169,22 @@ class WorkflowStateDict(TypedDict, total=False):
     entities: Annotated[List[Entity], last_non_none]
     relationships: Annotated[List[EntityRelationship], last_non_none]
     events: Annotated[List[Event], last_non_none]
+
+    # File Integration V1 (Silver layer - parallel to API model)
+    # NOTE: When PARALLEL_WORKFLOW=true, LangGraph executes multiple branches
+    # off the same source node in the same "step".
+    #
+    # Even if a branch doesn't *logically* change these fields, the dataclass
+    # -> dict conversion can still include them with default values.
+    # Without explicit reducers, LangGraph can treat that as multiple updates
+    # to the same key in one step and raise INVALID_CONCURRENT_GRAPH_UPDATE.
+    #
+    # These are generally set once (by build_silver_file_model) and should be
+    # carried forward unchanged — so last_non_none is the intended semantics.
+    file_specs: Annotated[List[FileSpec], last_non_none]
+    file_fields: Annotated[List[FileField], last_non_none]
+    record_layouts: Annotated[List[RecordLayout], last_non_none]
+    file_validation_rules: Annotated[List[FileValidationRule], last_non_none]
     
     # Embeddings - populated by embed_spec_chunks (parallel branch)
     spec_chunk_embeddings: Annotated[List[SpecChunkEmbedding], operator.add]
@@ -197,7 +221,7 @@ class WorkflowStateDict(TypedDict, total=False):
     
     # Multi-spec support
     pending_specs: Annotated[List[Dict[str, Any]], last_non_none]
-    parsed_specs: Annotated[List[Dict[str, Any]], last_non_none]
+    parsed_specs: Annotated[List[Any], last_non_none]
     
     # Degraded mode tracking
     degraded_mode: Annotated[bool, last_non_none]
@@ -227,26 +251,93 @@ class WorkflowStateDict(TypedDict, total=False):
 # Conversion Functions
 # =============================================================================
 
-def dataclass_to_dict(state: "WorkflowState") -> WorkflowStateDict:
+# Fields to exclude from dict representation for tracing/checkpointing
+# These are large (7MB+) fields that cause LangSmith payload limits (200MB) to be exceeded
+# Bug #49 fix: Exclude raw spec content from traced state
+_LARGE_FIELDS_TO_EXCLUDE_FROM_TRACING = {
+    "openapi_spec",       # Raw OpenAPI dict (7MB+ for Stripe)
+    "raw_spec_content",   # Raw spec text/bytes
+    "spec_sections",      # Parsed sections from spec
+}
+
+# Max string length for traced fields (prevents LangSmith payload bloat)
+_MAX_TRACED_STRING_LENGTH = 50_000  # 50KB per string field
+
+
+def dataclass_to_dict(
+    state: "WorkflowState",
+    exclude_large_fields: bool = True,
+) -> WorkflowStateDict:
     """
     Convert dataclass WorkflowState to TypedDict for LangGraph parallel execution.
     
     Args:
         state: Dataclass-based WorkflowState
+        exclude_large_fields: If True, excludes large fields like openapi_spec
+            to prevent LangSmith payload size issues. Default True.
         
     Returns:
         WorkflowStateDict compatible with parallel LangGraph execution
+        
+    Bug #49 fix: When exclude_large_fields=True (default), large fields like
+    openapi_spec, raw_spec_content, and spec_sections are replaced with
+    placeholder strings to prevent LangSmith's 200MB payload limit from being
+    exceeded. The original state is preserved - only the dict representation
+    for tracing is modified.
     """
-    from dataclasses import asdict, fields
-    
-    result = {}
+    from dataclasses import dataclass, fields, MISSING
+
+    # Construct a "default" instance so we can omit values that are just
+    # defaults (important for LangGraph parallel branches to avoid emitting
+    # redundant updates for fields the node didn't touch).
+    default_state = None
+    try:
+        default_state = state.__class__(source_refs=[], spec_refs=[], task_description="")
+    except Exception:
+        default_state = None
+
+    def _is_default_value(field_name: str, value: Any) -> bool:
+        if default_state is None:
+            return False
+        try:
+            return getattr(default_state, field_name) == value
+        except Exception:
+            return False
+
+    def _truncate_for_tracing(value: Any) -> Any:
+        """Truncate large strings/dicts for tracing."""
+        if isinstance(value, str) and len(value) > _MAX_TRACED_STRING_LENGTH:
+            return value[:_MAX_TRACED_STRING_LENGTH] + f"... [truncated, {len(value)} chars total]"
+        return value
+
+    result: WorkflowStateDict = {}
     for f in fields(state):
         value = getattr(state, f.name)
+
+        # Skip fields that are exactly default values; reducers can still handle
+        # them if present, but omitting reduces parallel "same-key" updates.
+        if _is_default_value(f.name, value):
+            continue
+
+        # Bug #49 fix: Exclude large fields from tracing to avoid LangSmith payload limits
+        if exclude_large_fields and f.name in _LARGE_FIELDS_TO_EXCLUDE_FROM_TRACING:
+            if value is not None:
+                # Include a placeholder so we know the field was present
+                size_hint = ""
+                if isinstance(value, str):
+                    size_hint = f" ({len(value)} chars)"
+                elif isinstance(value, (dict, list)):
+                    size_hint = f" ({len(value)} items)"
+                result[f.name] = f"<excluded from trace{size_hint}>"
+            continue
+
         # Convert Path to string for JSON serialization
         if isinstance(value, Path):
             result[f.name] = str(value)
         else:
-            result[f.name] = value
+            # Truncate large strings for tracing
+            result[f.name] = _truncate_for_tracing(value)
+
     return result
 
 

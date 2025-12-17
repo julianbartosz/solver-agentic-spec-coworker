@@ -249,25 +249,35 @@ def persist_results(state: WorkflowState) -> WorkflowState:
                 if target_ops and len(target_ops) > 0:
                     # Use first target operation to find matching endpoint
                     op = target_ops[0]
-                    operation_id = op.get("operation_id")
-                    method = op.get("method")
-                    path = op.get("path")
-                    # Fix MULTI-001: Include provider in lookup
-                    op_provider = op.get("provider_code") or provider_code
+                    
+                    # Bug #16 fix: LLM may return target_operations as strings instead of dicts
+                    if isinstance(op, str):
+                        # op is the operation_id directly
+                        for key, ep_id in endpoint_ids_by_key.items():
+                            ep_provider, ep_method, ep_path, ep_op_id = key
+                            if ep_op_id == op or op in ep_path:
+                                endpoint_id = ep_id
+                                break
+                    elif isinstance(op, dict):
+                        operation_id = op.get("operation_id")
+                        method = op.get("method")
+                        path = op.get("path")
+                        # Fix MULTI-001: Include provider in lookup
+                        op_provider = op.get("provider_code") or provider_code
 
-                    # Try to find by qualified key first (provider + operation_id)
-                    # Then fall back to method+path matching within same provider
-                    for key, ep_id in endpoint_ids_by_key.items():
-                        ep_provider, ep_method, ep_path, ep_op_id = key
-                        # Match provider first
-                        if op_provider and ep_provider != op_provider.lower():
-                            continue
-                        if operation_id and ep_op_id == operation_id:
-                            endpoint_id = ep_id
-                            break
-                        elif method and path and ep_method == method.upper() and ep_path == path:
-                            endpoint_id = ep_id
-                            break
+                        # Try to find by qualified key first (provider + operation_id)
+                        # Then fall back to method+path matching within same provider
+                        for key, ep_id in endpoint_ids_by_key.items():
+                            ep_provider, ep_method, ep_path, ep_op_id = key
+                            # Match provider first
+                            if op_provider and ep_provider != op_provider.lower():
+                                continue
+                            if operation_id and ep_op_id == operation_id:
+                                endpoint_id = ep_id
+                                break
+                            elif method and path and ep_method == method.upper() and ep_path == path:
+                                endpoint_id = ep_id
+                                break
 
             # Serialize mappings to JSON
             request_json = json.dumps(binding.request_mapping or {})

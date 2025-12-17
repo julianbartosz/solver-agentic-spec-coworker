@@ -62,6 +62,14 @@ from integration_coworker.codegen.validation_codegen import (
     generate_python_code,
     generate_pydantic_model,
 )
+from integration_coworker.codegen.semantic_validator import (
+    SemanticIssue,
+    validate_semantic_correctness,
+    validate_imports,
+    validate_class_signature,
+    validate_function_exists,
+    format_semantic_issues,
+)
 
 __all__ = [
     # Context (single source of truth)
@@ -113,4 +121,11 @@ __all__ = [
     "generate_file_validator",
     "generate_python_code",
     "generate_pydantic_model",
+    # Semantic validation (code quality)
+    "SemanticIssue",
+    "validate_semantic_correctness",
+    "validate_imports",
+    "validate_class_signature",
+    "validate_function_exists",
+    "format_semantic_issues",
 ]

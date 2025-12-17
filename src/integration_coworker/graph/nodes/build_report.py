@@ -136,8 +136,12 @@ def _add_what_i_did_section(lines: list, state: WorkflowState) -> None:
         if state.schemas:
             schema_names = [s.name for s in state.schemas[:3]]
             details.append(f"{len(state.schemas)} data models ({', '.join(schema_names)}{'...' if len(state.schemas) > 3 else ''})")
-        if state.openapi_spec:
-            spec_version = state.openapi_spec.get("openapi", state.openapi_spec.get("swagger", "unknown"))
+        
+        # Safely get openapi_spec as dict
+        from integration_coworker.codegen.paths import get_openapi_spec_dict
+        spec = get_openapi_spec_dict(state)
+        if spec:
+            spec_version = spec.get("openapi", spec.get("swagger", "unknown"))
             details.append(f"Identified as OpenAPI {spec_version}")
         
         for detail in details:
@@ -401,6 +405,22 @@ async def build_report(state: WorkflowState) -> WorkflowState:
         for artifact in state.code_artifacts:
             lines.append(f"  - `{artifact.rel_path}` ({artifact.artifact_type}, {artifact.language})")
     lines.append("")
+
+    # Sandbox validation results
+    if state.sandbox_result:
+        lines.append("## 🧪 Sandbox Validation")
+        sr = state.sandbox_result
+        status = "✅ PASSED" if sr.get("success") else "❌ FAILED"
+        lines.append(f"**Status**: {status}")
+        lines.append(f"**Summary**: {sr.get('summary', 'No summary')}")
+        lines.append("")
+        if sr.get("gates"):
+            lines.append("### Gate Results:")
+            for gate in sr["gates"]:
+                gate_status = "✅" if gate.get("passed") else "❌"
+                duration = gate.get("duration_ms", 0)
+                lines.append(f"  - {gate_status} **{gate.get('name', 'unknown')}** ({duration}ms)")
+        lines.append("")
 
     # Repo integration
     if state.repo_changes:

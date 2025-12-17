@@ -64,10 +64,38 @@ _sqlite_checkpointer_cache_enabled = False
 
 
 def _default_db_url() -> str:
-    return os.getenv(
+    """
+    Get the database URL with connection keepalive settings.
+    
+    Bug fix: Long-running workflows caused "connection is closed" errors because
+    PostgreSQL connections timed out. This adds TCP keepalive parameters to
+    prevent connection drops during long operations.
+    
+    Keepalive settings:
+    - keepalives=1: Enable TCP keepalives
+    - keepalives_idle=60: Start keepalive probes after 60s idle
+    - keepalives_interval=10: Send probes every 10s
+    - keepalives_count=5: Consider connection dead after 5 failed probes
+    - connect_timeout=10: Initial connection timeout
+    """
+    base_url = os.getenv(
         "DATABASE_URL",
         "postgresql://integration:integration@localhost:5432/integration_coworker",
     )
+    
+    # Add keepalive parameters if not already present
+    if "keepalives" not in base_url:
+        separator = "&" if "?" in base_url else "?"
+        keepalive_params = (
+            f"{separator}keepalives=1"
+            "&keepalives_idle=60"
+            "&keepalives_interval=10"
+            "&keepalives_count=5"
+            "&connect_timeout=10"
+        )
+        return base_url + keepalive_params
+    
+    return base_url
 
 
 def _sqlite_checkpoint_path() -> str:

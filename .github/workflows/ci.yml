@@ -35,7 +35,8 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        ruff check src/integration_coworker tests || true
+        # ADR-0005: Ruff is now a HARD gate - CI fails on lint errors
+        ruff check src/integration_coworker tests
 
     - name: Run tests with pytest
       run: |

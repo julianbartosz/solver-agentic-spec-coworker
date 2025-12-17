@@ -382,19 +382,73 @@ class PathFixer:
                     valid_resource.lower()
                 ).ratio()
             
-            # Combined score with weights
-            # String similarity: 30%
-            # Segment matching: 35%
-            # Prefix match: 15%
-            # Resource name: 20%
-            combined_score = (
-                0.30 * string_score +
-                0.35 * segment_score +
-                0.15 * prefix_score +
-                0.20 * resource_score
+            # 5. Suffix match bonus - if last segments match, strong signal
+            # This handles truncated paths like /ChannelSenders matching 
+            # /v1/Services/{ServiceSid}/ChannelSenders
+            suffix_score = 0.0
+            path_last_seg = self._extract_last_resource_segment(path)
+            valid_last_seg = self._extract_last_resource_segment(valid_path)
+            if path_last_seg and valid_last_seg:
+                if path_last_seg.lower() == valid_last_seg.lower():
+                    suffix_score = 1.0  # Perfect match
+                else:
+                    suffix_score = SequenceMatcher(
+                        None,
+                        path_last_seg.lower(),
+                        valid_last_seg.lower()
+                    ).ratio()
+            
+            # Truncation detection - if hallucinated path is short (1-2 segs)
+            # but suffix matches exactly, this is likely a truncated path.
+            # IMPORTANT: We should NOT treat "/v2/messages" as truncated just
+            # because it's short - it has a version prefix so it's a "real" path.
+            # A truncated path is one missing the prefix entirely, like "/ChannelSenders"
+            has_version_prefix = bool(
+                re.match(r'^/v\d+/', path, re.IGNORECASE)
+            )
+            is_truncated = (
+                not has_version_prefix and
+                len(path_segments) <= 2 and 
+                len(valid_segments) > len(path_segments) and
+                suffix_score == 1.0
             )
             
-            if combined_score > best_score:
+            # Combined score with weights
+            if is_truncated:
+                # For truncated paths with exact suffix match, boost confidence
+                # Minimum 0.70 ensures we fix truncated paths
+                combined_score = max(
+                    0.70,  # Minimum for truncated + exact suffix match
+                    0.15 * string_score +
+                    0.15 * segment_score +
+                    0.05 * prefix_score +
+                    0.15 * resource_score +
+                    0.50 * suffix_score  # Heavy suffix weight
+                )
+            else:
+                # Standard weighting
+                # String similarity: 20%
+                # Segment matching: 25%
+                # Prefix match: 10%
+                # Resource name: 15%
+                # Suffix match: 30%
+                combined_score = (
+                    0.20 * string_score +
+                    0.25 * segment_score +
+                    0.10 * prefix_score +
+                    0.15 * resource_score +
+                    0.30 * suffix_score
+                )
+            
+            # Tie-breaker: when scores are very close, prefer paths with
+            # similar segment count to the input (more likely correct match)
+            if combined_score > best_score or (
+                combined_score > best_score - 0.05 and
+                combined_score >= 0.65 and
+                best_path and
+                abs(len(valid_segments) - len(path_segments)) < 
+                abs(len([s for s in best_path.split('/') if s]) - len(path_segments))
+            ):
                 best_score = combined_score
                 best_path = valid_path
         
@@ -410,6 +464,18 @@ class PathFixer:
         # Return first remaining segment (the resource)
         return segments[0] if segments else None
     
+    def _extract_last_resource_segment(self, path: str) -> Optional[str]:
+        """
+        Extract the last non-parameter segment from a path.
+        
+        This helps match truncated paths like /ChannelSenders to
+        /v1/Services/{ServiceSid}/ChannelSenders.
+        """
+        segments = [s for s in path.split('/') if s and not s.startswith('{')]
+        
+        # Return last non-parameter segment
+        return segments[-1] if segments else None
+
     def _apply_replacements(
         self,
         code: str,

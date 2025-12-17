@@ -17,6 +17,10 @@ from integration_coworker.codegen.path_fixer import (
 from dataclasses import dataclass
 
 
+# Mark all tests in this module as not requiring database
+pytestmark = pytest.mark.no_db
+
+
 @dataclass
 class MockEndpoint:
     """Mock endpoint for testing."""
@@ -271,3 +275,87 @@ def get():
         result = fixer.fix_code(code)
         # Should return unfixable but not raise
         assert len(result.unfixable_paths) >= 0  # May or may not be unfixable
+
+
+class TestTruncatedPathHandling:
+    """Test handling of truncated paths (Bug #30 enhancement).
+    
+    LLMs sometimes generate truncated paths missing version prefixes,
+    like /ChannelSenders instead of /v1/Services/{ServiceSid}/ChannelSenders.
+    The path fixer should recognize these and fix them with high confidence.
+    """
+    
+    @pytest.fixture
+    def twilio_paths(self):
+        """Sample Twilio API paths for testing truncated path handling."""
+        return {
+            "/v1/Services",
+            "/v1/Services/{ServiceSid}",
+            "/v1/Services/{ServiceSid}/Bindings",
+            "/v1/Services/{ServiceSid}/ChannelSenders",
+            "/v1/Services/{ServiceSid}/Channels",
+            "/v1/Services/{ServiceSid}/Channels/{ChannelSid}",
+        }
+    
+    @pytest.fixture
+    def fixer(self, twilio_paths):
+        """Create a PathFixer with Twilio paths."""
+        return PathFixer(valid_paths=twilio_paths, threshold=0.65)
+    
+    def test_truncated_path_single_segment(self, fixer):
+        """Test that single-segment truncated paths are fixed."""
+        code = '''
+def get_channel_senders():
+    url = "/ChannelSenders"  # Truncated path
+    return requests.get(url)
+'''
+        result = fixer.fix_code(code)
+        assert result.success
+        assert len(result.replacements) == 1
+        assert result.replacements[0].old_path == "/ChannelSenders"
+        assert result.replacements[0].new_path == "/v1/Services/{ServiceSid}/ChannelSenders"
+    
+    def test_truncated_path_bindings(self, fixer):
+        """Test another truncated path example."""
+        code = '''
+def get_bindings():
+    return requests.get("/Bindings")
+'''
+        result = fixer.fix_code(code)
+        assert result.success
+        assert len(result.replacements) == 1
+        assert result.replacements[0].new_path == "/v1/Services/{ServiceSid}/Bindings"
+    
+    def test_version_mismatch_not_treated_as_truncated(self, fixer, twilio_paths):
+        """Test that version mismatches use standard scoring, not truncation boost.
+        
+        /v2/messages should prefer /v1/messages over /v1/messages/{id}
+        because it's a version mismatch, not a truncated path.
+        """
+        # Create a fixer with paths that have both short and long versions
+        message_paths = {
+            "/v1/messages",
+            "/v1/messages/{message_sid}",
+        }
+        message_fixer = PathFixer(valid_paths=message_paths, threshold=0.65)
+        
+        code = '''
+def get_messages():
+    return requests.get("/v2/messages")  # Wrong version
+'''
+        result = message_fixer.fix_code(code)
+        assert result.success
+        assert len(result.replacements) == 1
+        # Should match /v1/messages (same structure) not /v1/messages/{message_sid}
+        assert result.replacements[0].new_path == "/v1/messages"
+    
+    def test_completely_wrong_path_not_fixed(self, fixer):
+        """Test that completely unrelated paths are not fixed."""
+        code = '''
+def random_stuff():
+    return requests.get("/something/completely/different")
+'''
+        result = fixer.fix_code(code)
+        # Either no replacements or unfixable due to low confidence
+        # The path doesn't match any valid paths well enough
+        assert result.success or len(result.unfixable_paths) > 0

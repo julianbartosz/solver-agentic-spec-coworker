@@ -13,17 +13,26 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
 |---|---|---|---|
 | docs/ARCHITECTURE.md | — | Architecture | supporting | 2025-12-16, 40160B, in0, out1, nav:no |
 | docs/GETTING_STARTED.md | GETTING_STARTED.md | Ops Runbook: Getting Started | authoritative | 2025-12-16, 11053B, in0, out3, nav:yes |
+| docs/PRODUCTION_VALIDATION_MATRIX.md | — | Production Validation Matrix Report | supporting | 2025-12-16, 6398B, in0, out0, nav:no |
 | docs/api-reference/entrypoint.md | api-reference/entrypoint.md | Entrypoint API | authoritative | 2025-12-09, 3356B, in3, out2, nav:yes |
 | docs/api-reference/types.md | api-reference/types.md | Types | authoritative | 2025-12-09, 4263B, in2, out2, nav:yes |
 | docs/api-reference/workflow-state.md | api-reference/workflow-state.md | WorkflowState | authoritative | 2025-12-09, 5201B, in2, out2, nav:yes |
 | docs/development/DOCS_CONTENT_REFACTOR_PLAN.md | — | DOCS CONTENT REFACTOR PLAN (v1) | supporting | 2025-12-16, 12730B, in0, out0, nav:no |
 | docs/development/DOCS_SLIMDOWN_PLAN.md | — | DOCS SLIMDOWN PLAN (v1) | supporting | 2025-12-16, 8796B, in0, out0, nav:no |
+| docs/development/PROD_BUG_LOG.md | — | Production Bug Log | supporting | 2025-12-16, 16525B, in0, out0, nav:no |
+| docs/development/PROD_FINAL_STEPS_CHECKLIST.md | — | Production Readiness — Final Steps Checklist (commands + expected results) | supporting | 2025-12-16, 2734B, in0, out0, nav:no |
+| docs/development/PROD_IMPLEMENTATION_PLAN.md | — | Production Readiness — Implementation Plan (no-interpretation) | supporting | 2025-12-16, 6443B, in0, out0, nav:no |
+| docs/development/PROD_READINESS_CURRENT_STATE.md | — | Production Readiness — Current State (evidence-backed) | supporting | 2025-12-16, 5098B, in0, out0, nav:no |
+| docs/development/PROD_READINESS_GAPS_AND_OPTIONS.md | — | Production Readiness — Gaps and Options (evidence-backed) | supporting | 2025-12-16, 4417B, in0, out0, nav:no |
+| docs/development/V1_PROD_READINESS_AUDIT.md | — | V1 Production Readiness Audit (evidence-first) | supporting | 2025-12-16, 11130B, in0, out0, nav:no |
+| docs/development/V1_PROD_READINESS_BACKLOG.md | — | V1 Production Readiness Backlog (evidence-first) | supporting | 2025-12-16, 21071B, in0, out0, nav:no |
+| docs/development/V2_PROD_READINESS_PLAN.md | — | V2 Production Readiness Plan (evidence-first) | supporting | 2025-12-16, 6596B, in0, out0, nav:no |
 | docs/development/architecture.md | development/architecture.md | Architecture Reference | authoritative | 2025-12-09, 7007B, in4, out2, nav:yes |
 | docs/development/changelog.md | development/changelog.md | Changelog | authoritative | 2025-12-09, 1841B, in1, out1, nav:yes |
 | docs/development/code-tour.md | development/code-tour.md | Code Tour | authoritative | 2025-12-09, 5575B, in2, out2, nav:yes |
 | docs/development/contributing.md | development/contributing.md | Contributing | authoritative | 2025-12-09, 3474B, in2, out2, nav:yes |
 | docs/development/dependency_bumps.md | development/dependency_bumps.md | Dependency bump playbook (docs tooling) | authoritative | 2025-12-16, 2124B, in0, out0, nav:yes |
-| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 16939B, in0, out0, nav:yes |
+| docs/development/docs_audit_deliverable.md | development/docs_audit_deliverable.md | Docs audit deliverable (read-only) | authoritative | 2025-12-16, 18413B, in0, out0, nav:yes |
 | docs/development/docs_tooling.md | development/docs_tooling.md | Docs tooling | authoritative | 2025-12-16, 1075B, in0, out0, nav:yes |
 | docs/development/maintenance.md | development/maintenance.md | Maintenance + Historical Notes | authoritative | 2025-12-16, 2659B, in0, out1, nav:yes |
 | docs/development/testing.md | development/testing.md | Testing Guide | authoritative | 2025-12-09, 5180B, in2, out2, nav:yes |
@@ -94,6 +103,7 @@ This deliverable is now generated reproducibly from the repo (no `/tmp`). Invent
   - Contributing files:
     - docs/ARCHITECTURE.md
     - docs/GETTING_STARTED.md
+    - docs/PRODUCTION_VALIDATION_MATRIX.md
     - docs/gen_cli_reference.py
     - docs/operations/db-postgres.md
     - docs/operations/deployment.md

@@ -10,6 +10,22 @@ Supports:
 - Real LLM calls (set OPENAI_API_KEY) or mock mode (USE_MOCK_LLM=true)
 - Verbose mode for debugging (--verbose or -v)
 """
+# ============================================================================
+# EARLY LOGGING SUPPRESSION
+# Must happen before any imports that might trigger psycopg_pool loading
+# ============================================================================
+import logging as _early_logging
+# Suppress noisy psycopg_pool "rolling back returned connection" warnings
+# These occur with normal pool usage when connections are returned in transaction
+# Note: The actual logger name is "psycopg.pool" (not "psycopg_pool")
+_early_logging.getLogger("psycopg.pool").setLevel(_early_logging.CRITICAL)
+_early_logging.getLogger("psycopg_pool").setLevel(_early_logging.CRITICAL)
+_early_logging.getLogger("psycopg_pool.sched").setLevel(_early_logging.CRITICAL)
+_early_logging.getLogger("psycopg_pool.sched_async").setLevel(_early_logging.CRITICAL)
+# Also suppress psycopg noise
+_early_logging.getLogger("psycopg").setLevel(_early_logging.WARNING)
+# ============================================================================
+
 import typer
 import json
 import logging

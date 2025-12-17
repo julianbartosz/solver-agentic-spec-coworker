@@ -1,0 +1,14 @@
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+# BEGIN AUTO-GENERATED INTEGRATION ROUTES
+from workflows.github_get_repository_info import get_repository_info_flow as flow_module
+
+router.include_router(
+    flow_module.router if hasattr(flow_module, 'router') else APIRouter(),
+    prefix="/integrations/github/get_repository_info",
+    tags=["github"],
+)
+# END AUTO-GENERATED INTEGRATION ROUTES

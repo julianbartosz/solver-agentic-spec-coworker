@@ -123,6 +123,10 @@ class WorkflowState:
     # Node timing tracking (for observability - shows non-LLM nodes do work)
     node_timings: Dict[str, float] = field(default_factory=dict)
 
+    # Sandbox validation results (for observability - shows code quality gates)
+    # Set by generate_code_and_tests after running sandbox execution
+    sandbox_result: Optional[Dict[str, Any]] = field(default=None)
+
     # V4 Observability: LLM token usage tracking
     # Aggregated across all LLM calls in this run
     llm_token_usage: Dict[str, int] = field(default_factory=lambda: {
