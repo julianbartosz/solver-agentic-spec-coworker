@@ -1,0 +1,40 @@
+# Repo Config Inference Archetype
+# Used for inferring .integration-coworker.yaml configuration from repo structure
+# Per ADR-0002 Phase 2: LLM-based repo analysis when no config file exists
+
+version: "1.0"
+
+# Model configuration for repo structure analysis
+# Uses smaller, faster model since this is single-shot inference
+model:
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.0  # Deterministic for consistent YAML generation
+  max_tokens: 2048
+
+# Prompting configuration
+prompting:
+  format: yaml  # Output is YAML config, not TOON
+  strategy: repo_analysis
+  system_prompt: |
+    You are an expert at analyzing code repositories and determining
+    appropriate file structures. Generate precise, valid YAML configurations.
+
+# No retrieval needed - context is provided directly
+retrieval:
+  top_k: 0
+  graph_radius: 0
+  token_budget: 0
+
+# Single-shot inference
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+# Metadata
+metadata:
+  version: "1.0"
+  trace_enabled: true
+  tags:
+    - repo_analysis
+    - config_inference

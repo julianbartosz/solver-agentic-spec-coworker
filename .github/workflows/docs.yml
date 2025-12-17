@@ -1,0 +1,95 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'src/integration_coworker/docs_plugins/**'
+      - 'scripts/docs_audit.py'
+      - 'tests/test_mkdocs.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'requirements.lock.txt'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'src/integration_coworker/docs_plugins/**'
+      - 'scripts/docs_audit.py'
+      - 'tests/test_mkdocs.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'requirements.lock.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify MkDocs (strict)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install package + docs deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[docs]"
+      
+      - name: mkdocs build --strict
+        run: mkdocs build --strict
+
+      - name: pytest (mkdocs invariants)
+        run: python -m pytest tests/test_mkdocs.py -q
+
+      - name: docs audit generator
+        run: python scripts/docs_audit.py
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install package + docs deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[docs]"
+
+      - name: Generate CLI docs
+        run: |
+          python docs/gen_cli_reference.py
+
+      - name: Build documentation
+        run: mkdocs build --strict
+
+      - name: Deploy to GitHub Pages
+        run: mkdocs gh-deploy --force

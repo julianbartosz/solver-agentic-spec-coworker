@@ -1,0 +1,88 @@
+# Generate Code and Tests Node Archetype
+# Generates integration code from workflow design
+# Per design doc Section 5.5.1 - Code generation nodes
+
+name: generate_code_and_tests
+role: codegen
+inherits: _base
+
+model:
+  # Claude Sonnet 4.5 for code generation
+  # Change provider/name here to swap models without code changes
+  provider: anthropic
+  name: claude-sonnet-4-5-20250929
+  temperature: 0.15
+  max_tokens: 8192
+
+prompting:
+  strategy: generation
+  num_candidates: 2
+  evaluator: static_checks  # AST validation + expected class/function presence
+  system_template: |
+    You are an expert Python developer specializing in API integrations.
+    Generate clean, production-ready code for API client and workflow implementations.
+    
+    Requirements:
+    1. Follow PEP 8 style guidelines
+    2. Use type hints for all functions and methods
+    3. Include docstrings with parameter descriptions
+    4. Handle errors gracefully with specific exception types
+    5. Use the project's IntegrationHTTPClient for API calls
+    6. Follow the RepoProfile layout hints for file structure
+    
+    Generate:
+    - Client class with methods for each endpoint
+    - Flow function implementing the workflow graph
+    - Test file with pytest fixtures and assertions
+    
+    Output each file in TOON format with file_path and content keys.
+
+retrieval:
+  top_k: 8
+  graph_radius: 1
+  token_budget: 8000
+  sources:
+    - spec_endpoints
+    - spec_schemas
+    - kg_templates
+    - repo_profile
+
+parallelism:
+  num_candidates: 2
+  max_parallel_modules: 3
+
+input_schema:
+  task:
+    type: IntegrationTask
+    description: Structured task
+  flow:
+    type: IntegrationFlow
+    description: Workflow graph design
+  endpoints:
+    type: list[Endpoint]
+    description: Endpoints to implement
+  policies:
+    type: list[Policy]
+    description: Auth, retry, error policies
+  repo_profile:
+    type: RepoProfile
+    optional: true
+    description: Target repo conventions
+
+output_schema:
+  artifacts:
+    type: list[CodeArtifact]
+    description: Generated code files
+    item_schema:
+      artifact_type:
+        type: string
+        enum: [client, flow, test, config]
+      file_path:
+        type: string
+        description: Relative path from repo root
+      content:
+        type: string
+        description: File content
+      language:
+        type: string
+        default: python

@@ -1,0 +1,393 @@
+{
+  "timestamp": "2025-12-16 14:15:30",
+  "profile": "production",
+  "total": 38,
+  "passed": 32,
+  "failed": 6,
+  "duration": 94.68067216873169,
+  "bugs": [
+    {
+      "id": 1,
+      "title": "Exception in codegen_typescript",
+      "severity": "critical",
+      "feature": "codegen"
+    },
+    {
+      "id": 2,
+      "title": "Exception in codegen_go",
+      "severity": "critical",
+      "feature": "codegen"
+    },
+    {
+      "id": 3,
+      "title": "Exception in python_code_quality",
+      "severity": "critical",
+      "feature": "codegen"
+    },
+    {
+      "id": 4,
+      "title": "Exception in parse_petstore",
+      "severity": "critical",
+      "feature": "spec"
+    },
+    {
+      "id": 5,
+      "title": "Exception in parse_stripe",
+      "severity": "critical",
+      "feature": "spec"
+    },
+    {
+      "id": 6,
+      "title": "Exception in parse_github",
+      "severity": "critical",
+      "feature": "spec"
+    }
+  ],
+  "results": [
+    {
+      "name": "postgres_connection",
+      "passed": true,
+      "duration": 0.16370105743408203,
+      "metrics": {
+        "postgres_version": "16.11",
+        "engine_type": "postgres"
+      }
+    },
+    {
+      "name": "ensure_tables_created",
+      "passed": true,
+      "duration": 0.6626100540161133,
+      "metrics": {
+        "table_check": true
+      }
+    },
+    {
+      "name": "db_schemas_exist",
+      "passed": true,
+      "duration": 0.0022699832916259766,
+      "metrics": {
+        "schemas": [
+          "kg",
+          "integration_gold",
+          "spec_silver"
+        ]
+      }
+    },
+    {
+      "name": "pgvector_extension",
+      "passed": true,
+      "duration": 0.0014278888702392578,
+      "metrics": {
+        "pgvector": true
+      }
+    },
+    {
+      "name": "kg_pattern_persistence",
+      "passed": true,
+      "duration": 0.0014700889587402344,
+      "metrics": {
+        "kg_persist": "skipped",
+        "reason": "kg.patterns table not created yet"
+      }
+    },
+    {
+      "name": "llm_basic_call",
+      "passed": true,
+      "duration": 0.039576053619384766,
+      "metrics": {
+        "response_len": 1
+      }
+    },
+    {
+      "name": "llm_code_generation",
+      "passed": true,
+      "duration": 0.0030410289764404297,
+      "metrics": {
+        "code_generated": true
+      }
+    },
+    {
+      "name": "llm_structured_output",
+      "passed": true,
+      "duration": 0.0019838809967041016,
+      "metrics": {
+        "structured_output": true
+      }
+    },
+    {
+      "name": "redis_connection",
+      "passed": true,
+      "duration": 0.0057010650634765625,
+      "metrics": {
+        "redis_version": "7.4.7",
+        "connected_clients": 2
+      }
+    },
+    {
+      "name": "redis_cache_hit",
+      "passed": true,
+      "duration": 0.003259897232055664,
+      "metrics": {
+        "cache_working": true,
+        "hit_count": 1133
+      }
+    },
+    {
+      "name": "llm_cache_integration",
+      "passed": true,
+      "duration": 0.006417989730834961,
+      "metrics": {
+        "llm_cache_integrated": true,
+        "cache_delta": 2
+      }
+    },
+    {
+      "name": "python_repo_detection",
+      "passed": true,
+      "duration": 0.008107900619506836,
+      "metrics": {
+        "detected_language": "python",
+        "profile": "DetectedProfile(archetype_name='unknown', language='python', confidence=0.6599999999999999, evidence=['Found pyproject.toml', 'Found requirements.txt', 'Primary language: python'], detected_paths={'pyproject_toml': '/var/folders/v2/0ztdfcmx26n6zmbjjy1_lq_w0000gn/T/tmpiyh_sjxg/pyproject.toml', 'requirements_txt': '/var/folders/v2/0ztdfcmx26n6zmbjjy1_lq_w0000gn/T/tmpiyh_sjxg/requirements.txt'}, metadata={'framework_hints': [], 'python_deps': ['requests', 'pydantic'], 'node_deps': []})"
+      }
+    },
+    {
+      "name": "typescript_repo_detection",
+      "passed": true,
+      "duration": 0.0009009838104248047,
+      "metrics": {
+        "detected_language": "typescript",
+        "profile": "DetectedProfile(archetype_name='unknown', language='typescript', confidence=0.64, evidence=['Found package.json', 'Primary language: typescript'], detected_paths={'package_json': '/var/folders/v2/0ztdfcmx26n6zmbjjy1_lq_w0000gn/T/tmprq9t6r59/package.json'}, metadata={'framework_hints': [], 'python_deps': [], 'node_deps': ['typescript', 'jest']})"
+      }
+    },
+    {
+      "name": "go_repo_detection",
+      "passed": true,
+      "duration": 0.0007750988006591797,
+      "metrics": {
+        "detected_language": "go",
+        "profile": "DetectedProfile(archetype_name='unknown', language='go', confidence=0.6, evidence=['Primary language: go'], detected_paths={}, metadata={'framework_hints': [], 'python_deps': [], 'node_deps': []})"
+      }
+    },
+    {
+      "name": "monorepo_detection",
+      "passed": true,
+      "duration": 0.0012021064758300781,
+      "metrics": {
+        "detected_type": "javascript",
+        "profile": "DetectedProfile(archetype_name='unknown', language='javascript', confidence=0.6, evidence=['Found package.json', 'Primary language: javascript'], detected_paths={'package_json': '/var/folders/v2/0ztdfcmx26n6zmbjjy1_lq_w0000gn/T/tmpyfh4tef6/package.json'}, metadata={'framework_hints': [], 'python_deps': [], 'node_deps': []})"
+      }
+    },
+    {
+      "name": "codegen_python",
+      "passed": true,
+      "duration": 0.09392404556274414,
+      "metrics": {
+        "available_languages": [
+          "python",
+          "typescript",
+          "tsx",
+          "javascript",
+          "go",
+          "java",
+          "ruby",
+          "csharp",
+          "c_sharp"
+        ],
+        "python_valid": true
+      }
+    },
+    {
+      "name": "codegen_typescript",
+      "passed": false,
+      "duration": 0.0028040409088134766,
+      "metrics": {}
+    },
+    {
+      "name": "codegen_go",
+      "passed": false,
+      "duration": 0.0008749961853027344,
+      "metrics": {}
+    },
+    {
+      "name": "python_code_quality",
+      "passed": false,
+      "duration": 9.298324584960938e-06,
+      "metrics": {}
+    },
+    {
+      "name": "sandbox_config",
+      "passed": true,
+      "duration": 0.0015621185302734375,
+      "metrics": {
+        "config_valid": true
+      }
+    },
+    {
+      "name": "sandbox_execution",
+      "passed": true,
+      "duration": 5.196824073791504,
+      "metrics": {
+        "sandbox_ran": true,
+        "success": false,
+        "gates_passed": 2
+      }
+    },
+    {
+      "name": "sandbox_ruff_gate",
+      "passed": true,
+      "duration": 4.070327043533325,
+      "metrics": {
+        "ruff_checked": true,
+        "passed": false
+      }
+    },
+    {
+      "name": "self_review_models",
+      "passed": true,
+      "duration": 0.003810882568359375,
+      "metrics": {
+        "models_valid": true
+      }
+    },
+    {
+      "name": "self_review_prompt",
+      "passed": true,
+      "duration": 8.821487426757812e-06,
+      "metrics": {
+        "prompt_built": true
+      }
+    },
+    {
+      "name": "kg_persist_module",
+      "passed": true,
+      "duration": 0.005873203277587891,
+      "metrics": {
+        "kg_module_works": true,
+        "node_id": 82616
+      }
+    },
+    {
+      "name": "pattern_discovery",
+      "passed": true,
+      "duration": 0.007367849349975586,
+      "metrics": {
+        "candidate_count": 0,
+        "learned_count": 0
+      }
+    },
+    {
+      "name": "concurrent_llm_calls",
+      "passed": true,
+      "duration": 0.009749889373779297,
+      "metrics": {
+        "parallel_time": 0.01,
+        "sequential_time_2calls": 0.0,
+        "speedup": 0.56
+      }
+    },
+    {
+      "name": "parallel_spec_parsing",
+      "passed": true,
+      "duration": 0.10532402992248535,
+      "metrics": {
+        "specs_parsed": 3,
+        "parallel_time": 0.0
+      }
+    },
+    {
+      "name": "parse_petstore",
+      "passed": false,
+      "duration": 0.027178049087524414,
+      "metrics": {}
+    },
+    {
+      "name": "parse_stripe",
+      "passed": false,
+      "duration": 8.607781171798706,
+      "metrics": {}
+    },
+    {
+      "name": "parse_github",
+      "passed": false,
+      "duration": 10.884246826171875,
+      "metrics": {}
+    },
+    {
+      "name": "checkpoint_save_load",
+      "passed": true,
+      "duration": 0.0017809867858886719,
+      "metrics": {
+        "checkpoint_api_exists": true
+      }
+    },
+    {
+      "name": "completed_nodes",
+      "passed": true,
+      "duration": 0.006985187530517578,
+      "metrics": {
+        "completed_nodes_api": true,
+        "count": 0
+      }
+    },
+    {
+      "name": "production_profile",
+      "passed": true,
+      "duration": 3.695487976074219e-05,
+      "metrics": {
+        "profile": "production",
+        "checks": {
+          "strict_gates": true,
+          "sandbox_enabled": true,
+          "pattern_learning": true,
+          "no_fallback": true,
+          "ruff_strict": true,
+          "coverage_enabled": true,
+          "self_review": true,
+          "fail_on_no_tests": true
+        },
+        "all_correct": true
+      }
+    },
+    {
+      "name": "profile_switching",
+      "passed": true,
+      "duration": 6.9141387939453125e-06,
+      "metrics": {
+        "dev_more_lenient": true,
+        "switch_works": true
+      }
+    },
+    {
+      "name": "minimal_e2e",
+      "passed": true,
+      "duration": 64.72276401519775,
+      "metrics": {
+        "e2e_completed": true,
+        "has_result": true
+      }
+    },
+    {
+      "name": "dangerous_patterns",
+      "passed": true,
+      "duration": 0.00024199485778808594,
+      "metrics": {
+        "detections": {
+          "os.system": true,
+          "eval": true,
+          "subprocess": true,
+          "exec": true
+        },
+        "all_dangerous_detected": true
+      }
+    },
+    {
+      "name": "safe_code_validation",
+      "passed": true,
+      "duration": 0.000102996826171875,
+      "metrics": {
+        "safe_code_issues": 2,
+        "is_safe": false
+      }
+    }
+  ]
+}

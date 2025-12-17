@@ -1,0 +1,63 @@
+# Build Silver API Model Node Archetype
+# Extracts structured API model from spec
+# Per design doc Section 5.5.1 - Extraction nodes
+
+name: build_silver_api_model
+role: extraction
+inherits: _base
+
+model:
+  # Use smaller, faster model for extraction
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.0  # Deterministic extraction
+  max_tokens: 1024
+
+prompting:
+  strategy: extraction
+  hidden_reasoning: true  # Model can reason internally
+  system_template: |
+    You are an API specification parser. Extract structured information
+    from OpenAPI/Swagger specifications into the Silver data model.
+    
+    Extract:
+    - Endpoints with paths, methods, parameters
+    - Schemas with fields and relationships
+    - Entities inferred from schemas
+    - Security schemes
+    
+    Be precise and complete. Output in strict TOON format.
+
+retrieval:
+  top_k: 5
+  graph_radius: 0
+  token_budget: 2000
+  sources:
+    - spec_chunks
+
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+input_schema:
+  spec_content:
+    type: string
+    description: Raw or chunked spec content
+  spec_format:
+    type: string
+    enum: [openapi3, openapi2, asyncapi]
+    description: Specification format
+
+output_schema:
+  endpoints:
+    type: list[Endpoint]
+    description: Extracted endpoints
+  schemas:
+    type: list[Schema]
+    description: Extracted schemas
+  entities:
+    type: list[Entity]
+    description: Inferred entities
+  security_schemes:
+    type: list[SecurityScheme]
+    description: Auth configurations

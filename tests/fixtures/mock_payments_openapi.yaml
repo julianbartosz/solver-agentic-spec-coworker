@@ -1,0 +1,140 @@
+openapi: 3.0.0
+info:
+  title: Mock Payments API
+  version: 1.0.0
+  description: Simplified payment API for testing integration coworker
+
+servers:
+  - url: https://api.mockpayments.example
+    description: Production server
+
+security:
+  - apiKey: []
+
+paths:
+  /v1/checkout/sessions:
+    post:
+      operationId: createCheckoutSession
+      summary: Create a checkout session
+      tags:
+        - checkout
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Unique key for idempotent requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCheckoutSessionRequest'
+      responses:
+        '200':
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutSession'
+        '400':
+          description: Invalid request
+        '401':
+          description: Authentication failed
+
+  /v1/checkout/sessions/{id}:
+    get:
+      operationId: getCheckoutSession
+      summary: Retrieve a checkout session
+      tags:
+        - checkout
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Session ID
+      responses:
+        '200':
+          description: Session retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutSession'
+        '404':
+          description: Session not found
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: API key as "Bearer {key}"
+
+  schemas:
+    CreateCheckoutSessionRequest:
+      type: object
+      required:
+        - amount
+        - currency
+        - success_url
+        - cancel_url
+      properties:
+        amount:
+          type: integer
+          description: Amount in smallest currency unit (e.g. cents)
+          example: 2000
+        currency:
+          type: string
+          description: Three-letter ISO currency code
+          example: usd
+        success_url:
+          type: string
+          format: uri
+          description: URL to redirect on successful payment
+          example: https://example.com/success
+        cancel_url:
+          type: string
+          format: uri
+          description: URL to redirect on cancelled payment
+          example: https://example.com/cancel
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional metadata
+
+    CheckoutSession:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique session identifier
+          example: cs_test_123abc
+        object:
+          type: string
+          enum: [checkout_session]
+        amount:
+          type: integer
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [open, complete, expired]
+        checkout_url:
+          type: string
+          format: uri
+          description: URL to redirect customer for payment
+          example: https://checkout.mockpayments.example/cs_test_123abc
+        success_url:
+          type: string
+        cancel_url:
+          type: string
+        created:
+          type: integer
+          description: Unix timestamp
+        metadata:
+          type: object
+          additionalProperties: true

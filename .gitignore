@@ -3,6 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Local environment (secrets)
+.env
+.env.*
+
+# Local environment helpers
+.envrc
+
+# Local virtual environments
+.venv311/
 # C extensions
 *.so
 
@@ -205,3 +214,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# LangGraph / local checkpoint state
+data/langgraph_checkpoints.db

@@ -2,6 +2,164 @@
 
 This doc explains how prompts, models, and context are structured for the **Agentic API Integration Designer & Code Generator**.
 
+## Getting Started in 5 Minutes
+
+The fastest way to see everything working:
+
+```bash
+# 1. Install dependencies
+pip install -e .
+
+# 2. Run the golden path demo (no API keys needed)
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1
+```
+
+This will show:
+- ✅ Spec ingestion and parsing
+- ✅ Silver API model extraction (endpoints, schemas, entities)
+- ✅ Task understanding and KG alignment
+- ✅ Code generation (client, flow, test)
+- ✅ Per-node timing table
+- ✅ Artifact locations
+
+**With your own spec:**
+```bash
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1 \
+  --openapi ./your-api.yaml \
+  --task "Create order"
+```
+
+**With repo integration (writes files):**
+```bash
+USE_SQLITE=true USE_MOCK_LLM=true python -m integration_coworker demo-v1 \
+  --openapi ./your-api.yaml \
+  --task "Create order" \
+  --repo ./my-project \
+  --persist
+```
+
+**For production use (real LLM):**
+```bash
+export OPENAI_API_KEY=your-key
+export DATABASE_URL=postgresql://user:pass@localhost/db
+python -m integration_coworker demo-v1 --persist
+```
+
+---
+
+## Phase 2 Demo (Current Milestone)
+
+The Phase 2 vertical slice demonstrates a complete end-to-end workflow for the **mock_payments** provider with the **"Create checkout session"** task.
+
+### Running the Demo
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --dry-run
+```
+
+**Optional: With repository integration:**
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --repo-root /path/to/your/fastapi-repo \
+  --repo-profile subatomic_mock
+```
+
+### What to Expect
+
+After running the demo, you will see:
+
+- **Comprehensive Markdown Report** including:
+  - Spec ingestion details (1 document, 5 chunks)
+  - Silver model extraction (2 endpoints, schemas, fields)
+  - Integration workflow (4 nodes: validate → call → transform → return)
+  - Policy summary (5 policies: AUTH, RETRY, LOGGING, IDEMPOTENCY, RATE_LIMIT)
+  - Generated code artifacts (3 files: client, flow, test)
+
+- **Code Artifacts Generated**:
+  - `integrations/clients/mock_payments.py` - MockPaymentsClient class
+  - `integrations/flows/mock_payments_checkout.py` - Checkout flow orchestration
+  - `tests/integrations/test_mock_payments_checkout.py` - pytest tests
+
+- **Repository Changes**:
+  - In `--dry-run` mode: Summary of what would be created/updated
+  - Without `--dry-run`: Actual files written to repo with proper directory structure
+
+- **Exit Status**:
+  - `0` on success (all nodes completed, no critical errors)
+  - Non-zero on failure (spec not found, parsing errors, validation failures)
+
+### JSON Output Mode
+
+For automation and CI integration:
+
+```bash
+PYTHONPATH=src python -m integration_coworker.cli \
+  --spec-ref tests/fixtures/mock_payments_openapi.yaml \
+  --task "Create checkout session" \
+  --dry-run \
+  --json-output
+```
+
+This outputs a valid JSON `IntegrationResult` to stdout with all debug logs suppressed or sent to stderr.
+
+### Testing the Vertical Slice
+
+Install test extras and run the suite locally:
+
+```bash
+python -m pip install -e ."[test]"
+PYTHONPATH=src python -m pytest -q
+```
+
+Checkpoint stack (pinned for CI):
+
+- `langgraph-checkpoint-sqlite==3.0.0`
+- `langgraph-checkpoint-postgres==3.0.0`
+
+These versions are validated with AsyncPostgresSaver roundtrip tests; keep them in sync when upgrading LangGraph.
+
+This installs all async/test dependencies (pytest-asyncio, aiosqlite, langgraph checkpoint extras, openpyxl, graphql, simpleeval, reportlab, testcontainers) so the full suite runs without import errors. Use SQLite-only mode (no Postgres) with:
+
+```bash
+USE_SQLITE=true PYTHONPATH=src python -m pytest -q
+```
+
+All tests should pass, covering:
+- End-to-end dry-run workflow
+- Repository integration with file writing
+- Provider inference
+- Silver model extraction
+- Workflow creation
+- Policy attachment
+- Error handling
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Installation, database setup, LLM config, quick demo, production runbook |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture, LangGraph pipeline, Silver/Gold medallion model |
+| [`docs/CODE_TOUR.md`](docs/CODE_TOUR.md) | 60-90 minute codebase walkthrough for onboarding |
+
+For design decisions, see [`docs/decisions/`](docs/decisions/).
+
+Historical documentation (milestones, implementation plans, audits) is archived in [`docs/history/`](docs/history/).
+
+---
+
+## Features
+
+* Understand how each LangGraph node uses LLMs and RAG.
+* Safely change prompts, models, or retrieval settings.
+* Debug bad outputs with LangSmith traces.
 ---
 
 ## 1. Big Picture
@@ -103,6 +261,7 @@ Nodes load their “archetype” by name rather than embedding prompt strings di
 
 ## 3. Node Categories & Prompt Strategies
 
+<<<<<<< HEAD
 ### 3.1 Planning & reasoning nodes
 
 Nodes:
@@ -112,6 +271,9 @@ Nodes:
 * `align_task_with_kg`
 * `plan_integration_flow`
 * `attach_policies_and_patterns`
+=======
+## Development
+>>>>>>> origin/docs/slimdown-v1
 
 **Prompt style:**
 
