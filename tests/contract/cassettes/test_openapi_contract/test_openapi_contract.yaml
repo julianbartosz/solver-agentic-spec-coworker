@@ -1,0 +1,19 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+    method: GET
+    uri: http://127.0.0.1:4010/ping
+  response:
+    body:
+      string: '{"status": "ok"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+    http_version: HTTP/1.1
+version: 1

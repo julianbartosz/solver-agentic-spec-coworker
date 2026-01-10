@@ -1,0 +1,163 @@
+name: Nightly E2E (Live LLM)
+
+# Run nightly at 2 AM UTC
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      max_llm_calls:
+        description: "Maximum LLM API calls (budget cap)"
+        required: false
+        default: "50"
+        type: string
+      max_input_tokens:
+        description: "Maximum input tokens across all calls"
+        required: false
+        default: "500000"
+        type: string
+      max_output_tokens:
+        description: "Maximum output tokens across all calls"
+        required: false
+        default: "200000"
+        type: string
+
+env:
+  # Live LLM mode
+  USE_MOCK_LLM: "false"
+  ENABLE_LIVE_LLM_TESTS: "true"
+  
+  # Budget caps (from inputs or defaults)
+  LLM_MAX_CALLS: ${{ inputs.max_llm_calls || '50' }}
+  LLM_MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens || '500000' }}
+  LLM_MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens || '200000' }}
+
+jobs:
+  live-llm-e2e:
+    runs-on: ubuntu-latest
+    # Only run if we have the API key secret configured
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.ENABLE_NIGHTLY_LLM == 'true') }}
+    
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Set up Node.js (for TypeScript E2E)
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        pip install "testcontainers[postgresql]>=4.0.0"
+
+    - name: Verify Docker is available
+      run: |
+        docker --version
+        docker info
+
+    - name: Verify LLM API key is set
+      run: |
+        if [ -z "$OPENAI_API_KEY" ]; then
+          echo "::error::OPENAI_API_KEY secret is not set"
+          exit 1
+        fi
+        echo "✓ OPENAI_API_KEY is configured"
+
+    - name: Run Live LLM E2E tests with budget caps
+      run: |
+        # Run E2E tests with live LLM
+        # The LLM budget guard fixture will enforce caps
+        pytest tests/e2e -m "e2e and live_llm" -v \
+          --timeout=1800 \
+          --tb=short \
+          2>&1 | tee e2e-live-llm.log
+      env:
+        # Budget caps passed to tests via env vars
+        # Tests read these to configure LLMBudgetGuard
+        LLM_MAX_CALLS: ${{ env.LLM_MAX_CALLS }}
+        LLM_MAX_INPUT_TOKENS: ${{ env.LLM_MAX_INPUT_TOKENS }}
+        LLM_MAX_OUTPUT_TOKENS: ${{ env.LLM_MAX_OUTPUT_TOKENS }}
+
+    - name: Upload test logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: e2e-live-llm-logs
+        path: e2e-live-llm.log
+        retention-days: 7
+
+    - name: Report budget usage
+      if: always()
+      run: |
+        echo "## LLM Budget Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Limit | (Check test output for actuals) |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|----------------------------------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Max Calls | $LLM_MAX_CALLS | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| Max Input Tokens | $LLM_MAX_INPUT_TOKENS | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| Max Output Tokens | $LLM_MAX_OUTPUT_TOKENS | - |" >> $GITHUB_STEP_SUMMARY
+
+  notify-failure:
+    runs-on: ubuntu-latest
+    needs: live-llm-e2e
+    if: failure()
+    steps:
+    - name: Create failure issue
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const title = `Nightly Live LLM E2E Failed - ${new Date().toISOString().split('T')[0]}`;
+          const body = `
+          ## Nightly Live LLM E2E Test Failure
+          
+          The nightly E2E tests with live LLM failed.
+          
+          **Run:** ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}
+          
+          **Date:** ${new Date().toISOString()}
+          
+          Please investigate:
+          1. Check the test logs for specific failures
+          2. Verify API key is valid
+          3. Check if budget limits were exceeded
+          4. Review any LLM output quality issues
+          `;
+          
+          // Check if there's already an open issue with this title
+          const issues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'nightly-failure,automated'
+          });
+          
+          const existingIssue = issues.data.find(i => i.title.startsWith('Nightly Live LLM E2E Failed'));
+          
+          if (existingIssue) {
+            // Comment on existing issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              body: `Another failure occurred:\n\n${body}`
+            });
+          } else {
+            // Create new issue
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['nightly-failure', 'automated', 'e2e']
+            });
+          }

@@ -1,0 +1,89 @@
+openapi: 3.0.0
+info:
+  title: Mock Notifications API
+  version: 1.0.0
+  description: Simplified notifications API for testing multi-spec support
+
+servers:
+  - url: https://api.mocknotifications.example
+    description: Production server
+
+paths:
+  /v1/notifications:
+    post:
+      operationId: sendNotification
+      summary: Send a notification
+      tags:
+        - notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendNotificationRequest'
+      responses:
+        '200':
+          description: Notification sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+
+  /v1/notifications/{id}:
+    get:
+      operationId: getNotification
+      summary: Retrieve a notification
+      tags:
+        - notifications
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Notification ID
+      responses:
+        '200':
+          description: Notification retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+
+components:
+  schemas:
+    SendNotificationRequest:
+      type: object
+      required:
+        - recipient
+        - message
+      properties:
+        recipient:
+          type: string
+          description: Email or phone number
+        message:
+          type: string
+          description: Notification message content
+        channel:
+          type: string
+          enum: [email, sms, push]
+          default: email
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique notification identifier
+        status:
+          type: string
+          enum: [pending, sent, delivered, failed]
+        recipient:
+          type: string
+        message:
+          type: string
+        channel:
+          type: string
+        created:
+          type: integer
+          description: Unix timestamp

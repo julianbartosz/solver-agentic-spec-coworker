@@ -1,0 +1,84 @@
+{
+  "scenario": "scenario5_repo_integration",
+  "timestamp": "2025-11-30T21:45:30.749910",
+  "run_id": "30aa6096-d2c8-4bdb-bbf4-122b63813408",
+  "provider_code": "mock_payments",
+  "task": {
+    "task_slug": "create_checkout_session",
+    "description": "Create checkout session"
+  },
+  "code_artifacts": [
+    {
+      "artifact_type": "client",
+      "module_name": "mock_payments",
+      "has_content": true
+    },
+    {
+      "artifact_type": "flow",
+      "module_name": "mock_payments_create_checkout_session",
+      "has_content": true
+    },
+    {
+      "artifact_type": "test",
+      "module_name": "test_mock_payments_create_checkout_session",
+      "has_content": true
+    }
+  ],
+  "workflow_nodes": [
+    {
+      "key": "start",
+      "node_type": "start"
+    },
+    {
+      "key": "validate_input",
+      "node_type": "validation"
+    },
+    {
+      "key": "call_create",
+      "node_type": "api_call"
+    },
+    {
+      "key": "transform_response",
+      "node_type": "transform"
+    },
+    {
+      "key": "end",
+      "node_type": "end"
+    }
+  ],
+  "endpoint_bindings": [
+    {
+      "endpoint_path": null,
+      "endpoint_method": null,
+      "flow_node_key": "call_create"
+    }
+  ],
+  "endpoints_count": 2,
+  "schemas_count": 2,
+  "completed_steps": [
+    "plan_run",
+    "ingest_spec",
+    "detect_and_parse_spec",
+    "build_silver_api_model",
+    "embed_spec_chunks",
+    "persist_silver_checkpoint",
+    "understand_task",
+    "align_task_with_kg",
+    "plan_integration_flow",
+    "attach_policies_and_patterns",
+    "generate_code_and_tests",
+    "persist_gold_checkpoint",
+    "persist_kg_learning",
+    "attach_repo_context",
+    "analyze_repo_layout",
+    "apply_repo_integration_changes",
+    "validate_integration_design",
+    "handle_error",
+    "build_report",
+    "persist_run_outcome"
+  ],
+  "errors": [
+    "Warning: EndpointBinding for node 'call_create' has endpoint_id=None"
+  ],
+  "repo_root": "/var/folders/v2/0ztdfcmx26n6zmbjjy1_lq_w0000gn/T/demo_repo_q1jvlyd_"
+}

@@ -1,0 +1,98 @@
+/* Custom styling for Integration Co-Worker docs */
+
+/* Wider content area */
+.md-grid {
+  max-width: 1400px;
+}
+
+/* Custom code block styling */
+.md-typeset code {
+  background-color: var(--md-code-bg-color);
+  border-radius: 3px;
+}
+
+/* API reference styling */
+.doc-heading {
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  padding-bottom: 0.5em;
+}
+
+/* Admonition styling */
+.md-typeset .admonition.tip {
+  border-color: #4caf50;
+}
+
+.md-typeset .admonition.warning {
+  border-color: #ff9800;
+}
+
+.md-typeset .admonition.danger {
+  border-color: #f44336;
+}
+
+/* Table styling */
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--md-default-fg-color--lightest);
+}
+
+/* Navigation improvements */
+.md-nav__link {
+  font-size: 0.7rem;
+}
+
+/* Hero button styling */
+.md-button--primary {
+  background-color: var(--md-primary-fg-color);
+  border-color: var(--md-primary-fg-color);
+}
+
+.md-button--primary:hover {
+  background-color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+/* Code annotation styling */
+.md-typeset .md-annotation__index {
+  background-color: var(--md-primary-fg-color);
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+  text-align: center;
+  margin: 1em 0;
+}
+
+/* Terminal output styling */
+.md-typeset pre > code {
+  font-size: 0.85em;
+}
+
+/* Feature grid (for home page) */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.feature-card {
+  padding: 1.5rem;
+  border-radius: 8px;
+  background: var(--md-code-bg-color);
+}
+
+.feature-card h3 {
+  margin-top: 0;
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 76.1875em) {
+  .md-grid {
+    max-width: 100%;
+  }
+}

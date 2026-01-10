@@ -1,0 +1,207 @@
+{
+  "version": "1.0.0",
+  "description": "Curated high-quality API providers for spec discovery",
+  "last_updated": "2025-01-05",
+  "providers": [
+    {
+      "provider_key": "stripe.com:stripe",
+      "domain": "stripe.com",
+      "slug": "stripe",
+      "display_name": "Stripe API",
+      "description": "Complete payments platform for accepting payments, managing subscriptions, and handling financial transactions",
+      "homepage_url": "https://stripe.com/docs/api",
+      "quality_tier": "premium",
+      "categories": ["payments", "ecommerce"],
+      "aliases": ["stripe payments", "stripe checkout"],
+      "specs": [
+        {
+          "version": "2024-06-20",
+          "spec_url": "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.yaml",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "Stripe API"
+        }
+      ]
+    },
+    {
+      "provider_key": "twilio.com:twilio",
+      "domain": "twilio.com",
+      "slug": "twilio",
+      "display_name": "Twilio API",
+      "description": "Cloud communications platform for SMS, voice, video, and messaging",
+      "homepage_url": "https://www.twilio.com/docs",
+      "quality_tier": "premium",
+      "categories": ["messaging", "communication"],
+      "aliases": ["twilio sms", "twilio voice", "twilio messaging"],
+      "specs": [
+        {
+          "version": "v2010",
+          "spec_url": "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/yaml/twilio_api_v2010.yaml",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "Twilio API"
+        }
+      ]
+    },
+    {
+      "provider_key": "sendgrid.com:sendgrid",
+      "domain": "sendgrid.com",
+      "slug": "sendgrid",
+      "display_name": "SendGrid API",
+      "description": "Email delivery platform for transactional and marketing emails",
+      "homepage_url": "https://docs.sendgrid.com/api-reference",
+      "quality_tier": "premium",
+      "categories": ["messaging"],
+      "aliases": ["sendgrid email", "twilio sendgrid"],
+      "specs": [
+        {
+          "version": "v3",
+          "spec_url": "https://raw.githubusercontent.com/sendgrid/sendgrid-oai/main/oai.yaml",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "SendGrid API v3"
+        }
+      ]
+    },
+    {
+      "provider_key": "github.com:github",
+      "domain": "github.com",
+      "slug": "github",
+      "display_name": "GitHub REST API",
+      "description": "GitHub's REST API for managing repositories, issues, pull requests, and more",
+      "homepage_url": "https://docs.github.com/en/rest",
+      "quality_tier": "premium",
+      "categories": ["infrastructure"],
+      "aliases": ["github api", "github rest"],
+      "specs": [
+        {
+          "version": "2022-11-28",
+          "spec_url": "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml",
+          "spec_format": "openapi_3.1",
+          "is_preferred": true,
+          "title": "GitHub REST API"
+        }
+      ]
+    },
+    {
+      "provider_key": "openai.com:openai",
+      "domain": "openai.com",
+      "slug": "openai",
+      "display_name": "OpenAI API",
+      "description": "AI models API for GPT, DALL-E, Whisper, and embeddings",
+      "homepage_url": "https://platform.openai.com/docs/api-reference",
+      "quality_tier": "premium",
+      "categories": ["ai"],
+      "aliases": ["openai gpt", "chatgpt api", "gpt api"],
+      "specs": [
+        {
+          "version": "2.0.0",
+          "spec_url": "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "OpenAI API"
+        }
+      ]
+    },
+    {
+      "provider_key": "slack.com:slack",
+      "domain": "slack.com",
+      "slug": "slack",
+      "display_name": "Slack Web API",
+      "description": "Slack messaging platform API for building integrations and bots",
+      "homepage_url": "https://api.slack.com/methods",
+      "quality_tier": "premium",
+      "categories": ["messaging", "communication"],
+      "aliases": ["slack api", "slack bot"],
+      "specs": [
+        {
+          "version": "1.7.0",
+          "spec_url": "https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json",
+          "spec_format": "swagger_2",
+          "is_preferred": true,
+          "title": "Slack Web API"
+        }
+      ]
+    },
+    {
+      "provider_key": "petstore.swagger.io:petstore",
+      "domain": "petstore.swagger.io",
+      "slug": "petstore",
+      "display_name": "Swagger Petstore",
+      "description": "Sample API for testing and learning OpenAPI",
+      "homepage_url": "https://petstore.swagger.io",
+      "quality_tier": "standard",
+      "categories": [],
+      "aliases": ["swagger petstore", "openapi example"],
+      "specs": [
+        {
+          "version": "3.0",
+          "spec_url": "https://petstore3.swagger.io/api/v3/openapi.json",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "Swagger Petstore - OpenAPI 3.0"
+        }
+      ]
+    },
+    {
+      "provider_key": "mailchimp.com:mailchimp",
+      "domain": "mailchimp.com",
+      "slug": "mailchimp",
+      "display_name": "Mailchimp Marketing API",
+      "description": "Email marketing and automation platform API",
+      "homepage_url": "https://mailchimp.com/developer/marketing/api/",
+      "quality_tier": "premium",
+      "categories": ["messaging", "crm"],
+      "aliases": ["mailchimp email", "mailchimp marketing"],
+      "specs": [
+        {
+          "version": "3.0",
+          "spec_url": "https://api.mailchimp.com/schema/3.0/Swagger.json",
+          "spec_format": "swagger_2",
+          "is_preferred": true,
+          "title": "Mailchimp Marketing API"
+        }
+      ]
+    },
+    {
+      "provider_key": "shopify.com:shopify",
+      "domain": "shopify.com",
+      "slug": "shopify",
+      "display_name": "Shopify Admin API",
+      "description": "E-commerce platform API for managing stores, products, orders",
+      "homepage_url": "https://shopify.dev/docs/api/admin-rest",
+      "quality_tier": "premium",
+      "categories": ["ecommerce"],
+      "aliases": ["shopify api", "shopify store"],
+      "specs": [
+        {
+          "version": "2024-01",
+          "spec_url": "https://shopify.dev/admin-openapi.json",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "Shopify Admin REST API"
+        }
+      ]
+    },
+    {
+      "provider_key": "digitalocean.com:digitalocean",
+      "domain": "digitalocean.com",
+      "slug": "digitalocean",
+      "display_name": "DigitalOcean API",
+      "description": "Cloud infrastructure platform for droplets, Kubernetes, databases",
+      "homepage_url": "https://docs.digitalocean.com/reference/api/",
+      "quality_tier": "premium",
+      "categories": ["infrastructure"],
+      "aliases": ["digitalocean api", "do api"],
+      "specs": [
+        {
+          "version": "2.0",
+          "spec_url": "https://api-engineering.nyc3.cdn.digitaloceanspaces.com/spec-ci/DigitalOcean-public.v2.yaml",
+          "spec_format": "openapi_3.0",
+          "is_preferred": true,
+          "title": "DigitalOcean API"
+        }
+      ]
+    }
+  ]
+}

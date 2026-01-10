@@ -1,0 +1,518 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  merge_group:
+    # Required for GitHub Merge Queue - ensures CI runs on merge queue entries
+    # Without this, merges can bypass required checks
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      run_record:
+        description: "Run record-mode contract tests (opt-in)"
+        required: false
+        default: false
+        type: boolean
+      run_live:
+        description: "Run live integration tests (integration_live marker only, opt-in)"
+        required: false
+        default: false
+        type: boolean
+      run_prod_smoke:
+        description: "Run prod-smoke tests (real Postgres + LLM, secrets required)"
+        required: false
+        default: false
+        type: boolean
+      live_host_allowlist:
+        description: "Comma-separated host allowlist required for live profile"
+        required: false
+        default: ""
+
+env:
+  USE_MOCK_LLM: "true"
+  USE_SQLITE: "true"
+  VALIDATION_PROFILE: "offline"
+
+# ============================================================================
+# CI JOBS - Definition of Green
+# ============================================================================
+# Required for merge (always run):
+#   - lint              : ruff + bandit security scan
+#   - unit-fast         : Fast unit tests (<60s), no external deps
+#   - integration       : Tests with mocked DB/network
+#   - postgres-required : ALL @pytest.mark.postgres tests (real Postgres)
+#
+# Conditional (needs: unit-fast + integration):
+#   - e2e         : Docker + testcontainers Postgres
+#   - record      : Opt-in cassette refresh
+#   - live        : Opt-in with LIVE_HOST_ALLOWLIST
+#   - prod-smoke  : Opt-in, secrets-gated, real Postgres + LLM
+# ============================================================================
+
+jobs:
+  # --------------------------------------------------------------------------
+  # LINT: Static analysis gate (must pass before tests)
+  # --------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Lint with ruff
+      run: |
+        # ADR-0005: Ruff is now a HARD gate - CI fails on lint errors
+        ruff check src/integration_coworker tests
+
+    - name: Security scan with bandit
+      run: |
+        bandit -c pyproject.toml -r src tests
+
+  # --------------------------------------------------------------------------
+  # UNIT-FAST: Quick unit tests, no external dependencies (<60s target)
+  # --------------------------------------------------------------------------
+  unit-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    needs: lint
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Run fast unit tests
+      run: |
+        # Unit tests only - no integration, e2e, slow, or external markers
+        pytest tests/ \
+          -m "not (integration or integration_live or e2e or slow or docker or postgres)" \
+          --timeout=60 \
+          --durations=20 \
+          -x -q
+
+    - name: Upload test durations (py311 only)
+      if: matrix.python-version == '3.11'
+      uses: actions/upload-artifact@v4
+      with:
+        name: unit-fast-durations
+        path: .pytest_cache/v/cache/lastfailed
+        if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # INTEGRATION: Tests with mocked DB/network (validates wiring)
+  # --------------------------------------------------------------------------
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Run integration tests (mocked)
+      run: |
+        # Integration tests with mocked external deps
+        pytest tests/ \
+          -m "integration and not (integration_live or e2e or docker or postgres)" \
+          --timeout=300 \
+          --durations=20 \
+          --cov=src \
+          --cov-report=term-missing \
+          --cov-report=xml \
+          --cov-report=json:coverage.json \
+          --cov-fail-under=60 \
+          -x
+
+    - name: Generated module coverage gate (py311 only)
+      if: matrix.python-version == '3.11'
+      run: |
+        python scripts/check_generated_coverage.py --coverage-json coverage.json --prefix packages/integration-coworker-runtime --fail-under 60 --require-matches
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v4
+      if: matrix.python-version == '3.11'
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
+    - name: Upload test durations (py311 only)
+      if: matrix.python-version == '3.11'
+      uses: actions/upload-artifact@v4
+      with:
+        name: integration-durations
+        path: .pytest_cache/v/cache/lastfailed
+        if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # CORE-IMPORT-SAFETY: Verify core imports work without optional deps
+  # Tests that modules are import-safe when streamlit/ui extras not installed
+  # --------------------------------------------------------------------------
+  core-import-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install CORE dependencies only (no ui extra)
+      run: |
+        python -m pip install --upgrade pip
+        # Install base deps only, NO streamlit (non-editable for CI)
+        pip install ".[dev]"
+        # Verify streamlit is NOT installed
+        python -c "import sys; import importlib.util; assert importlib.util.find_spec('streamlit') is None, 'streamlit should not be installed'"
+
+    - name: Run import safety tests
+      run: |
+        # Test that ui modules are import-safe without streamlit
+        pytest tests/test_import_safety.py -v --timeout=60
+
+    - name: Verify CLI works without UI
+      run: |
+        # CLI should work without streamlit installed
+        python -m integration_coworker.cli --help
+        python -m integration_coworker.cli hitl-resume --help
+
+  # --------------------------------------------------------------------------
+  # POSTGRES-REQUIRED: Merge-blocking Postgres integration tests
+  # Runs ALL @pytest.mark.postgres tests with real Postgres service
+  # --------------------------------------------------------------------------
+  postgres-required:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    permissions:
+      contents: read
+    
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_coworker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test_user -d test_coworker"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_coworker
+      USE_MOCK_LLM: "true"
+      USE_SQLITE: "false"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        pip install psycopg2-binary pgvector langgraph-checkpoint-postgres
+
+    - name: Wait for Postgres to be ready
+      run: |
+        for i in {1..30}; do
+          pg_isready -h localhost -p 5432 -U test_user && break
+          echo "Waiting for postgres... ($i)"
+          sleep 1
+        done
+
+    - name: Initialize database schema
+      run: |
+        python scripts/init_db_postgres.py
+        psql $DATABASE_URL -f scripts/init-pgvector.sql || true
+
+    - name: Run ALL postgres-marked tests (merge-blocking)
+      run: |
+        # ADR-0010: ALL @pytest.mark.postgres tests MUST pass for merge
+        # This includes: interrupt/resume, human edits, checkpoint persistence
+        pytest tests/ \
+          -m "postgres" \
+          --timeout=300 \
+          --durations=20 \
+          -v \
+          -x
+
+    - name: Upload postgres test durations
+      uses: actions/upload-artifact@v4
+      with:
+        name: postgres-required-durations
+        path: .pytest_cache/v/cache/lastfailed
+        if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # UI-EXTRA: Tests with streamlit UI extra installed
+  # Validates UI components work correctly with streamlit present
+  # --------------------------------------------------------------------------
+  ui-extra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install with UI extra
+      run: |
+        python -m pip install --upgrade pip
+        # Install with ui extra (includes streamlit) - non-editable for CI
+        pip install ".[dev,ui]"
+        # Verify streamlit IS installed
+        python -c "import streamlit; print(f'streamlit version: {streamlit.__version__}')"
+
+    - name: Run UI tests
+      run: |
+        # Run review dialog tests (requires streamlit)
+        pytest tests/test_review_dialog.py tests/test_import_safety.py -v --timeout=120
+
+    - name: Verify import safety with streamlit present
+      run: |
+        # Import safety tests should also pass WITH streamlit installed
+        pytest tests/test_import_safety.py -v --timeout=60
+
+  # --------------------------------------------------------------------------
+  # RECORD: Opt-in cassette refresh (workflow_dispatch only)
+  # --------------------------------------------------------------------------
+  record:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_record == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [unit-fast, integration]
+    env:
+      USE_MOCK_LLM: "true"
+      USE_SQLITE: "true"
+      VALIDATION_PROFILE: "record"
+      ALLOW_RECORD: "1"
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies (python + prism)
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        npm install -g @stoplight/prism-cli
+
+    - name: Record contract tests (cassette refresh)
+      run: |
+        pytest tests/contract -v --record-mode=once --timeout=300
+
+  # --------------------------------------------------------------------------
+  # LIVE: Opt-in live integration tests (workflow_dispatch only)
+  # --------------------------------------------------------------------------
+  live:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_live == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit-fast, integration]
+    env:
+      USE_MOCK_LLM: "false"
+      USE_SQLITE: "false"
+      VALIDATION_PROFILE: "live"
+      ALLOW_LIVE: "1"
+      LIVE_HOST_ALLOWLIST: ${{ inputs.live_host_allowlist }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Validate LIVE_HOST_ALLOWLIST
+      run: |
+        if [ -z "${LIVE_HOST_ALLOWLIST}" ]; then
+          echo "LIVE_HOST_ALLOWLIST is required when run_live is true";
+          exit 1;
+        fi
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Run live tests (integration_live only)
+      run: |
+        pytest tests -m integration_live -v --record-mode=none --timeout=300
+
+  # --------------------------------------------------------------------------
+  # PROD-SMOKE: Real Postgres + LLM (opt-in, secrets-gated)
+  # --------------------------------------------------------------------------
+  prod-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_prod_smoke == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [unit-fast, integration]
+    env:
+      USE_MOCK_LLM: "false"
+      USE_SQLITE: "false"
+      VALIDATION_PROFILE: "live"
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        pip install "testcontainers[postgresql]>=4.0.0"
+
+    - name: Validate secrets available
+      run: |
+        # Secrets-gate: fail fast if required secrets missing
+        if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+          echo "::error::OPENAI_API_KEY secret required for prod-smoke"
+          exit 1
+        fi
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    - name: Run prod-smoke tests (real Postgres + LLM)
+      run: |
+        # Real Postgres via testcontainers + real LLM calls
+        pytest tests/ \
+          -m "prod_smoke or (integration and not integration_live)" \
+          --timeout=300 \
+          --durations=20 \
+          -v
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    - name: Upload prod-smoke durations
+      uses: actions/upload-artifact@v4
+      with:
+        name: prod-smoke-durations
+        path: .pytest_cache/v/cache/lastfailed
+        if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # E2E: Docker + testcontainers Postgres
+  # --------------------------------------------------------------------------
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit-fast, integration]
+    env:
+      USE_MOCK_LLM: "true"
+      # Postgres will be provided by testcontainers, not external service
+      # Tests that need Postgres use postgres_env fixture
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Set up Node.js (for TypeScript E2E fixtures)
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        # Install testcontainers with postgres extra for E2E
+        pip install "testcontainers[postgresql]>=4.0.0"
+
+    - name: Verify Docker is available
+      run: |
+        docker --version
+        docker info
+
+    - name: Run E2E tests (Docker + Postgres via testcontainers)
+      run: |
+        # Run E2E tests that require Docker
+        # Docker is available in ubuntu-latest runners
+        # Postgres is provided by testcontainers (not a service container)
+        pytest tests/e2e -m "e2e and docker" -v --timeout=600 \
+          --disable-socket --allow-unix-socket \
+          --durations=20
+
+    - name: Run E2E tests with Postgres persistence
+      run: |
+        # Run E2E tests that also need Postgres
+        # Uses testcontainers to spin up Postgres
+        pytest tests/e2e -m "e2e and docker and postgres" -v --timeout=600 \
+          --durations=20
+
+    - name: Upload e2e durations
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-durations
+        path: .pytest_cache/v/cache/lastfailed
+        if-no-files-found: ignore

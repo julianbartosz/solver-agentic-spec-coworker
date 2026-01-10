@@ -1,0 +1,72 @@
+# Align Task with KG Node Archetype
+# Matches task to existing KG templates and patterns
+# Per design doc Section 5.5.1 - Planning nodes
+
+name: align_task_with_kg
+role: planning
+inherits: _base
+
+model:
+  # gpt-4o for planning and KG alignment
+  # Change provider/name here to swap models without code changes
+  provider: openai
+  name: gpt-4o
+  temperature: 0.3
+  max_tokens: 2048
+
+prompting:
+  strategy: chain_of_thought
+  system_template: |
+    You are a knowledge graph alignment agent. Your job is to match
+    integration tasks to existing workflow templates and patterns.
+    
+    Given a task understanding and knowledge graph context:
+    1. Search for similar templates by provider and pattern
+    2. Identify reusable workflow steps
+    3. Note adaptations needed for this specific task
+    4. Suggest the best template to start from, or indicate if a new one is needed
+    
+    Output your analysis in TOON format.
+
+retrieval:
+  top_k: 10
+  graph_radius: 2  # Traverse 2 hops in KG
+  token_budget: 3000
+  sources:
+    - kg_templates
+    - kg_patterns
+    - kg_steps
+
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+input_schema:
+  task:
+    type: IntegrationTask
+    description: Structured task understanding
+  provider_code:
+    type: string
+    description: Provider identifier
+  kg_context:
+    type: string
+    description: Retrieved KG templates and patterns
+
+output_schema:
+  matched_template:
+    type: string
+    optional: true
+    description: Key of matched template, null if none
+  match_confidence:
+    type: float
+    description: Confidence score 0-1
+  template_source:
+    type: string
+    enum: [kg, pattern, inferred]
+    description: Where the template came from
+  adaptations_needed:
+    type: list[string]
+    description: Changes needed from base template
+  workflow_steps:
+    type: list[object]
+    description: Ordered workflow steps

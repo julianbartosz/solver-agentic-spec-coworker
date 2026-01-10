@@ -1,0 +1,6 @@
+sku|description|price|stock_level|category|is_active
+WIDGET-A|Standard Widget|25.99|150|Hardware|TRUE
+GADGET-B|Deluxe Gadget|45.50|75|Electronics|TRUE
+GIZMO-C|Premium Gizmo|199.00|25|Electronics|TRUE
+THINGAMAJIG-D|Basic Thingamajig|12.00|500|Hardware|FALSE
+DOOHICKEY-E|Super Doohickey|89.99|0|Tools|TRUE

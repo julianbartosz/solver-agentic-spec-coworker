@@ -1,0 +1,56 @@
+# Plan Run Node Archetype
+# Entry node that initializes the workflow
+# Per design doc Section 5.5.1 - Planning nodes
+
+name: plan_run
+role: planning
+inherits: _base
+
+model:
+  # gpt-4o for planning and workflow initialization
+  # Change provider/name here to swap models without code changes
+  provider: openai
+  name: gpt-4o
+  temperature: 0.2
+  max_tokens: 1024
+
+prompting:
+  strategy: chain_of_thought
+  system_template: |
+    You are a workflow planning agent for API integration design.
+    Analyze the incoming request and create an execution plan.
+    Think step by step about what needs to be accomplished.
+    
+    Output your response in TOON format (YAML-style key=value pairs).
+
+retrieval:
+  top_k: 3
+  graph_radius: 0
+  token_budget: 1500
+
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+input_schema:
+  spec_refs:
+    type: list[string]
+    description: List of spec URLs or paths
+  task_description:
+    type: string
+    description: Natural language task description
+  provider_code:
+    type: string
+    optional: true
+    description: Optional provider code override
+
+output_schema:
+  run_id:
+    type: string
+    description: Unique run identifier
+  provider_code:
+    type: string
+    description: Inferred or overridden provider code
+  execution_plan:
+    type: object
+    description: Ordered list of nodes to execute

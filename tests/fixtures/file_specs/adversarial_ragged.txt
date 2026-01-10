@@ -1,0 +1,6 @@
+# Ragged fixed-width file (varying line lengths)
+# This should NOT be detected as fixed-width due to inconsistent lengths
+ACCT0001SMITH     JOHN      19850315
+ACCT0002JONES     MARY      19900620SAVINGS   000025400500
+ACCT0003WILLIAMS  BOB       19751115CHECKING  000001234567ACTIVE20240115
+SHORT

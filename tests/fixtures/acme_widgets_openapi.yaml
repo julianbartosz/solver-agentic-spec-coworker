@@ -1,0 +1,183 @@
+openapi: "3.0.3"
+info:
+  title: Acme Widget API
+  version: "2.0.0"
+  description: |
+    The Acme Widget API provides endpoints for managing widgets.
+    This is a test fixture for dynamic provider inference.
+servers:
+  - url: https://api.acme.io/v2
+    description: Production server
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List all widgets
+      description: Returns a paginated list of widgets
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: A list of widgets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  widgets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Widget'
+                  total:
+                    type: integer
+    post:
+      operationId: createWidget
+      summary: Create a new widget
+      description: Creates a new widget with the specified properties
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWidgetRequest'
+      responses:
+        "201":
+          description: Widget created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+        "400":
+          description: Invalid request
+  /widgets/{widget_id}:
+    get:
+      operationId: getWidget
+      summary: Get a widget by ID
+      description: Returns a single widget by its ID
+      parameters:
+        - name: widget_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Widget found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+        "404":
+          description: Widget not found
+    patch:
+      operationId: updateWidget
+      summary: Update a widget
+      description: Updates an existing widget
+      parameters:
+        - name: widget_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWidgetRequest'
+      responses:
+        "200":
+          description: Widget updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+    delete:
+      operationId: deleteWidget
+      summary: Delete a widget
+      description: Deletes a widget by ID
+      parameters:
+        - name: widget_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Widget deleted
+        "404":
+          description: Widget not found
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        size:
+          type: string
+          enum: [small, medium, large]
+        color:
+          type: string
+        price_cents:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - size
+    CreateWidgetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        size:
+          type: string
+          enum: [small, medium, large]
+        color:
+          type: string
+        price_cents:
+          type: integer
+      required:
+        - name
+        - size
+    UpdateWidgetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        size:
+          type: string
+        color:
+          type: string
+        price_cents:
+          type: integer
+security:
+  - ApiKeyAuth: []

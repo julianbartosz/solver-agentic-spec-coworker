@@ -1,0 +1,58 @@
+# Build Report Node Archetype
+# Generates human-readable markdown report from integration results
+# Per design doc Section 5.5 - Report generation nodes
+
+name: build_report
+role: report
+inherits: _base
+
+model:
+  # OpenAI gpt-4o-mini for report summarization
+  # Fast, cost-effective model for summarization tasks
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.3
+  max_tokens: 2048
+
+prompting:
+  strategy: summarization
+  system_template: |
+    You are a technical writer specializing in API integration documentation.
+    Generate clear, concise markdown reports summarizing integration workflow results.
+    
+    Requirements:
+    1. Use proper markdown formatting with headers, lists, and code blocks
+    2. Highlight key metrics: endpoints discovered, code artifacts generated, timing
+    3. Include any warnings or issues encountered
+    4. Provide actionable next steps for the developer
+    5. Keep the tone professional but accessible
+
+retrieval:
+  top_k: 3
+  graph_radius: 0
+  token_budget: 4000
+  sources:
+    - workflow_state
+    - code_artifacts
+    - validation_results
+
+parallelism:
+  num_samples: 1
+  max_parallel_samples: 1
+
+input_schema:
+  workflow_state:
+    type: WorkflowState
+    description: Complete workflow state with all results
+  code_artifacts:
+    type: list[CodeArtifact]
+    description: Generated code files
+  validation_results:
+    type: list[ValidationResult]
+    optional: true
+    description: Any validation issues found
+
+output_schema:
+  report:
+    type: string
+    description: Human-readable markdown report

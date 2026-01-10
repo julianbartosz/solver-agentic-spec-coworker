@@ -1,0 +1,42 @@
+{
+  "artifacts": [
+    {
+      "__artifact_ref__": true,
+      "run_id": "test-run-123",
+      "key": "static_analysis_result",
+      "uri": "file:///Users/julianbartosz/git/repos/solver-agentic-spec-coworker/.artifacts/test-run-123/static_analysis_result-b58ae264bd0d5892.json.gz",
+      "sha256": "b58ae264bd0d5892b22912438e4eb14083b070f7cb83d86c76dfd04781beb6da",
+      "size_bytes": 326,
+      "content_type": "application/json",
+      "codec": "json",
+      "created_at": "2026-01-04T04:14:33.357202+00:00",
+      "metadata": {}
+    },
+    {
+      "__artifact_ref__": true,
+      "run_id": "test-run-123",
+      "key": "review_pre_write_snapshot",
+      "uri": "file:///Users/julianbartosz/git/repos/solver-agentic-spec-coworker/.artifacts/test-run-123/review_pre_write_snapshot-ab730ed235d03278.json.gz",
+      "sha256": "ab730ed235d0327832cb40784d9dac71420db0b0cea367cf4a3b964a67ad6540",
+      "size_bytes": 197,
+      "content_type": "application/json",
+      "codec": "json",
+      "created_at": "2026-01-05T21:08:38.639036+00:00",
+      "metadata": {}
+    },
+    {
+      "__artifact_ref__": true,
+      "run_id": "test-run-123",
+      "key": "review_pre_write_diff_patches",
+      "uri": "file:///Users/julianbartosz/git/repos/solver-agentic-spec-coworker/.artifacts/test-run-123/review_pre_write_diff_patches-3557724f8e957d1a.json.gz",
+      "sha256": "3557724f8e957d1ae6f4bcb630dd89b1cc10d571a372bf554dec5fa2fe1bef4d",
+      "size_bytes": 246,
+      "content_type": "application/json",
+      "codec": "json",
+      "created_at": "2026-01-05T21:08:38.641430+00:00",
+      "metadata": {}
+    }
+  ],
+  "created_at": "2026-01-04T04:14:43.469028+00:00",
+  "updated_at": "2026-01-05T21:08:38.642786+00:00"
+}

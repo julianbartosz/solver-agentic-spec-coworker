@@ -1,0 +1,192 @@
+openapi: 3.0.0
+info:
+  title: JSONPlaceholder API
+  version: 1.0.0
+  description: Fake REST API for testing and prototyping
+
+servers:
+  - url: https://jsonplaceholder.typicode.com
+    description: JSONPlaceholder
+
+# No authentication required
+security: []
+
+paths:
+  /posts:
+    get:
+      operationId: listPosts
+      summary: List all posts
+      tags:
+        - posts
+      parameters:
+        - name: userId
+          in: query
+          description: Filter by user ID
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A list of posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Post'
+    
+    post:
+      operationId: createPost
+      summary: Create a new post
+      tags:
+        - posts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+      responses:
+        '201':
+          description: Post created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+
+  /posts/{id}:
+    get:
+      operationId: getPostById
+      summary: Get a post by ID
+      tags:
+        - posts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID
+      responses:
+        '200':
+          description: Post details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+        '404':
+          description: Post not found
+    
+    put:
+      operationId: updatePost
+      summary: Update a post
+      tags:
+        - posts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+      responses:
+        '200':
+          description: Post updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+    
+    delete:
+      operationId: deletePost
+      summary: Delete a post
+      tags:
+        - posts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Post deleted
+
+  /posts/{id}/comments:
+    get:
+      operationId: getPostComments
+      summary: Get comments for a post
+      tags:
+        - comments
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID
+      responses:
+        '200':
+          description: List of comments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Comment'
+
+components:
+  schemas:
+    Post:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        userId:
+          type: integer
+          example: 1
+        title:
+          type: string
+          example: sunt aut facere repellat provident
+        body:
+          type: string
+          example: quia et suscipit
+
+    CreatePostRequest:
+      type: object
+      required:
+        - title
+        - body
+        - userId
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+        userId:
+          type: integer
+
+    Comment:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        postId:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: id labore ex et quam laborum
+        email:
+          type: string
+          format: email
+          example: Eliseo@gardner.biz
+        body:
+          type: string

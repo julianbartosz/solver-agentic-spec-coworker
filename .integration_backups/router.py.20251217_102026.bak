@@ -1,0 +1,14 @@
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+# BEGIN AUTO-GENERATED INTEGRATION ROUTES
+from workflows.twilio_messaging_v1_list_message_services import list_message_services_flow as flow_module
+
+router.include_router(
+    flow_module.router if hasattr(flow_module, 'router') else APIRouter(),
+    prefix="/integrations/twilio_messaging_v1/list_message_services",
+    tags=["twilio_messaging_v1"],
+)
+# END AUTO-GENERATED INTEGRATION ROUTES

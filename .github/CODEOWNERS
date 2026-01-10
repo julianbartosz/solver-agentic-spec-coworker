@@ -1,0 +1,28 @@
+# CODEOWNERS - GitHub auto-assigns reviewers based on file paths
+# See: https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything
+* @julianbartosz
+
+# Documentation
+/docs/ @julianbartosz
+/mkdocs.yml @julianbartosz
+/*.md @julianbartosz
+
+# Core runtime and graph engine
+/src/integration_coworker/graph/ @julianbartosz
+/src/integration_coworker/persistence/ @julianbartosz
+/src/integration_coworker/llm/ @julianbartosz
+
+# Code generation and repo integration
+/src/integration_coworker/codegen/ @julianbartosz
+/src/integration_coworker/repo/ @julianbartosz
+
+# CI, release, and infrastructure
+/.github/workflows/ @julianbartosz
+/Dockerfile @julianbartosz
+/docker-compose*.yml @julianbartosz
+/pyproject.toml @julianbartosz
+
+# Tests
+/tests/ @julianbartosz

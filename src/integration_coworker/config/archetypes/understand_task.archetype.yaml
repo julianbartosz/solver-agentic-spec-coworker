@@ -1,0 +1,79 @@
+# Understand Task Node Archetype
+# Analyzes task description and extracts structured understanding
+# Per design doc Section 5.5.1 - Planning nodes
+
+name: understand_task
+role: planning
+inherits: _base
+
+model:
+  # gpt-4o for planning and reasoning tasks
+  # Change provider/name here to swap models without code changes
+  provider: openai
+  name: gpt-4o
+  temperature: 0.2
+  max_tokens: 2048
+
+prompting:
+  strategy: chain_of_thought
+  num_samples: 2
+  selector: quality  # Select best sample by quality evaluation
+  system_template: |
+    You are an API integration analyst. Your job is to deeply understand
+    integration tasks and extract structured requirements.
+    
+    Analyze the task description in the context of the API specification.
+    Think through:
+    1. What entities are involved (inputs and outputs)?
+    2. What operations/endpoints are needed?
+    3. What constraints apply (idempotency, webhooks, ordering)?
+    4. What's the expected data flow?
+    
+    Output your analysis in TOON format.
+
+retrieval:
+  top_k: 8
+  graph_radius: 1
+  token_budget: 3000
+  sources:
+    - spec_chunks
+    - kg_templates
+
+parallelism:
+  num_samples: 2
+  max_parallel_samples: 2
+
+input_schema:
+  task_description:
+    type: string
+    description: Natural language task description
+  provider_code:
+    type: string
+    description: Provider identifier
+  spec_context:
+    type: string
+    description: Relevant spec excerpts
+
+output_schema:
+  task_slug:
+    type: string
+    description: Machine-readable task identifier (snake_case)
+  input_entities:
+    type: list[string]
+    description: Entities consumed by the task
+  output_entities:
+    type: list[string]
+    description: Entities produced by the task
+  constraints:
+    type: object
+    description: Task constraints and requirements
+    properties:
+      idempotency_required:
+        type: boolean
+      requires_webhooks:
+        type: boolean
+      ordering_sensitive:
+        type: boolean
+  target_operations:
+    type: list[string]
+    description: API operations needed

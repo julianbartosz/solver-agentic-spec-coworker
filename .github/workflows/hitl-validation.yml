@@ -1,0 +1,295 @@
+# ----------------------------------------------------------------------------
+# HITL Production Validation Workflow
+#
+# Validates durable execution contract against Postgres:
+# - Checkpoint persistence via PostgresSaver
+# - Interrupt/resume across process boundaries
+# - Artifact roundtrip (refs-not-blobs discipline)
+# - CLI hitl-resume path
+#
+# Per ADR-HITL-ENHANCEMENT-v2 Task F: Postgres tests are MANDATORY.
+# This workflow fails (not skips) if Postgres is unavailable.
+#
+# References:
+# - https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/wait-user-input/
+# - https://docs.langchain.com/oss/python/langgraph/durable-execution
+# ----------------------------------------------------------------------------
+name: HITL Production Validation
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/integration_coworker/graph/**'
+      - 'src/integration_coworker/persistence/**'
+      - 'src/integration_coworker/cli.py'
+      - 'src/integration_coworker/api/recovery.py'
+      - 'scripts/validate_hitl_production.py'
+      - 'tests/test_quality_signals_core.py'
+      - 'tests/test_static_analysis_gate.py'
+      - 'tests/test_sandbox_attribution.py'
+      - 'tests/test_production_guardrails.py'
+      - 'tests/test_import_safety.py'
+      - 'tests/test_state_schema_drift.py'
+      - 'tests/test_state_contracts.py'
+      - '.github/workflows/hitl-validation.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/integration_coworker/graph/**'
+      - 'src/integration_coworker/persistence/**'
+      - 'src/integration_coworker/cli.py'
+      - 'src/integration_coworker/api/recovery.py'
+      - 'scripts/validate_hitl_production.py'
+      - 'tests/test_quality_signals_core.py'
+      - 'tests/test_static_analysis_gate.py'
+      - 'tests/test_sandbox_attribution.py'
+      - 'tests/test_production_guardrails.py'
+      - 'tests/test_import_safety.py'
+      - 'tests/test_state_schema_drift.py'
+      - 'tests/test_state_contracts.py'
+      - '.github/workflows/hitl-validation.yml'
+  workflow_dispatch:
+    inputs:
+      run_llm_tests:
+        description: 'Run real LLM tests (costs money)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  # --------------------------------------------------------------------------
+  # POSTGRES-MANDATORY: Durable execution validation against Postgres
+  # --------------------------------------------------------------------------
+  postgres-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Postgres service container
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: icw_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: icw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # DATABASE_URL is REQUIRED - validation script will FAIL if missing
+      DATABASE_URL: postgresql://icw_test:test_password@localhost:5432/icw_test
+      # No live LLM by default (opt-in via workflow_dispatch)
+      IC_ALLOW_LIVE_LLM: "0"
+      # Use SQLite for non-critical tests, Postgres for durable execution tests
+      USE_SQLITE: "false"
+      # Mock LLM for unit tests
+      USE_MOCK_LLM: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (non-editable for CI)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+          # Install psycopg for Postgres
+          pip install "psycopg[binary]>=3.1.0"
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U icw_test && break
+            echo "Waiting for Postgres... ($i/30)"
+            sleep 1
+          done
+
+      - name: Verify Postgres connection
+        run: |
+          python -c "
+          import os
+          import psycopg
+          url = os.environ['DATABASE_URL']
+          with psycopg.connect(url) as conn:
+              with conn.cursor() as cur:
+                  cur.execute('SELECT version()')
+                  print(f'Postgres: {cur.fetchone()[0]}')
+          "
+
+      - name: Run HITL production validation (Postgres-mandatory)
+        run: |
+          python scripts/validate_hitl_production.py --postgres-only --verbose
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hitl-validation-report
+          path: logs/validate-hitl-prod/
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # UNIT TESTS: Tests that don't require Postgres
+  # --------------------------------------------------------------------------
+  unit-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (non-editable for CI)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      # PR #9: Guardrails contract enforcement (grep-based, fast)
+      - name: Enforce guardrails contract (no duplicate constants)
+        run: |
+          echo "Checking for guardrail constants outside production_guardrails.py..."
+          
+          # Guardrail constants that MUST only be in production_guardrails.py
+          # If someone defines these elsewhere, this step fails
+          FORBIDDEN_PATTERNS=(
+            "^MAX_HINT_LENGTH\s*="
+            "^MAX_FIX_HINTS\s*="
+            "^MAX_FILE_PATH_LENGTH\s*="
+            "^MAX_EVIDENCE_BYTES\s*="
+            "^MAX_EVIDENCE_LINES\s*="
+            "^MAX_STACK_FRAMES\s*="
+            "^MAX_ATTRIBUTIONS\s*="
+            "^MAX_ATTRIBUTIONS_IN_STATE\s*="
+            "^TOOL_TIMEOUT_SECONDS\s*="
+            "^MAX_TOOL_OUTPUT_BYTES\s*="
+            "^MAX_TOOL_OUTPUT_LINES\s*="
+          )
+          
+          # Files to check (graph modules that should import, not define)
+          CHECK_FILES=(
+            "src/integration_coworker/graph/quality_models.py"
+            "src/integration_coworker/graph/sandbox_attribution.py"
+            "src/integration_coworker/graph/review_artifacts.py"
+            "src/integration_coworker/graph/nodes/sandbox_attribution_gate.py"
+          )
+          
+          violations=""
+          for file in "${CHECK_FILES[@]}"; do
+            if [ -f "$file" ]; then
+              for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+                if grep -E "$pattern" "$file" > /dev/null 2>&1; then
+                  violations+="$file: defines $(echo $pattern | sed 's/\\s.*//; s/\^//')\n"
+                fi
+              done
+            fi
+          done
+          
+          if [ -n "$violations" ]; then
+            echo "❌ Guardrail constant violations found:"
+            echo -e "$violations"
+            echo ""
+            echo "These constants must be imported from production_guardrails.py, not defined locally."
+            exit 1
+          fi
+          
+          echo "✅ Guardrails contract: all constants imported from single source of truth"
+
+      - name: Run artifact-ref-roundtrip test (no Postgres needed)
+        run: |
+          python scripts/validate_hitl_production.py --test artifact-ref-roundtrip --verbose
+
+      - name: Run payload-size test (no Postgres needed)
+        run: |
+          python scripts/validate_hitl_production.py --test payload-size --verbose
+
+      # PR #7/8/9: Quality signals + static analysis + sandbox attribution + production guardrails tests (no Postgres, no LLM, no optional tools)
+      - name: Run quality signals + static analysis + sandbox attribution + production guardrails tests
+        run: |
+          python -m pytest \
+            tests/test_quality_signals_core.py \
+            tests/test_static_analysis_gate.py \
+            tests/test_sandbox_attribution.py \
+            tests/test_production_guardrails.py \
+            tests/test_import_safety.py \
+            tests/test_state_schema_drift.py \
+            tests/test_state_contracts.py \
+            -v --tb=short
+        env:
+          USE_MOCK_LLM: "true"
+          USE_SQLITE: "true"
+
+  # --------------------------------------------------------------------------
+  # REAL LLM TESTS: Opt-in via workflow_dispatch (costs money)
+  # --------------------------------------------------------------------------
+  real-llm-validation:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: icw_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: icw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://icw_test:test_password@localhost:5432/icw_test
+      IC_ALLOW_LIVE_LLM: "1"
+      IC_LLM_TOKEN_LIMIT: "10000"
+      IC_LLM_COST_LIMIT_USD: "0.50"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+          pip install "psycopg[binary]>=3.1.0"
+
+      - name: Run full validation with real LLM
+        run: |
+          python scripts/validate_hitl_production.py --all --verbose
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hitl-llm-validation-report
+          path: logs/validate-hitl-prod/
+          retention-days: 30

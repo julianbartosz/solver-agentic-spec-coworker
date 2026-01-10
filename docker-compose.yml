@@ -1,0 +1,45 @@
+# Docker Compose configuration for Integration Co-Worker development
+# See docs/GETTING_STARTED.md for full setup instructions
+#
+# NOTE: Postgres binds to host port 15432 (not 5432) to avoid conflicts
+# with local Postgres installations. Update DATABASE_URL accordingly.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: integration-coworker-db
+    environment:
+      POSTGRES_USER: integration
+      POSTGRES_PASSWORD: integration
+      POSTGRES_DB: integration_coworker
+    ports:
+      # Use non-standard host port to avoid conflicts with local Postgres
+      - "${DB_HOST_PORT:-15432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis cache for LLM responses (Plan 7)
+  redis:
+    image: redis:7-alpine
+    container_name: integration-coworker-redis
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+volumes:
+  pgdata:
+  redisdata:

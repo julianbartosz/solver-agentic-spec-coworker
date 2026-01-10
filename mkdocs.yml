@@ -1,0 +1,178 @@
+# Project information
+site_name: Integration Co-Worker
+site_description: Agentic API Integration Designer & Code Generator
+site_author: Julian Bartosz
+site_url: https://julianbartosz.github.io/solver-agentic-spec-coworker/
+
+# Repository
+repo_name: solver-agentic-spec-coworker
+repo_url: https://github.com/julianbartosz/solver-agentic-spec-coworker
+
+# Copyright
+copyright: Copyright &copy; 2024 Julian Bartosz
+
+# Exclude archived docs from build validation (history/ has stale internal links)
+# These files are preserved for reference but not actively maintained
+exclude_docs: |
+  history/
+
+# Theme
+theme:
+  name: material
+  language: en
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+# Plugins
+plugins:
+  - search:
+      separator: '[\s\-\_\.]+'
+  - autorefs:
+      link_titles: auto
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            paths:
+              - src
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            members_order: source
+  - mermaid_fence_resolver
+  - redirects:
+      redirect_maps:
+        # Legacy URL redirects
+        'CODE_TOUR.md': 'development/code-tour.md'
+        'db_setup_postgres.md': 'operations/db-postgres.md'
+        'AZURE_DEPLOYMENT.md': 'operations/deployment.md'
+        'DEPLOYMENT_PLAN.md': 'operations/deployment.md'
+        'DISTRIBUTION_STRATEGY.md': 'operations/deployment.md'
+        # Moved to history - redirect to canonical equivalents
+        'ARCHITECTURE.md': 'development/architecture.md'
+        'QUICKSTART.md': 'getting-started/quickstart.md'
+        'MANUAL_TESTING_GUIDE.md': 'development/testing.md'
+        'GETTING_STARTED.md': 'getting-started/installation.md'
+
+# Extensions
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: "pymdownx.superfences.fence_code_format"
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - tables
+
+# Navigation (Diátaxis: Tutorials / How-to / Reference / Explanation)
+nav:
+  - Home: index.md
+  - Roadmap: ROADMAP.md
+
+  # TUTORIALS - Getting started, guided walkthroughs
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+    - Live Fire Demo: LIVE_FIRE_DEMO_GUIDE.md
+
+  # HOW-TO - Operations, runbooks, task-oriented
+  - Operations:
+    - Overview: operations/index.md
+    - Runbook: operations/RUNBOOK.md
+    - Postgres + pgvector: operations/db-postgres.md
+    - Deployment: operations/deployment.md
+    - Validation: operations/validation.md
+    - Validation Profiles: validation_profiles.md
+    - First Week: operations/FIRST_WEEK.md
+    - Ownership & Access: operations/OWNERSHIP_AND_ACCESS.md
+
+  # REFERENCE - CLI, API, types
+  - User Guide:
+    - CLI Reference: user-guide/cli-reference.md
+    - Web UI: user-guide/web-ui.md
+    - Supported Specs: user-guide/specs.md
+    - Workflows: user-guide/workflows.md
+  - API Reference:
+    - Entrypoint: api-reference/entrypoint.md
+    - Types: api-reference/types.md
+    - WorkflowState: api-reference/workflow-state.md
+
+  # EXPLANATION - Architecture, design rationale, features
+  - Features:
+    - Knowledge Graph: features/knowledge-graph.md
+    - LLM Cache: features/llm-cache.md
+    - Parallel Execution: features/parallel-execution.md
+    - Recovery: features/recovery.md
+  - Development:
+    - Architecture: development/architecture.md
+    - Code Tour: development/code-tour.md
+    - Contributing: development/contributing.md
+    - Testing: development/testing.md
+    - Changelog: development/changelog.md
+    - Dependency bumps: development/dependency_bumps.md
+    - Docs tooling: development/docs_tooling.md
+    - Maintenance: development/maintenance.md
+  - Decisions:
+    - Tech debt register: decisions/TECHNICAL_DEBT_REGISTER.md
+    - Feedback learning: decisions/FEEDBACK_LEARNING_IMPLEMENTATION.md
+    - ADR 0001: decisions/adr-0001-initial-architecture.md
+    - ADR 0002: decisions/adr-0002-repo-aware-integration-config-first.md
+    - ADR 0003: decisions/adr-0003-template-first-code-generation.md
+    - ADR 0004: decisions/adr-0004-hybrid-graphrag-scoring-strategy.md
+    - ADR 0005: decisions/adr-0005-policy-injection-strategy.md
+    - ADR 0006: decisions/adr-0006-medallion-data-architecture.md
+    - ADR 0007: decisions/adr-0007-single-db-writer-pattern.md
+    - ADR 0008: decisions/adr-0008-provider-inference-strategy.md
+    - ADR 0009: decisions/adr-0009-workflow-recovery-strategy.md
+
+  # Note: docs/history/ contains archived docs but is excluded from build via exclude_docs
+
+# Extra
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/julianbartosz
+
+extra_css:
+  - stylesheets/extra.css
